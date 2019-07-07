@@ -17,16 +17,16 @@ options=""
 
 options="$options --config=opt"
 options="$options --config=rocm"
-options="$options --action_env=HIP_PLATFORM=hcc"
+# options="$options --action_env=HIP_PLATFORM=hcc"
 # options="$options --config=cuda"
 # options="$options --config=monolithic"
 
 
 options="$options --test_sharding_strategy=disabled"
-options="$options --test_timeout 600,900,2400,7200"
+options="$options --test_timeout 600,9000,2400,7200"
 options="$options --cache_test_results=no"
 options="$options --flaky_test_attempts=1"
-# options="$options --test_output=all"
+# options="$options --test_output="
 
 # options="$options --test_env=MIOPEN_ENABLE_LOGGING=1"
 # options="$options --test_env=MIOPEN_ENABLE_LOGGING_CMD=1"
@@ -48,10 +48,19 @@ options="$options --flaky_test_attempts=1"
 # options="$options --test_env=HCC_DB=0x48a"
 # options="$options --test_env=HIP_TRACE_API=2"
 
+# options="$options --test_env=HIP_LAUNCH_BLOCKING=1"
+
 # options="$options --test_env=TF_CPP_MIN_LOG_LEVEL=1"
 # options="$options --test_env=TF_CPP_MIN_VLOG_LEVEL=3"
-# options="$options --test_env=TF_ROCM_FUSION_ENABLE=1"
 # options="$options --test_env=XLA_FLAGS=\"--xla_dump_optimized_hlo_proto_to=/common/LOGS/\""
+
+# options="$options --test_env=TF_ROCM_FUSION_ENABLE=1"
+
+# options="$options --test_env=HSA_TOOLS_LIB=\"librocr_debug_agent64.so\""
+# options="$options --test_env=LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib"
+# options="$options --test_env=PATH=$PATH:/opt/rocm/hcc/bin"
+
+# options="$options --test_env=HSAKMT_DEBUG_LEVEL=7"
 
 # options="$options --test_env=LD_DEBUG=all"
 
@@ -97,6 +106,7 @@ if [[ ! -z $testlist ]]; then
 fi
 
 if [[ ! -z $all_tests ]]; then
+    rm -rf /tmp/amdgpu_xla-*
     bazel test $options $all_tests
 else
     echo "no testcase specified"

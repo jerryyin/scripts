@@ -12,12 +12,12 @@
 #docker_image=whchung/hiptensorflow:rocm2.1-tf1.12-python3-dynamic-load-dev
 
 #docker_image=rocm/tensorflow:rocm2.1-tf1.12-python3-dev
+#docker_image=rocm/eigen-test:rocm-2.4
 
-# docker_image=devenamd/tensorflow:rocm23_190417
+#docker_image=devenamd/tensorflow:rocm24_190509
+docker_image=rocm/tensorflow-autobuilds:dev-latest
 
-docker_image=sunway513/rocm-dev:rocm2.3-tf-dev-debug-8902cc
-
-container_name=deven_rocm23_peng_xla_benchmark
+container_name=deven_rocm24_tf_miopen_immediate_mode_2
 
 docker run \
        -it \
