@@ -26,11 +26,28 @@ def watch_mem_usage():
     print("-------"*len(membanks))
 
     # usage
-    while True:
-        for usage in get_mem_usage(membanks):
-            print("{:5.2f}  ".format(usage/(1024*1024)), end="")
-        print("")    
-        time.sleep(1)
+    N = len(membanks)
+    max_mem = [0] * N
+    
+    try :
+        while True:
+            for i,usage in enumerate(get_mem_usage(membanks)):
+                print("{:5.2f}  ".format(usage/(1024*1024)), end="")
+                if max_mem[i] < usage:
+                    max_mem[i] = usage
+            print("")    
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+    # print stats
+    print("")
+    print("-------"*len(membanks))
+    print("max memory usage")
+    print("-------"*len(membanks))
+    for m in max_mem:
+        print("{:5.2f}  ".format(m/(1024*1024)), end="")
+    print("")    
 
 watch_mem_usage()
                        

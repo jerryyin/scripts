@@ -15,15 +15,17 @@ export TF_GPU_COUNT=${N_GPUS}
 
 options=""
 
-options="$options --config=opt"
+# options="$options --config=opt"
 options="$options --config=rocm"
 # options="$options --action_env=HIP_PLATFORM=hcc"
 # options="$options --config=cuda"
 # options="$options --config=monolithic"
 
 
+# options="$options --subcommands"
+
 options="$options --test_sharding_strategy=disabled"
-options="$options --test_timeout 600,9000,2400,7200"
+options="$options --test_timeout 600,900,2400,7200"
 options="$options --cache_test_results=no"
 options="$options --flaky_test_attempts=1"
 # options="$options --test_output="
@@ -41,12 +43,20 @@ options="$options --flaky_test_attempts=1"
 # options="$options --test_env=ROCBLAS_LAYER=3"
 
 # options="$options --test_env=HIP_HIDDEN_FREE_MEM=500"
-
-# options="$options --test_env=KMDUMPISA=1"
-# options="$options --test_env=KMDUMPLLVM=1"
+# options="$options --test_env=HIP_TRACE_API=1"
+# options="$options --test_env=HIP_DB=api+mem+copy"
+# options="$options --test_env=HIP_LAUNCH_BLOCKING=1"
+# options="$options --test_env=HIP_API_BLOCKING=1"
+# options="$options --test_env=HIP_LAUNCH_BLOCKING_KERNELS=kernel1,kernel2,... "
 
 # options="$options --test_env=HCC_DB=0x48a"
-# options="$options --test_env=HIP_TRACE_API=2"
+# options="$options --test_env=HCC_SERIALIZE_KERNEL=3"
+# options="$options --test_env=HCC_SERIALIZE_COPY=3"
+# options="$options --test_env=HCC_PROFILE=2"
+
+# options="$options --action_env=KMDUMPISA=1"
+# options="$options --action_env=KMDUMPLLVM=1"
+
 
 # options="$options --test_env=HIP_LAUNCH_BLOCKING=1"
 
@@ -55,6 +65,12 @@ options="$options --flaky_test_attempts=1"
 # options="$options --test_env=XLA_FLAGS=\"--xla_dump_optimized_hlo_proto_to=/common/LOGS/\""
 
 # options="$options --test_env=TF_ROCM_FUSION_ENABLE=1"
+# options="$options --test_env=TF_ROCM_RETURN_BEST_ALGO_ONLY=1"
+# options="$options --test_env=TF_ROCM_USE_BFLOAT16_FOR_CONV=1"
+# options="$options --test_env=TF_ROCM_USE_IMMEDIATE_MODE=1"
+
+# options="$options --test_env=TF_GPU_ALLOCATOR=memory_guard"
+
 
 # options="$options --test_env=HSA_TOOLS_LIB=\"librocr_debug_agent64.so\""
 # options="$options --test_env=LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib"
@@ -77,8 +93,15 @@ while (( $# )); do
 
     if [ $1 == "-xla" ]; then
 	options="$options --config=xla"
+    elif [ $1 == "-v1" ]; then
+	options="$options --config=v1"
+	# options="$options --define=tf_api_version=1"
+	# options="$options --test_env=TF2_BEHAVIOR=0"
     elif [ $1 == "-v2" ]; then
 	options="$options --config=v2"
+	# options="$options --define=tf_api_version=2"
+	options="$options --test_env=TF2_BEHAVIOR=1"
+	options="$options --test_tag_filters=-v1only"
     elif [ $1 == "-dbg" ]; then
 	options="$options --compilation_mode=dbg"
     elif [ $1 == "-f" ]; then
@@ -106,7 +129,7 @@ if [[ ! -z $testlist ]]; then
 fi
 
 if [[ ! -z $all_tests ]]; then
-    rm -rf /tmp/amdgpu_xla-*
+    rm -rf /tmp/amdgpu_xla*
     bazel test $options $all_tests
 else
     echo "no testcase specified"

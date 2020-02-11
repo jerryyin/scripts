@@ -1,14 +1,14 @@
 SUDO=
 # SUDO=sudo
 
-$SUDO apt-get update && apt-get install -y emacs24-nox
+$SUDO apt-get update && $SUDO apt-get install -y emacs24-nox
 
 # $SUDO apt-get remove emacs24 emacs24-nox
 
 # $SUDO add-apt-repository ppa:kelleyk/emacs
 # $SUDO apt-get update && $SUDO apt-get install -y emacs26-nox
 
-$SUDO cd $HOME && rm -rf .emacs.d && git clone https://github.com/deven-amd/.emacs.d.git
+cd $HOME && rm -rf .emacs.d && git clone https://github.com/deven-amd/.emacs.d.git
 
 # EMACS_TARBALL=emacs-26.1.tar.gz
 # EMACS_DOWNLOAD_URL=https://ftp.gnu.org/gnu/emacs/$EMACS_TARBALL

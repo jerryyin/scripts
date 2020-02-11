@@ -1,50 +1,16 @@
-# FROM rocm/rocm-terminal:1.9.0 as hip_and_hcc_builder
-# MAINTAINER Deven Desai <deven.desai@amd.com>
+FROM rocm/rocm-terminal:3.0
 
-# ENV DEBIAN_FRONTEND noninteractive
-# ENV HOME /home/rocm-user
-
-# # install packages needed for this image
-# RUN sudo apt-get update && sudo apt-get install -y python rpm git mercurial libxml2 libxml2-dev
-
-# # build the HCC version which has the fix for issue812
-# RUN cd $HOME && git clone --recursive https://github.com/RadeonOpenCompute/hcc.git
-# RUN cd $HOME/hcc  && git checkout -b issue812-fix d530be7
-# RUN cd $HOME/hcc && mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && sudo make package -j$(nproc) && sudo dpkg -i *.deb
-
-# # build the latest HIP on the roc-1.8.x branch
-# RUN cd $HOME && git clone -b roc-1.8.x https://github.com/ROCm-Developer-Tools/HIP.git
-# RUN cd $HOME/HIP && mkdir build && cd build && cmake .. && sudo make package -j$(nproc) && sudo dpkg -i *.deb
-
-FROM rocm/rocm-terminal:2.4 
 MAINTAINER Deven Desai <deven.desai@amd.com>
 
 ENV DEBIAN_FRONTEND noninteractive
 ENV HOME /home/rocm-user
 
 # install packages needed for this image
-RUN sudo apt-get update && sudo apt-get install -y python rpm git mercurial libxml2 libxml2-dev
+RUN sudo apt-get update && sudo apt-get install -y python rpm git libxml2 libxml2-dev kmod
 
-# # COPY and install the hcc package built in the previous stage
-# RUN mkdir -p $HOME/pkgs/hcc 
-# COPY --from=hip_and_hcc_builder /home/rocm-user/hcc/build/*.deb $HOME/pkgs/hcc/
-# RUN cd $HOME/pkgs/hcc && sudo dpkg -i *.deb
-
-# # COPY and install the HIP package built in the previous stage
-# RUN mkdir -p $HOME/pkgs/HIP 
-# COPY --from=hip_and_hcc_builder /home/rocm-user/HIP/build/*.deb $HOME/pkgs/HIP/
-# RUN cd $HOME/pkgs/HIP && sudo dpkg -i *.deb
-
-# clone the official eigen repo from bitcuket
-RUN cd $HOME && hg clone https://bitbucket.org/eigen/eigen eigen
-
-# clone the git mirror of the official eigen repo
-# RUN mkdir $HOME/GIT_MIRRROR
-# RUN cd $HOME/GIT_MIRROR && git clone https://github.com/eigenteam/eigen-git-mirror eigen
-
-# clone the git mirror of the official eigen repo
-# RUN mkdir $HOME/ROCM_FORK
-# RUN cd $HOME/ROCM_FORK && git clone https://github.com/ROCmSoftwarePlatform/eigen-upstream.git eigen
+# clone the official eigen repo from gitlab
+RUN cd $HOME && git clone https://gitlab.com/libeigen/eigen eigen-official
+RUN cd $HOME && ln -s eigen-official eigen
 
 # copy the scripts to run the tests
 COPY run_tests_nightly.rocm.sh $HOME/

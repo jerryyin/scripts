@@ -52,6 +52,8 @@ HOME=/root
 # rm -rf $HOME/HIP
 # cd $HOME && git clone https://github.com/ROCm-Developer-Tools/HIP.git 
 # cd $HOME/HIP && rm -rf build && mkdir build && cd build && cmake .. && make package -j$(nproc) && dpkg -i *.deb
+## ROCm 2.7 and onwards
+# cd $HOME/HIP && rm -rf build && mkdir build && cd build && cmake .. && make -j$(nproc) && make hiprtc && make package && dpkg -i *.deb
 # cd $HOME/HIP/build && make package -j$(nproc) && dpkg -i *.deb
 
 # #################################################################################
@@ -98,7 +100,7 @@ HOME=/root
 cd $HOME/miopen && rm -rf build && mkdir build && cd build && \
     CXX=/opt/rocm/bin/hcc cmake \
        -DMIOPEN_BACKEND=HIP \
-       -DCMAKE_PREFIX_PATH="/opt/rocm/hcc;/opt/rocm/hip" \
+       -DCMAKE_PREFIX_PATH="/opt/rocm/hcc;/opt/rocm/hip;/opt/rocm/bin/clang-ocl" \
        -DCMAKE_BUILD_TYPE=Release \
        ..  && \
     make package -j$(nproc) && dpkg -i ./MIOpen*.deb
