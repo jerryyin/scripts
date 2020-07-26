@@ -44,6 +44,10 @@ if [ ! -d scripts ]; then
     git clone git@github.com:jerryyin/scripts.git
 fi
 
+if [ ! -d notes ]; then
+    git clone git@github.com:jerryyin/notes.git
+fi
+
 # Project specific
 # Clone tf, run cscope
 if [ ! -d tensorflow-upstream ]; then
