@@ -23,7 +23,7 @@ rm -rf .ssh && cp -r /data/.ssh ./.ssh
 chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 
 if [ ! -d rc_files ]; then
-    rm ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
+    rm ~/.zshrc ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
     git clone git@github.com:jerryyin/rc_files.git
     cd rc_files
     stow stow && \
