@@ -21,6 +21,7 @@ apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive a
   git \
   zsh \
   vim \
+  stow \
   xclip \
   locales \
   python-autopep8 \

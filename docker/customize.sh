@@ -15,22 +15,29 @@ if [ ! -d .git ]; then
     git config --global core.excludesfile ~/.gitignore
 fi
 
+# Set the locale
+locale-gen en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
 # clone the configuration to root
 rm -rf .ssh && cp -r /data/.ssh ./.ssh
 chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 
-git init && \
-git remote add origin git@github.com:jerryyin/rc_files.git && \
-git fetch origin && \
-git checkout master
+if [ ! -d rc_files ]; then
+    rm ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
+    git clone git@github.com:jerryyin/rc_files.git
+    cd rc_files
+    stow stow && \
+    stow git && \
+    stow gtags && \
+    stow tmux && \
+    stow vim && \
+    stow emacs && \
+    stow zsh
+    cd ~
+fi
 
 # Make vim-plug to intialize submodules: vimrc does it now
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
-
-# Set the locale
-locale-gen en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-
-cp ~/.zsh/.zshrc ~/ && cp ~/.zsh/robbyrussell.zsh-theme ~/.oh-my-zsh/themes/
 
 # Clone scripts
 if [ ! -d scripts ]; then
