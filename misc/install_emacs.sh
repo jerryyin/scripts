@@ -1,7 +1,7 @@
-SUDO=
-# SUDO=sudo
+# SUDO=
+SUDO=sudo
 
-$SUDO apt-get update && $SUDO apt-get install -y emacs24-nox
+$SUDO apt-get update && $SUDO apt-get install -y emacs24
 
 # $SUDO apt-get remove emacs24 emacs24-nox
 

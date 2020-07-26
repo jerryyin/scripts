@@ -6,9 +6,12 @@ docker_repo=tensorflow/tensorflow
 # tag=cuda_190513
 tag=latest-devel-gpu-py3
 
-container_name=deven_tf_misc_01
+docker_repo=nvcr.io/nvidia/tensorflow
+tag=20.03-tf2-py3
 
-sudo nvidia-docker run \
+container_name=deven_tf_trial
+
+sudo docker run \
      -it \
      -p 8888:8888 \
      -v $HOME/deven/common:/common \

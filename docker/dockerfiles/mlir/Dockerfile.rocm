@@ -1,4 +1,4 @@
-FROM rocm/rocm-terminal:2.8
+FROM rocm/rocm-terminal:3.1
 MAINTAINER Deven Desai <deven.desai@amd.com>
 
 ENV DEBIAN_FRONTEND noninteractive
@@ -16,14 +16,14 @@ RUN git config --global core.editor "emacs"
 RUN sudo apt-get install -y emacs24-nox
 RUN cd $HOME && rm -rf .emacs.d && git clone https://github.com/deven-amd/.emacs.d.git
 
-# install GCC 7
-RUN sudo apt-get install -y --reinstall build-essential
-RUN sudo apt-get install -y software-properties-common
-RUN sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-RUN sudo apt-get update
-RUN sudo apt-get install -y gcc-7 g++-7
-RUN sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-7 60
-RUN sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-7 60
+# # install GCC 7
+# RUN sudo apt-get install -y --reinstall build-essential
+# RUN sudo apt-get install -y software-properties-common
+# RUN sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+# RUN sudo apt-get update
+# RUN sudo apt-get install -y gcc-7 g++-7
+# RUN sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-7 60
+# RUN sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-7 60
 
 #install python3
 RUN sudo apt-get install -y python3
@@ -50,15 +50,26 @@ RUN sudo apt-get install -y --no-install-recommends \
 # clone the LLVM repo
 RUN cd $HOME && git clone https://github.com/llvm/llvm-project.git
 
-# clone the MLIR repo (Jack's version)
+# build
+RUN mkdir $HOME/llvm-project/build
+RUN cd $HOME/llvm-project/build && \
+    cmake -G Ninja ../llvm \
+    -DLLVM_ENABLE_PROJECTS=mlir \
+    -DLLVM_BUILD_EXAMPLES=ON \
+    -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_ENABLE_ASSERTIONS=ON 
+    # -DCMAKE_C_COMPILER=clang \
+    # _DCMAKE_CXX_COMPILER=clang++ \
+    # -DLLVM_ENABLE_LLD=ON
+    
+RUN cd $HOME/llvm-project/build && \
+    cmake --build . --target check-mlir
+
+
+# clone additional repos
 # RUN cd $HOME && git clone https://github.com/tensorflow/mlir llvm-project/llvm/projects/mlir
 # RUN cd $HOME && git clone https://github.com/whchung/mlir llvm-project/llvm/projects/mlir
-RUN cd $HOME && git clone https://github.com/deven-amd/mlir llvm-project/llvm/projects/mlir
-
-
-# build
-# RUN mkdir $HOME/llvm-project/build
-# RUN cd $HOME/llvm-project/build && cmake -G Ninja ../llvm -DLLVM_BUILD_EXAMPLES=ON -DLLVM_ENABLE_CXX1Y=Y -DLLVM_TARGETS_TO_BUILD="host;AMDGPU" -DMLIR_ROCM_RUNNER_ENABLED=1
-# RUN cd $HOME/llvm-project/build && cmake --build . --target check-mlir
+# RUN cd $HOME && git clone https://github.com/deven-amd/mlir llvm-project/llvm/projects/mlir
 
 

@@ -10,45 +10,56 @@ bazel_buildtools_dir = "bazel_buildtools"
 bazel_buildtools_path = os.path.join(home_dir, bazel_buildtools_dir)
 bazel_buildtools_repo = "https://github.com/bazelbuild/buildtools"
 
+
+def run_shell_cmd(cmd):
+    print (" ".join(cmd))
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print ("FAILED  - ", cmd)
+        sys.exit(1)
+ 
+
+def download_buildifier(version):
+    os.chdir(home_dir)
+
+    wget_cmd = ["wget", "https://github.com/bazelbuild/buildtools/releases/download/{}/buildifier".format(version)]
+    run_shell_cmd(wget_cmd)
+    
+    chmod_cmd = ["chmod", "+x", "buildifier"]
+    run_shell_cmd(chmod_cmd)
+
+    install_cmd = ["mv", "buildifier", "/usr/local/bin"]
+    run_shell_cmd(install_cmd)
+    
+
 def build_buildifier():
 
     if not os.path.exists(bazel_buildtools_path):
         os.chdir(home_dir)
         clone_cmd = ["git", "clone", bazel_buildtools_repo, bazel_buildtools_dir]
-        result = subprocess.run(clone_cmd)
-        if result.returncode != 0:
-            print ("FAILED  - ", clone_cmd)
-            return False
+        run_shell_cmd(clone_cmd)
         
     os.chdir(bazel_buildtools_path)
     
     pull_cmd = ["git", "pull", "--ff-only"]
-    result = subprocess.run(pull_cmd)
-    if result.returncode != 0:
-        print ("FAILED  - ", pull_cmd)
-        return False
+    run_shell_cmd(pull_cmd)
 
     build_cmd = ["bazel", "build", "//buildifier"]
-    result = subprocess.run(build_cmd)
-    if result.returncode != 0:
-        print ("FAILED  - ", build_cmd)
-        return False
+    run_shell_cmd(build_cmd)
 
-    return True
+    install_cmd = ["mv", "bazel-bin/buildifier/linux*stripped/buildifier", "/usr/local/bin"]
+    run_shell_cmd(install_cmd)
 
 
 def run_buildifier(files):
     
-    os.chdir(bazel_buildtools_path)
+    # os.chdir(bazel_buildtools_path)
+    # buildifier_cmd = ["bazel", "run", "//buildifier", "--"]
     
-    buildifier_cmd = ["bazel", "run", "//buildifier", "--"]
+    buildifier_cmd = ["buildifier", "--"]
     buildifier_cmd.extend(files)
-    result = subprocess.run(buildifier_cmd)
-    if result.returncode != 0:
-        print ("FAILED  - ", buildifier_cmd)
-        return False
 
-    return True
+    run_shell_cmd(buildifier_cmd)
     
 
 if __name__ == "__main__":
@@ -57,11 +68,11 @@ if __name__ == "__main__":
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
     files = [os.path.realpath(f) for f in args.files]
+
+    download_buildifier("0.4.5");
+    # build_buildifier();
     
-    result = build_buildifier();
-    if result :
-        result = run_buildifier(files)
-    sys.exit(0 if result else 1)
+    run_buildifier(files)
 
 
 # HOME=/root

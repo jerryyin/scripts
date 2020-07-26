@@ -23,10 +23,13 @@ def get_mangled_names(mangled_file):
 
         contents = fp.read();
 
-        mangled_name_pattern = "'_Z[^\']*'"
+        mangled_name_pattern = r'ShaderName : (_Z[^ \t\n]*)'
         for match in re.finditer(mangled_name_pattern, contents):
-            mangled_names.add(match.group(0)[1:-1])
+            mangled_names.add(match.group(1))
             
+
+    for name in mangled_names:
+        print (name)
     return mangled_names
 
 

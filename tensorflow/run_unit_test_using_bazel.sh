@@ -2,15 +2,16 @@
 set -e
 # set -x
 
-N_JOBS=$(grep -c ^processor /proc/cpuinfo)
-N_GPUS=$(lspci|grep 'VGA'|grep 'AMD/ATI'|wc -l)
+N_BUILD_JOBS=$(grep -c ^processor /proc/cpuinfo)
+TF_GPU_COUNT=$(lspci|grep 'VGA'|grep 'AMD/ATI'|wc -l)
+TF_TESTS_PER_GPU=6
+N_TEST_JOBS=$(expr ${TF_GPU_COUNT} \* ${TF_TESTS_PER_GPU})
 
 echo ""
-echo "Bazel will use ${N_JOBS} concurrent build job(s) and ${N_GPUS} concurrent test job(s)."
+echo "Bazel will use ${N_BUILD_JOBS} concurrent build job(s) and ${N_TEST_JOBS} concurrent test job(s)."
 echo ""
 
 export TF_NEED_ROCM=1
-export TF_GPU_COUNT=${N_GPUS}
 #####################
 
 options=""
@@ -28,6 +29,7 @@ options="$options --test_sharding_strategy=disabled"
 options="$options --test_timeout 600,900,2400,7200"
 options="$options --cache_test_results=no"
 options="$options --flaky_test_attempts=1"
+# options="$options --runs_per_test=10"
 # options="$options --test_output="
 
 # options="$options --test_env=MIOPEN_ENABLE_LOGGING=1"
@@ -44,6 +46,7 @@ options="$options --flaky_test_attempts=1"
 
 # options="$options --test_env=HIP_HIDDEN_FREE_MEM=500"
 # options="$options --test_env=HIP_TRACE_API=1"
+# options="$options --test_env=LOG_LEVEL=3"
 # options="$options --test_env=HIP_DB=api+mem+copy"
 # options="$options --test_env=HIP_LAUNCH_BLOCKING=1"
 # options="$options --test_env=HIP_API_BLOCKING=1"
@@ -54,11 +57,13 @@ options="$options --flaky_test_attempts=1"
 # options="$options --test_env=HCC_SERIALIZE_COPY=3"
 # options="$options --test_env=HCC_PROFILE=2"
 
+# options="$options --test_env=AMD_LOG_LEVEL=4"
+# options="$options --test_env=AMD_SERIALIZE_KERNEL=3"
+# options="$options --test_env=AMD_SERIALIZE_COPY=3"
+
+
 # options="$options --action_env=KMDUMPISA=1"
 # options="$options --action_env=KMDUMPLLVM=1"
-
-
-# options="$options --test_env=HIP_LAUNCH_BLOCKING=1"
 
 # options="$options --test_env=TF_CPP_MIN_LOG_LEVEL=1"
 # options="$options --test_env=TF_CPP_MIN_VLOG_LEVEL=3"
@@ -68,9 +73,11 @@ options="$options --flaky_test_attempts=1"
 # options="$options --test_env=TF_ROCM_RETURN_BEST_ALGO_ONLY=1"
 # options="$options --test_env=TF_ROCM_USE_BFLOAT16_FOR_CONV=1"
 # options="$options --test_env=TF_ROCM_USE_IMMEDIATE_MODE=1"
+# options="$options --test_env=TF_CUDNN_WORKSPACE_LIMIT_IN_MB=8192"
+# options="$options --test_env=TF_ROCM_BW_POOL_CACHE=1"
+# options="$options --test_env=TF_ROCM_XLA_TEMPFILES=1"
 
 # options="$options --test_env=TF_GPU_ALLOCATOR=memory_guard"
-
 
 # options="$options --test_env=HSA_TOOLS_LIB=\"librocr_debug_agent64.so\""
 # options="$options --test_env=LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib"
@@ -105,14 +112,16 @@ while (( $# )); do
     elif [ $1 == "-dbg" ]; then
 	options="$options --compilation_mode=dbg"
     elif [ $1 == "-f" ]; then
-	options="$options --jobs=$N_JOBS"
-	# options="$options --local_test_jobs=1"
-	options="$options --local_test_jobs=$TF_GPU_COUNT"
+	options="$options --jobs=$N_BUILD_JOBS"
+	options="$options --local_test_jobs=$N_TEST_JOBS"
+	options="$options --test_env=TF_GPU_COUNT=$TF_GPU_COUNT"
+	options="$options --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU"
 	options="$options --run_under=//tensorflow/tools/ci_build/gpu_build:parallel_gpu_execute"
 	testlist=$2
 	shift
     else
 	options="$options --test_env=HIP_VISIBLE_DEVICES=0"
+	options="$options --test_env=TF_PER_DEVICE_MEMORY_LIMIT_MB=1024"
 	all_tests=$1
     fi
 
@@ -140,3 +149,4 @@ fi
 # llvm-objdump -disassemble -mcpu=gfx900 your.hsaco
 
 # bazel run --config=rocm --config=opt //tensorflow/compiler/xla/tools:hlo_proto_to_json -- --input_file=/common/LOGS/Types.4.pb --output_file=/common/LOGS/Types.4.pb.json
+# options="$options --run_under=/usr/bin/pdb"

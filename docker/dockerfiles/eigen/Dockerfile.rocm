@@ -1,5 +1,5 @@
-FROM rocm/rocm-terminal:3.0
-
+# FROM rocm/rocm-terminal:3.3
+FROM devenamd/rocm:compute-rocm-dkms-no-npi-hipclang-2363-200519
 MAINTAINER Deven Desai <deven.desai@amd.com>
 
 ENV DEBIAN_FRONTEND noninteractive

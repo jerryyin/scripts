@@ -1,0 +1,27 @@
+FROM ubuntu:16.04
+MAINTAINER Deven Desai <deven.desai.amd@gmail.com>
+
+RUN apt-get update
+
+ENV DEBIAN_FRONTEND noninteractive
+
+# install git
+RUN apt-get install -y git
+RUN git config --global user.email "deven.desai.amd@gmail.com"
+RUN git config --global user.name "Deven Desai"
+RUN git config --global core.editor "emacs"
+
+# install emacs
+RUN apt-get install -y emacs
+RUN cd /root && rm -rf .emacs.d && git clone https://github.com/deven-amd/.emacs.d.git
+
+# install python3, pip3
+RUN apt-get install -y python3 python3-pip
+
+# install python3, pip3
+RUN pip3 install --upgrade pip
+
+# install numpy, scipy, matplotlib, jupyter
+RUN pip3 install numpy scipy matplotlib jupyter
+
+CMD /bin/bash

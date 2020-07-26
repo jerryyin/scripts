@@ -1,9 +1,9 @@
-DEB_ROCM_REPO=http://repo.radeon.com/rocm/apt/2.6/
+# sudo apt autoremove rock-dkms rocm-dev
+
+DEB_ROCM_REPO=http://repo.radeon.com/rocm/apt/3.1/
 wget -qO - $DEB_ROCM_REPO/rocm.gpg.key | sudo apt-key add -
 sudo rm -rf /etc/apt/sources.list.d/rocm.list
 sudo sh -c  "echo deb [arch=amd64] $DEB_ROCM_REPO xenial main > /etc/apt/sources.list.d/rocm.list"
-
-# sudo apt autoremove rock-dkms
 
 sudo apt update && \
     sudo apt install -y \

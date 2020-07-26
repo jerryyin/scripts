@@ -7,13 +7,24 @@ import sys
 supported_libraries = {
     "roctracer" : {
         "url" : "https://github.com/ROCm-Developer-Tools/roctracer",
+        "clone_options" : [],
+        },
+    "hcc" : {
+        "url" : "https://github.com/RadeonOpenCompute/hcc",
+        "clone_options" : ["--recursive"],
+        },
+    "MLOpen" : {
+        "url" : "https://github.com/AMDComputeLibraries/MLOpen",
+        "clone_options" : [],
         },
 }
 
 def handle_clone(library, location):
 
-    url = supported_libraries[library]["url"]
-    clone_cmd = ["git", "clone", url, location]
+    info = supported_libraries[library]
+    
+    url = info["url"]
+    clone_cmd = ["git", "clone"] + info["clone_options"] +  [url, location]
     # print (clone_cmd)
     
     result = subprocess.run(clone_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -48,8 +59,8 @@ if __name__ == "__main__" :
     if args.location is None:
         location = "/root/{}".format(args.library)
         print ("")
-        print ("\tsource/repo location not specified for {}".format(args.library))
-        print ("\tdefaulting to using {}".format(location))
+        print ("\trepo clone destination not specified for {}".format(args.library), end="")
+        print (', defaulting to using "{}"'.format(location))
         print ("")
     
     if args.clone :
