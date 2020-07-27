@@ -51,7 +51,8 @@ if [ ! -d scripts ]; then
 fi
 
 if [ ! -d notes ]; then
-    git clone git@github.com:jerryyin/notes.git
+    mkdir Documents
+    git clone git@github.com:jerryyin/notes.git Documents
 fi
 
 # Project specific
