@@ -24,15 +24,21 @@ chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 
 if [ ! -d rc_files ]; then
     rm ~/.zshrc ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
+    rm ~/.stow-global-ignore
+    rm ~/.gitignore
+    rm ~/.notags
+    rm ~/.tmux.conf
+    rm ~/.vimrc
+    rm ~/.emacs
     git clone git@github.com:jerryyin/rc_files.git
     cd rc_files
-    stow stow && \
-    stow git && \
-    stow gtags && \
-    stow tmux && \
-    stow vim && \
-    stow emacs && \
     stow zsh
+    stow stow
+    stow git
+    stow gtags
+    stow tmux
+    stow vim
+    stow emacs
     cd ~
 fi
 
