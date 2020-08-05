@@ -71,4 +71,5 @@ fi
 # temporary fix to #30287, TF fail to apply update when HOME dir is a git directory
 rm -rf ~/.git
 
-source ~/.bashrc
+# Hack from https://askubuntu.com/questions/64387/cannot-successfully-source-bashrc-from-a-shell-script
+eval "$(cat ~/.bashrc | tail -n +10)"
