@@ -50,9 +50,9 @@ if [ ! -d scripts ]; then
     git clone git@github.com:jerryyin/scripts.git
 fi
 
-if [ ! -d notes ]; then
-    mkdir Documents
-    git clone git@github.com:jerryyin/notes.git Documents
+if [ ! -d Documents/notes ]; then
+    mkdir -p Documents/notes
+    git clone git@github.com:jerryyin/notes.git Documents/notes
 fi
 
 # Project specific
