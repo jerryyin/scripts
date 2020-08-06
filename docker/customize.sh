@@ -19,8 +19,10 @@ fi
 locale-gen en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 
 # clone the configuration to root
-rm -rf .ssh && cp -r /data/.ssh ./.ssh
-chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+if [ ! -d .ssh ]; then
+    cp -r /data/.ssh ./.ssh
+    chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+fi
 
 if [ ! -d rc_files ]; then
     rm ~/.zshrc ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
