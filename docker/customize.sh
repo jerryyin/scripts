@@ -25,7 +25,7 @@ if [ ! -d .ssh ]; then
 fi
 
 if [ ! -d rc_files ]; then
-    rm ~/.zshrc ~/.oh-my-zsh/themes/robbyrussell.zsh-theme
+    rm ~/.zshrc
     rm ~/.stow-global-ignore
     rm ~/.gitignore
     rm ~/.notags
@@ -34,13 +34,9 @@ if [ ! -d rc_files ]; then
     rm ~/.emacs
     git clone git@github.com:jerryyin/rc_files.git
     cd rc_files
-    stow zsh
-    stow stow
-    stow git
-    stow gtags
-    stow tmux
-    stow vim
-    stow emacs
+    for dir in */ ; do
+      stow $dir
+    done
     cd ~
 fi
 
