@@ -15,9 +15,6 @@ if [ ! -d .git ]; then
     git config --global core.excludesfile ~/.gitignore
 fi
 
-# Set the locale
-locale-gen en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-
 # clone the configuration to root
 if [ ! -d .ssh ]; then
     cp -r /data/.ssh ./.ssh
@@ -25,49 +22,28 @@ if [ ! -d .ssh ]; then
 fi
 
 if [ ! -d rc_files ]; then
-    rm ~/.zshrc
-    rm ~/.stow-global-ignore
-    rm ~/.gitignore
-    rm ~/.notags
-    rm ~/.tmux.conf
-    rm ~/.vimrc
-    rm ~/.emacs
     git clone git@github.com:jerryyin/rc_files.git
-    cd rc_files
-    for dir in */ ; do
-      stow $dir
+    for dotpath in $(find rc_files -name "\.*"); do
+      rm "$(basename -- $dotpath)"
     done
-    cd ~
+    for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
+      stow -d ~/rc_files $dir -v -R -t ~
+    done
 fi
 
 # Make vim-plug to intialize submodules: vimrc does it now
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
 
 # Clone scripts
-if [ ! -d scripts ]; then
-    git clone git@github.com:jerryyin/scripts.git
+if [ ! -d Playground/scripts ]; then
+    mkdir -p Playground/scripts
+    git clone git@github.com:jerryyin/scripts.git Playground/scripts
 fi
 
 if [ ! -d Documents/notes ]; then
     mkdir -p Documents/notes
     git clone git@github.com:jerryyin/notes.git Documents/notes
 fi
-
-# Project specific
-# Clone tf, run cscope
-if [ ! -d tensorflow-upstream ]; then
-    git clone git@github.com:ROCmSoftwarePlatform/tensorflow-upstream.git && \
-    cd tensorflow-upstream && \
-    git remote add google-upstream git@github.com:tensorflow/tensorflow.git && \
-    find $(pwd)/tensorflow -type f -print > gtags.files && \
-    gtags && \
-    export TF2_BEHAVIOR=1 && \
-    cd ~
-fi
-
-# Clean up
-# temporary fix to #30287, TF fail to apply update when HOME dir is a git directory
-rm -rf ~/.git
 
 # Hack from https://askubuntu.com/questions/64387/cannot-successfully-source-bashrc-from-a-shell-script
 eval "$(cat ~/.bashrc | tail -n +10)"
