@@ -7,18 +7,11 @@ if [ -t 1 ]; then
   exec zsh
 fi" >> ~/.bashrc
 
-# Git configurations
-# git default user, password, ignore file
-if [ ! -d .git ]; then
-    git config --global user.email "zhuoryin@amd.com" && \
-    git config --global user.name "jerryyin" && \
-    git config --global core.excludesfile ~/.gitignore
-fi
-
 # clone the configuration to root
-if [ ! -d .ssh ]; then
-    cp -r /data/.ssh ./.ssh
-    chmod 400 .ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+if [ ! -f ~/.ssh/id_rsa ]; then
+    rm -rf ~/.ssh
+    cp -r /data/.ssh ~/.ssh
+    chmod 400 ~/.ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 fi
 
 if [ ! -d rc_files ]; then
@@ -29,6 +22,14 @@ if [ ! -d rc_files ]; then
     for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
       stow -d ~/rc_files $dir -v -R -t ~
     done
+fi
+
+# Git configurations
+# git default user, password, ignore file
+if [ ! -d .git ]; then
+    git config --global user.email "zhuoryin@amd.com" && \
+    git config --global user.name "jerryyin" && \
+    git config --global core.excludesfile ~/.gitignore
 fi
 
 # Make vim-plug to intialize submodules: vimrc does it now
