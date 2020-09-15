@@ -1,10 +1,9 @@
 #!/bin/sh
 set -x
 
-# Install add-apt-repository
 apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
-  software-properties-common \
-  apt-transport-https \
+  software-properties-common \ # Install add-apt-repository
+  apt-transport-https \        # Dependency from kitware, for https
   wget
                    
 # PPA:  TODO remove when it becomes default ubuntu package
