@@ -1,6 +1,10 @@
 #!/bin/sh
 set -x
 
+# Install add-apt-repository
+apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+                        software-properties-common
+                   
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa.
 add-apt-repository -y ppa:jonathonf/vim
