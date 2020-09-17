@@ -1,7 +1,7 @@
 #!/bin/sh
 set -x
 
-bash customize.sh
+bash $(dirname "$0")/customize.sh
 
 # Clone tf, run cscope
 if [ ! -d tensorflow-upstream ]; then

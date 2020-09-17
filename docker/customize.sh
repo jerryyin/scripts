@@ -47,4 +47,4 @@ if [ ! -d Documents/notes ]; then
 fi
 
 # Hack from https://askubuntu.com/questions/64387/cannot-successfully-source-bashrc-from-a-shell-script
-eval "$(cat ~/.bashrc | tail -n +10)"
+# eval "$(cat ~/.bashrc | tail -n +10)"
