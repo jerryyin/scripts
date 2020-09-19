@@ -1,6 +1,7 @@
 #!/bin/sh
 set -x
 
+shopt -s expand_alias
 alias dockerInstall='DEBIAN_FRONTEND=noninteractive apt-get install -f -y'
 
 apt-get update --allow-insecure-repositories 
