@@ -1,10 +1,13 @@
 #!/bin/sh
 set -x
 
-apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
-  software-properties-common \ # Install add-apt-repository
-  apt-transport-https \        # Dependency from kitware, for https
-  wget
+alias dockerInstall='DEBIAN_FRONTEND=noninteractive apt-get install -f -y'
+
+apt-get update --allow-insecure-repositories 
+
+dockerInstall software-properties-common  # Install add-apt-repository
+dockerInstall apt-transport-https         # Dependency from kitware, for https
+dockerInstall wget
                    
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa.
@@ -14,29 +17,29 @@ add-apt-repository -y ppa:hnakamur/universal-ctags
 # gnu global ppa.
 add-apt-repository -y ppa:dns/gnu
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
-wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add - && \
+wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add -
 apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 
 # Install misc pkgs
-apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  apt-utils \
-  ssh \
-  curl \
-  universal-ctags \
-  global \
-  cscope \
-  git \
-  zsh \
-  vim \
-  stow \
-  xclip \
-  locales \
-  python-autopep8 \
-  clang-format \
-  gdb \
-  tmux \
-  cmake \ # MLIR package
-  ninja-build # MLIR package
+dockerInstall apt-utils
+dockerInstall ssh
+dockerInstall curl
+dockerInstall universal-ctags
+dockerInstall global
+dockerInstall cscope
+dockerInstall git
+dockerInstall zsh
+dockerInstall vim
+dockerInstall stow
+dockerInstall xclip
+dockerInstall locales
+dockerInstall python-autopep8
+dockerInstall clang-format
+dockerInstall gdb
+dockerInstall tmux
+dockerInstall cmake       # MLIR package
+dockerInstall ninja-build # MLIR package
+
 apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # install tmux plugin manager
