@@ -1,7 +1,7 @@
 #!/bin/sh
 set -x
 
-shopt -s expand_alias
+shopt -s expand_aliases
 alias dockerInstall='DEBIAN_FRONTEND=noninteractive apt-get install -f -y'
 
 apt-get update --allow-insecure-repositories 
@@ -22,22 +22,9 @@ wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | 
 apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 
 # Install misc pkgs
-dockerInstall apt-utils
-dockerInstall ssh
-dockerInstall curl
-dockerInstall universal-ctags
-dockerInstall global
-dockerInstall cscope
-dockerInstall git
-dockerInstall zsh
-dockerInstall vim
-dockerInstall stow
-dockerInstall xclip
-dockerInstall locales
-dockerInstall python-autopep8
-dockerInstall clang-format
-dockerInstall gdb
-dockerInstall tmux
+dockerInstall apt-utils ssh curl universal-ctags global cscope git
+dockerInstall vim stow xclip locales python-autopep8 gdb tmux zsh
+dockerInstall clang-format-10
 dockerInstall cmake       # MLIR package
 dockerInstall ninja-build # MLIR package
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -x
 
-if grep -q zsh ~/.bashrc; then
+if ! grep -q zsh ~/.bashrc; then
     echo "# Launch Zsh
     if [ -t 1 ]; then
       cd ~
