@@ -30,8 +30,8 @@ fi
 # Git configurations
 # git default user, password, ignore file
 if [ ! -d .git ]; then
-    git config --global user.email "zhuoryin@amd.com" && \
-    git config --global user.name "jerryyin" && \
+    git config --global user.email "zhuoryin@amd.com"
+    git config --global user.name "jerryyin"
     git config --global core.excludesfile ~/.gitignore
 fi
 
@@ -39,10 +39,10 @@ fi
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
 
 # Clone scripts
-if [ ! -d Playground/scripts ]; then
-    mkdir -p Playground/scripts
-    git clone git@github.com:jerryyin/scripts.git Playground/scripts
-fi
+#if [ ! -d Playground/scripts ]; then
+#    mkdir -p Playground/scripts
+#    git clone git@github.com:jerryyin/scripts.git Playground/scripts
+#fi
 
 if [ ! -d Documents/notes ]; then
     mkdir -p Documents/notes
