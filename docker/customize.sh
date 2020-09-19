@@ -1,15 +1,18 @@
 #!/bin/sh
 set -x
 
-echo "# Launch Zsh
-if [ -t 1 ]; then
-  cd ~
-  exec zsh
-fi" >> ~/.bashrc
+if grep -q zsh ~/.bashrc; then
+    echo "# Launch Zsh
+    if [ -t 1 ]; then
+      cd ~
+      exec zsh
+    fi" >> ~/.bashrc
+fi
 
 # clone the configuration to root
 if [ ! -f ~/.ssh/id_rsa ]; then
     rm -rf ~/.ssh
+    # Note: Docker needs to mount home directory to /data
     cp -r /data/.ssh ~/.ssh
     chmod 400 ~/.ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 fi
