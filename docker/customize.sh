@@ -32,6 +32,7 @@ fi
 if [ ! -d .git ]; then
     git config --global user.email "zhuoryin@amd.com"
     git config --global user.name "jerryyin"
+    git config --global pager.branch false
     git config --global core.excludesfile ~/.gitignore
 fi
 
