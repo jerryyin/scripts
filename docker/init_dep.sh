@@ -24,7 +24,8 @@ apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 # Install misc pkgs
 dockerInstall apt-utils ssh curl universal-ctags global cscope git
 dockerInstall vim stow xclip locales python-autopep8 gdb tmux zsh
-dockerInstall clang-format-10
+# https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
+dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10
 dockerInstall cmake       # MLIR package
 dockerInstall ninja-build # MLIR package
 
