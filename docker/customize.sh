@@ -9,22 +9,15 @@ if ! grep -q zsh ~/.bashrc; then
     fi" >> ~/.bashrc
 fi
 
-# clone the configuration to root
-if [ ! -f ~/.ssh/id_rsa ]; then
-    rm -rf ~/.ssh
-    # Note: Docker needs to mount home directory to /data
-    cp -r /data/.ssh ~/.ssh
-    chmod 400 ~/.ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
-fi
-
 if [ ! -d rc_files ]; then
-    git clone git@github.com:jerryyin/rc_files.git
+    git clone https://github.com/jerryyin/rc_files.git
     for dotpath in $(find rc_files -name "\.*"); do
       rm "$(basename -- $dotpath)"
     done
     for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
       stow -d ~/rc_files $dir -v -R -t ~
     done
+    git remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
 
 # Git configurations
@@ -40,10 +33,18 @@ fi
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
 
 # Clone scripts
-#if [ ! -d Playground/scripts ]; then
-#    mkdir -p Playground/scripts
-#    git clone git@github.com:jerryyin/scripts.git Playground/scripts
-#fi
+if [ ! -d scripts ]; then
+    git clone https://github.com/jerryyin/scripts.git
+fi
+git remote set-url origin git@github.com:jerryyin/scripts.git
+
+# clone the configuration to root
+if [ ! -f ~/.ssh/id_rsa ]; then
+    rm -rf ~/.ssh
+    # Note: Docker needs to mount home directory to /data
+    cp -r /data/.ssh ~/.ssh
+    chmod 400 ~/.ssh/id_rsa && ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+fi
 
 if [ ! -d Documents/notes ]; then
     mkdir -p Documents/notes
