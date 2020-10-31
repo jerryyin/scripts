@@ -1,7 +1,7 @@
 #!/bin/sh
 set -x
 
-bash $(dirname "$0")/customize.sh
+bash $(dirname "$0")/init.sh
 
 
 if [ ! -d llvm-project-mlir ]; then
