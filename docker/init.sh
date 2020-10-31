@@ -40,3 +40,37 @@ fi
 if [ ! -d .oh-my-zsh ]; then
     echo "Y" | sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
 fi
+
+# Make zsh default shell
+chsh -s $(which zsh)
+
+# rc files
+if [ ! -d rc_files ]; then
+    git clone https://github.com/jerryyin/rc_files.git
+    for dotpath in $(find rc_files -name "\.*"); do
+      rm "$(basename -- $dotpath)"
+    done
+    for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
+      stow -d ~/rc_files $dir -v -R -t ~
+    done
+    git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
+fi
+
+# Git configurations
+# git default user, password, ignore file
+if [ ! -d .git ]; then
+    git config --global user.email "zhuoryin@amd.com"
+    git config --global user.name "jerryyin"
+    git config --global pager.branch false
+    git config --global core.excludesfile ~/.gitignore
+fi
+
+# Make vim-plug to intialize submodules: vimrc does it now
+vim -E -s -u ~/.vimrc +PlugInstall +qall || true
+
+# Clone scripts
+if [ ! -d scripts ]; then
+    git clone https://github.com/jerryyin/scripts.git
+fi
+git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
+
