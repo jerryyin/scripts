@@ -42,7 +42,7 @@ if [ ! -d .oh-my-zsh ]; then
 fi
 
 # Make zsh default shell
-chsh -s $(which zsh) && source .zshrc
+chsh -s $(which zsh)
 
 # rc files
 if [ ! -d rc_files ]; then
@@ -74,3 +74,4 @@ if [ ! -d scripts ]; then
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
+zsh
