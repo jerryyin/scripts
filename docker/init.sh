@@ -22,12 +22,11 @@ wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | 
 apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 
 # Install misc pkgs
-dockerInstall apt-utils ssh curl universal-ctags global cscope git zsh
-dockerInstall vim stow xclip locales python3-dev python3-autopep8 gdb tmux
+dockerInstall apt-utils ssh curl universal-ctags global cscope git
+dockerInstall vim stow xclip locales python3-dev python3-autopep8 gdb
+dockerInstall zsh fonts-powerline tmux
 # https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
-dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10
-dockerInstall cmake       # MLIR package
-dockerInstall ninja-build # MLIR package
+dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build 
 
 apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -73,5 +72,3 @@ if [ ! -d scripts ]; then
     git clone https://github.com/jerryyin/scripts.git
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
-
-zsh
