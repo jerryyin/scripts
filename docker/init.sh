@@ -42,7 +42,7 @@ if [ ! -d .oh-my-zsh ]; then
 fi
 
 # Make zsh default shell
-chsh -s $(which zsh)
+chsh -s $(which zsh) && source .zshrc
 
 # rc files
 if [ ! -d rc_files ]; then
