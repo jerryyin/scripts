@@ -23,7 +23,7 @@ apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 
 # Install misc pkgs
 dockerInstall apt-utils ssh curl universal-ctags global cscope git
-dockerInstall vim stow xclip locales python3-dev python3-autopep8 gdb
+dockerInstall vim stow xclip locales python3-dev python-autopep8 gdb
 # For macos: the_silver_searcher
 dockerInstall zsh fonts-powerline tmux silversearcher-ag
 # https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
