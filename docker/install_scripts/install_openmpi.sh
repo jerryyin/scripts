@@ -1,3 +1,5 @@
+set -e
+
 WORKDIR=$1
 ROCM_PATH=$2
 

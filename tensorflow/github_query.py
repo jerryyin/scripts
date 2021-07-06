@@ -127,28 +127,19 @@ def print_pr_commits(repo, pr_number, title, state, merge_commit, commits):
 def get_google_upstream_PRs():
     PRs = []
 
-    PRs.append(39283)
-    PRs.append(39427)
-    PRs.append(39914)
-    PRs.append(40093)
-    PRs.append(40164)
-    PRs.append(40173)
-    PRs.append(40284)
-    PRs.append(40304)
-    PRs.append(40305)
-    PRs.append(40320)
-    PRs.append(40324)
-    PRs.append(40367)
-    PRs.append(40579)
-
     PRs.append(39106)
     PRs.append(39429)
-    PRs.append(39562)
+    PRs.append(39860)
+    
     PRs.append(40011)
-    PRs.append(40327)
     PRs.append(40329)
-    PRs.append(40543)
-
+    
+    PRs.append(41303)
+    PRs.append(41515)
+    PRs.append(41641)
+    PRs.append(41782)
+    PRs.append(42108)
+    
     PRs.sort()
 
     return PRs
@@ -158,12 +149,10 @@ def get_rocm_fork_PRs():
     PRs.append(782)
     PRs.append(783)
     PRs.append(789)
-    # PRs.append(790) # dropout PR
     PRs.append(791)
     PRs.append(794)
     PRs.append(795)
     PRs.append(799)
-    # PRs.append(803) # Pool3D PR
     return PRs
     
 def generate_pr_commits_1():

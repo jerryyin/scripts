@@ -14,6 +14,9 @@ from openpyxl.styles import Font
 
 os.environ["HIP_VISIBLE_DEVICES"]="0";
 
+KEY_OPTIONS = "options"
+KEY_ENV_VARS = "env_vars"
+
 def run_shell_command(cmd, env_vars):
 
     all_env_vars = " ".join(["{}={}".format(key, value) for key, value in env_vars.items()])
@@ -46,11 +49,11 @@ def run_tf_cnn_benchmark(model, options, env_vars):
 def collect_tf_cnn_benchmark_perf_data():
 
     models = [
-        # "alexnet",
-        # "googlenet",
-        # "inception3",
-        # "inception4",
-        # "lenet",
+        "alexnet",
+        "googlenet",
+        "inception3",
+        "inception4",
+        "lenet",
         # "mobilenet",
         # "nasnet",
         # "nasnetlarge",
@@ -58,24 +61,70 @@ def collect_tf_cnn_benchmark_perf_data():
         # "overfeat",
         "resnet50",
         "resnet50_v1.5",
-        # "resnet101",
-        # "resnet152_v2",
+        "resnet101",
+        "resnet152_v2",
         # "trivial",
         # "vgg11",
-        # "vgg16",
+        "vgg16",
         # "vgg19",
     ]
 
-    configs = [
-        ("baseline", ["--batch_size=256"], {"TF_ROCM_FMA_DISABLE":"1",}),
-        # ("XLA", ["--batch_size=256", "--xla"], {"TF_ROCM_FMA_DISABLE":"1",}),
-        ("AMP", ["--batch_size=256", "--auto_mixed_precision"], {"TF_ROCM_FMA_DISABLE":"1",}),
-        # ("FP16", ["--batch_size=256", "--use_fp16"], {"TF_ROCM_FMA_DISABLE":"1",}),
-        ("FUSION", ["--batch_size=256"], {"TF_ROCM_FUSION_ENABLE":"1",}),
-        ("AMP + FUSION", ["--batch_size=256", "--auto_mixed_precision"], {"TF_ROCM_FUSION_ENABLE":"1",}),
-        # ("AMP + XLA", ["--batch_size=256", "--auto_mixed_precision", "--xla"], {"TF_ROCM_FMA_DISABLE":"1",}),
-    ]
-    
+    configs = {
+        "TRADITIONAL BACKEND - FP32" : {
+            KEY_OPTIONS : [],
+            KEY_ENV_VARS : {"TF_ROCM_FUSION_ENABLE":"1",}
+            },
+
+        "TRADITIONAL BACKEND - FP16" : {
+            KEY_OPTIONS : ["--use_fp16"],
+            KEY_ENV_VARS : {"TF_ROCM_FUSION_ENABLE":"1",}
+            },
+
+        "XLA BACKEND - FP32" : {
+            KEY_OPTIONS : ["--xla_compile"],
+            KEY_ENV_VARS : {"TF_ROCM_FMA_DISABLE":"1",}
+            },
+        
+        "XLA BACKEND - FP16" : {
+            KEY_OPTIONS : ["--use_fp16", "--xla_compile"],
+            KEY_ENV_VARS : {"TF_ROCM_FMA_DISABLE":"1",}
+            },
+        # "AMP" : {
+        #     KEY_OPTIONS : ["--auto_mixed_precision"],
+        #     KEY_ENV_VARS : {"TF_ROCM_FMA_DISABLE":"1",}
+        #     },
+
+        # "baseline" : {
+        #     KEY_OPTIONS : [],
+        #     KEY_ENV_VARS : {"TF_ROCM_FMA_DISABLE":"1",}
+        #     },
+
+        # "AMP + FUSION" : {
+        #     KEY_OPTIONS : ["--auto_mixed_precision"],
+        #     KEY_ENV_VARS : {"TF_ROCM_FUSION_ENABLE":"1",}
+        #     },
+
+        # "AMP + XLA" : {
+        #     KEY_OPTIONS : ["--auto_mixed_precision", "--xla"],
+        #     KEY_ENV_VARS : {"TF_ROCM_FMA_DISABLE":"1",}
+        #     },
+
+        }
+
+    def add_option_to_all_configs(option):
+        for key, value in configs.items():
+            value[KEY_OPTIONS].append(option)
+
+    # add_option_to_all_configs("--batch_size=256")
+
+    def display_configs():
+        for key, value in configs.items():
+            print("{}:".format(key))
+            print("\toptions : ", value[KEY_OPTIONS])
+            print("\tenv_vars : ", value[KEY_ENV_VARS])
+
+    display_configs()
+                  
     N = 3
     
     data = {}
@@ -91,8 +140,8 @@ def collect_tf_cnn_benchmark_perf_data():
         return config_data
 
     for model in models:
-        for name, options, env_vars in configs:
-            config_data = run_N_times(N, model, options, env_vars)
+        for name, config in configs.items():
+            config_data = run_N_times(N, model, config[KEY_OPTIONS], config[KEY_ENV_VARS])
             data["{}_{}".format(model, name)] = config_data
 
     return data
@@ -124,7 +173,7 @@ def gather_stats(data):
     
     for model in models:
         model_stats = {}
-        for name, options, env_vars in configs:
+        for name, config in configs.items():
             config_data = data["{}_{}".format(model, name)]
             model_stats[name] = get_stats(N, config_data)
         stats[model] = model_stats
@@ -145,7 +194,7 @@ def dump_stats(excel_file, stats):
     N = stats["N"]
     
     header_1 = ["", ""]
-    for name, options, env_vars in configs:
+    for name, config in configs.items():
         header_1.append(name)
         for i in range(N):
             header_1.append("")
@@ -154,7 +203,7 @@ def dump_stats(excel_file, stats):
     sheet.append(header_1)
     
     header_2 = ["benchmark", ""]
-    for name, options, env_vars in configs:
+    for name, config in configs.items():
         for i in range(N):
             header_2.append("run_{}".format(i))
         header_2.append("AVERAGE") 
@@ -165,7 +214,7 @@ def dump_stats(excel_file, stats):
     for model in models:
         row = [model, ""]
         model_stats = stats[model]
-        for name, options, env_vars in configs:
+        for name, config in configs.items():
             config_stats = model_stats[name]
             for i in range(N):
                 row.append(config_stats[i])
@@ -190,7 +239,7 @@ def dump_stats_transposed(excel_file, stats):
     N = stats["N"]
     
     header_1 = ["", ""]
-    for name, options, env_vars in configs:
+    for name, config in configs.items():
         header_1.append(name)
         for i in range(N):
             header_1.append("")
@@ -199,7 +248,7 @@ def dump_stats_transposed(excel_file, stats):
     sheet.append(header_1)
     
     header_2 = ["benchmark", ""]
-    for name, options, env_vars in configs:
+    for name, config in configs.items():
         for i in range(N):
             header_2.append("run_{}".format(i))
         header_2.append("AVERAGE") 
@@ -210,7 +259,7 @@ def dump_stats_transposed(excel_file, stats):
     for model in models:
         row = [model, ""]
         model_stats = stats[model]
-        for name, options, env_vars in configs:
+        for name, config in configs.items():
             config_stats = model_stats[name]
             for i in range(N):
                 row.append(config_stats[i])

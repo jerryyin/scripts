@@ -1,0 +1,37 @@
+ARG ROCM_OR_CUDA_IMAGE=devenamd/rocm:3.7.0-200824
+
+FROM $ROCM_OR_CUDA_IMAGE
+MAINTAINER Deven Desai <deven.desai.amd@gmail.com>
+
+ARG ROCM_OR_CUDA=rocm
+ARG BAZEL_VER="3.1.0"
+ARG CLANG_VER=10
+ARG GCC_VER=8
+
+ARG USER=rocm-user
+
+ARG TEMP_DIR=/workspace/temp/
+
+ENV DEBIAN_FRONTEND noninteractive
+ENV HOME /home/$USER
+
+RUN sudo mkdir -p /install/
+RUN sudo mkdir -p ${TEMP_DIR}
+
+RUN sudo apt-get update && sudo apt-get install -y unzip
+
+# install bazel
+COPY install_scripts/install_bazel.sh /install/
+RUN sudo /install/install_bazel.sh ${TEMP_DIR} ${BAZEL_VER}
+
+# install clang
+COPY install_scripts/install_clang.sh /install/
+RUN sudo /install/install_clang.sh ${TEMP_DIR} ${CLANG_VER}
+
+# install gcc (for libstdc++)
+COPY install_scripts/install_gcc.sh /install/
+RUN sudo /install/install_gcc.sh ${TEMP_DIR} ${CLANG_VER}
+
+# clone the TFRT repo
+RUN mkdir $HOME/tensorflow
+RUN cd $HOME/tensorflow && git clone https://github.com/tensorflow/runtime

@@ -1,0 +1,63 @@
+ARG UBUNTU_BASE=ubuntu:18.04
+
+FROM $UBUNTU_BASE
+MAINTAINER Deven Desai <deven.desai.amd@gmail.com>
+
+ARG ROCM_DEB_REPO=http://repo.radeon.com/rocm/apt/3.5/
+ARG ROCM_BUILD_NAME=xenial
+ARG ROCM_BUILD_NUM=main
+ARG ROCM_PATH=/opt/rocm-3.5.0
+ARG USER=rocm-user
+
+ENV DEBIAN_FRONTEND noninteractive
+
+COPY install_scripts/install_base_deb_packages.sh /install/
+RUN /install/install_base_deb_packages.sh 
+
+# Add rocm repository
+RUN apt-get clean all
+RUN bin/bash -c 'if [[ $ROCM_DEB_REPO == http://repo.radeon.com/rocm/*  ]] ; then \
+      wget -qO - $ROCM_DEB_REPO/rocm.gpg.key | apt-key add -; \
+      echo "deb [arch=amd64] $ROCM_DEB_REPO $ROCM_BUILD_NAME $ROCM_BUILD_NUM" > /etc/apt/sources.list.d/rocm.list; \
+    else \
+      echo "deb [arch=amd64 trusted=yes] $ROCM_DEB_REPO $ROCM_BUILD_NAME $ROCM_BUILD_NUM" > /etc/apt/sources.list.d/rocm.list ; \
+    fi'
+
+COPY install_scripts/install_rocm.sh /install/
+RUN /install/install_rocm.sh 
+
+# Add target file to help determine which device(s) to build for
+RUN rm -rf ${ROCM_PATH}/bin/target.lst
+RUN bash -c 'echo -e "gfx900\ngfx906\ngfx908" >> ${ROCM_PATH}/bin/target.lst'
+
+ENV ROCM_PATH=$ROCM_PATH
+ENV PATH="$ROCM_PATH/bin:${PATH}"
+
+# ENV HIP_PATH=$ROCM_PATH/hip
+# ENV PATH="$HIP_PATH/bin:${PATH}"
+
+# ENV OPENCL_ROOT=$ROCM_PATH/opencl
+# ENV PATH="$OPENCL_ROOT/bin:${PATH}"
+
+
+# RUN useradd --create-home $USER
+# RUN usermod --append --groups sudo $USER
+RUN /bin/bash -c 'useradd --create-home -G sudo --shell /bin/bash $USER'
+RUN passwd -d $USER
+
+USER $USER
+WORKDIR /home/$USER
+#
+# Run an dummy sudo command to suppress the following message
+# (which will otherwise appear evertyime you start the container)
+# --- 
+# To run a command as administrator (user "root"), use "sudo <command>".
+# See "man sudo_root" for details.
+# --- 
+#
+RUN sudo echo
+
+CMD /bin/bash
+
+
+

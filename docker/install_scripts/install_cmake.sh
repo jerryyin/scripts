@@ -1,3 +1,5 @@
+set -e
+
 WORKDIR=$1
 VERSION=${2:-"3.17.3"}
 

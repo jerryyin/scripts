@@ -1,0 +1,14 @@
+ARG TF_IMAGE_NO_BUILD=devenamd/tensorflow:rocm38_3393-tf-rocmfork-200805
+
+FROM $TF_IMAGE_NO_BUILD
+MAINTAINER Deven Desai <deven.desai.amd@gmail.com>
+
+ARG ROCM_PATH=/opt/rocm-3.8.0-3393
+ARG TF_SOURCE_DIR=/root/tensorflow
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN git clone https://github.com/ROCmSoftwarePlatform/tensorflow-upstream $TF_SOURCE_DIR
+RUN cd $TF_SOURCE_DIR && ./build_rocm_python3
+
+ENV ROCM_PATH=$ROCM_PATH
