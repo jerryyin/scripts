@@ -1,6 +1,6 @@
-docker_image=rocm/tensorflow-autobuilds:rocm4.5.2-latest
+docker_image=rocm/tensorflow:rocm5.0-tf2.8-dev
 
-container_name=deven_01_rocm452_weekly_sync
+container_name=deven_08_rocm50_r28
 
 docker pull $docker_image
 

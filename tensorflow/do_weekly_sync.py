@@ -23,7 +23,7 @@ def fetch_remotes():
 
 def create_sync_branch(suffix):
   run_shell_command(["git", "checkout", "develop-upstream"])
-  run_shell_command(["git", "pull", "--ff-only"])
+  run_shell_command(["git", "merge", "--ff-only"])
   run_shell_command(["git", "checkout", "-b", "develop-upstream-sync-{}".format(suffix)])
   run_shell_command(["git", "merge", "--no-edit", "google_upstream/master"])
 
@@ -44,7 +44,7 @@ def apply_post_tags(suffix):
 
 if __name__ == '__main__':
 
-  suffix = "211213"
+  suffix = "220228"
 
   # add_remote_google_upstream()
 
@@ -63,7 +63,7 @@ if __name__ == '__main__':
   # # merge PR
 
   # apply_post_tags(suffix)
-  # # don't forget to enter user-id/password
+  # don't forget to enter user-id/password
 
   # update the "base_commit" in
   # <frameworks-internal-repo>/tensorflow/scritps/show_upstream_rocmfork_source_delta.py

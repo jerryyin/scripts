@@ -83,7 +83,7 @@ options="$options --test_size_filters=small,medium,large"
 # options="$options --action_env=HIPCC_COMPILE_FLAGS_APPEND=-fno-legacy-pass-manager"
 
 # options="$options --test_env=TF_CPP_MIN_LOG_LEVEL=1"
-# options="$options --test_env=TF_CPP_MIN_VLOG_LEVEL=3"
+# options="$options --test_env=TF_CPP_MIN_VLOG_LEVEL=1"
 # options="$options --test_env=TF_CPP_MAX_VLOG_LEVEL=3"
 
 # vmodules="dummy=1"
