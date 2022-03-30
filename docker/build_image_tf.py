@@ -91,13 +91,26 @@ def get_internal_bkc_build():
     return docker_image_tag, docker_build_args
     
     
-def get_internal_build():
-    internal_build_number = 9470
-    install_dir = "rocm-5.1.0-{}".format(internal_build_number)
-    docker_image_tag = "rocm51_{}-tf-rocmfork-r26".format(internal_build_number)
+def get_internal_mainline_build():
+    internal_build_number = 9868
+    install_dir = "rocm-5.2.0-{}".format(internal_build_number)
+    docker_image_tag = "rocm52_{}-tf-rocmfork-r27".format(internal_build_number)
     docker_build_args = [
         "--build-arg", "ROCM_DEB_REPO=http://compute-artifactory.amd.com/artifactory/list/rocm-osdb-deb/",
         "--build-arg", "ROCM_BUILD_NAME=compute-rocm-dkms-no-npi-hipclang",
+        "--build-arg", "ROCM_BUILD_NUM={}".format(internal_build_number),
+        "--build-arg", "ROCM_PATH=/opt/{}".format(install_dir),
+        ]
+    return docker_image_tag, docker_build_args
+
+
+def get_internal_staging_build():
+    internal_build_number = 102
+    install_dir = "rocm-5.2.0-{}".format(internal_build_number)
+    docker_image_tag = "rocm52_{}-tf-rocmfork-r27".format(internal_build_number)
+    docker_build_args = [
+        "--build-arg", "ROCM_DEB_REPO=http://compute-artifactory.amd.com/artifactory/list/rocm-osdb-deb/",
+        "--build-arg", "ROCM_BUILD_NAME=compute-rocm-dkms-component-staging-hip",
         "--build-arg", "ROCM_BUILD_NUM={}".format(internal_build_number),
         "--build-arg", "ROCM_PATH=/opt/{}".format(install_dir),
         ]
@@ -128,7 +141,8 @@ if __name__ == '__main__':
     # docker_image_tag, docker_build_args = get_rc_build()
     # docker_image_tag, docker_build_args = get_internal_rc_build()
     # docker_image_tag, docker_build_args = get_internal_bkc_build()
-    # docker_image_tag, docker_build_args = get_internal_build()
+    # docker_image_tag, docker_build_args = get_internal_mainline_build()
+    docker_image_tag, docker_build_args = get_internal_staging_build()
     # docker_image_tag, docker_build_args = get_internal_navi_build()
 
     docker_image_name = "devenamd/tensorflow:{}-{}".format(docker_image_tag, date.today().strftime("%y%m%d"))

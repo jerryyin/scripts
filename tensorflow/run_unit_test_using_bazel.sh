@@ -12,13 +12,13 @@ echo ""
 echo "Bazel will use ${N_BUILD_JOBS} concurrent build job(s) and ${N_TEST_JOBS} concurrent test job(s)."
 echo ""
 
-export TF_NEED_ROCM=1
+export -n TF_NEED_ROCM=1
 #####################
 
 options=""
 
 # options="$options --config=opt"
-options="$options --config=rocm"
+# options="$options --config=rocm"
 # options="$options --action_env=HIP_PLATFORM=hcc"
 # options="$options --config=cuda"
 # options="$options --config=monolithic"
@@ -108,6 +108,9 @@ options="$options --test_size_filters=small,medium,large"
 # options="$options --test_env=XLA_FLAGS=--xla_dump_to=$tf_debug_output_xla"
 
 # options="$options --test_env=XLA_FLAGS=--xla_dump_hlo_as_text"
+
+# options="$options --test_env=XLA_FLAGS=--xla_gpu_bef_executable"
+# options="$options --config=experimental_enable_xlir"
 
 # options="$options --test_env=TF_ROCM_FUSION_ENABLE=1"
 # options="$options --test_env=TF_ROCM_FUSION_DUMP_GRAPH_BEFORE=1"
