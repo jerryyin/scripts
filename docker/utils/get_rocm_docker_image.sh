@@ -1,8 +1,8 @@
-docker_image=devenamd/tensorflow:rocm52_102-tf-rocmfork-r27-220329
+docker_image=rocm/tensorflow-autobuilds:rocm5.1.0-latest
 
 # docker pull $docker_image
 
-container_name=deven_22_rocm52_swdev_329277
+container_name=deven_27_rocm51_rocmfork
 
 options=""
 options="$options -it"

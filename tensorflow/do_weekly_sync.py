@@ -26,6 +26,7 @@ def create_sync_branch(suffix):
   run_shell_command(["git", "merge", "--ff-only"])
   run_shell_command(["git", "checkout", "-b", "develop-upstream-sync-{}".format(suffix)])
   run_shell_command(["git", "merge", "--no-edit", "google_upstream/master"])
+  # run_shell_command(["git", "merge", "--no-edit", "5b9f89b8ad020a4da5f78db26f446229f802c236"])  # r2.9_branch_commit
 
 
 def apply_pre_tags(suffix):
