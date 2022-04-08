@@ -1,6 +1,8 @@
 #!/bin/sh
 set -x
 
+apt-get update && apt-get -y install sudo
+
 shopt -s expand_aliases
 alias dockerInstall='DEBIAN_FRONTEND=noninteractive sudo apt-get install -f -y'
 
