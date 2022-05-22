@@ -14,20 +14,19 @@ dockerInstall wget
 
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa.
-sudo add-apt-repository -y ppa:jonathonf/vim
-# gnu global ppa.
-sudo add-apt-repository -y ppa:dns/gnu
+add-apt-repository -y ppa:jonathonf/vim
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | sudo apt-key add -
 sudo apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
 
-# Install misc pkgs
-dockerInstall apt-utils ssh curl global cscope git
-dockerInstall vim stow xclip locales python3-dev python-autopep8 gdb
-# For macos: the_silver_searcher
-dockerInstall zsh fonts-powerline tmux silversearcher-ag
+# Install misc pkgs (For macos: the_silver_searcher)
+dockerInstall ca-certificates apt-utils ssh curl cscope git vim stow xclip locales python3-dev \
+              python-autopep8 gdb zsh fonts-powerline tmux silversearcher-ag
 # https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
 dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build 
+# https://github.com/universal-ctags/ctags/blob/master/docs/autotools.rst
+dockerInstall gcc make pkg-config autoconf automake python3-docutils \
+              libseccomp-dev libjansson-dev libyaml-dev libxml2-dev
 
 sudo apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -76,3 +75,15 @@ if [ ! -d scripts ]; then
     git clone https://github.com/jerryyin/scripts.git
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
+
+# Build latest universal ctags
+git clone https://github.com/universal-ctags/ctags.git && cd ctags
+./autogen.sh && ./configure && make -j$(nproc) && sudo make install
+cd ~ && rm -rf ctags
+
+# Build latest gtags(gnu global)
+GLOBAL=global-6.6.8
+wget https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
+tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
+./configure --with-universal-ctags=/usr/local/bin/ctags && make -j$(nproc) && sudo make install
+cd ~ && rm -rf $GLOBAL*
