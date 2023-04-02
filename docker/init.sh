@@ -69,7 +69,6 @@ fi
 
 # Make vim-plug to intialize submodules: vimrc does it now
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
-chmod +x /Users/zhuoranyin/.vim/plugged/vim-gutentags/plat/unix/update_*
 
 # Clone scripts
 if [ ! -d scripts ]; then
