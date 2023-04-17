@@ -10,14 +10,17 @@ sudo apt-get update --allow-insecure-repositories
 
 dockerInstall software-properties-common  # Install add-apt-repository
 dockerInstall apt-transport-https         # Dependency from kitware, for https
-dockerInstall wget
+dockerInstall wget gpg
 
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa.
 add-apt-repository -y ppa:jonathonf/vim
+
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
-wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | sudo apt-key add -
-sudo apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
+wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+sudo rm /usr/share/keyrings/kitware-archive-keyring.gpg
+dockerInstall kitware-archive-keyring
 
 # Install misc pkgs (For macos: the_silver_searcher)
 dockerInstall ca-certificates apt-utils ssh curl cscope git vim stow xclip locales python3-dev \
@@ -93,3 +96,9 @@ dockerInstall libgmp-dev
 wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
 tar -xzf $GDB.tar.gz && cd $GDB
 ./configure && make -j$(nproc) && sudo make install
+
+# Install nodejs and neovim
+curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash -
+add-apt-repository -y ppa:neovim-ppa/stable
+dockerInstall nodejs neovim
+mkdir -p ~/.config/nvim && ln -sf ~/.vimrc ~/.confg/nvim/init.vim && ln -sf ./.config/nvim ~/.vim
