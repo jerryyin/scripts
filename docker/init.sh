@@ -82,8 +82,14 @@ git clone https://github.com/universal-ctags/ctags.git && cd ctags
 cd ~ && rm -rf ctags
 
 # Build latest gtags(gnu global)
-GLOBAL=global-6.6.8
+GLOBAL=global-6.6.9
 wget https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
 tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
 ./configure --with-universal-ctags=/usr/local/bin/ctags && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GLOBAL*
+
+GDB=gdb-13.1
+dockerInstall libgmp-dev
+wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
+tar -xzf $GDB.tar.gz && cd $GDB
+./configure && make -j$(nproc) && sudo make install
