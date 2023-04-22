@@ -19,7 +19,6 @@ add-apt-repository -y ppa:jonathonf/vim
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
-sudo rm /usr/share/keyrings/kitware-archive-keyring.gpg
 dockerInstall kitware-archive-keyring
 
 # Install misc pkgs (For macos: the_silver_searcher)
