@@ -101,4 +101,5 @@ tar -xzf $GDB.tar.gz && cd $GDB
 curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash -
 add-apt-repository -y ppa:neovim-ppa/stable
 dockerInstall nodejs neovim
-mkdir -p ~/.config/nvim && ln -sf ~/.vimrc ~/.confg/nvim/init.vim && ln -sf ./.config/nvim ~/.vim
+mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
+mkdir -p ~/.config/nvim && ln -s ~/.vimrc ~/.config/nvim/init.vim
