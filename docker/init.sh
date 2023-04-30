@@ -23,7 +23,7 @@ dockerInstall kitware-archive-keyring
 
 # Install misc pkgs (For macos: the_silver_searcher)
 dockerInstall ca-certificates apt-utils ssh curl cscope git vim stow xclip locales python3-dev \
-              python3-autopep8 gdb zsh fonts-powerline tmux silversearcher-ag
+              python3-autopep8 zsh fonts-powerline tmux silversearcher-ag less
 # https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
 dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build 
 # https://github.com/universal-ctags/ctags/blob/master/docs/autotools.rst
@@ -95,6 +95,8 @@ dockerInstall libgmp-dev
 wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
 tar -xzf $GDB.tar.gz && cd $GDB
 ./configure && make -j$(nproc) && sudo make install
+# GDB pretty printers
+git clone https://github.com/koutheir/libcxx-pretty-printers.git
 
 # Install nodejs and neovim
 curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash -
