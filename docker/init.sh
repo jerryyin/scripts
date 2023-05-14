@@ -37,14 +37,6 @@ if [ ! -d .tmux/plugins/tpm ]; then
     git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 fi
 
-# zsh
-if [ ! -d .oh-my-zsh ]; then
-    echo "Y" | sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-    git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-    git clone https://github.com/zsh-users/zsh-syntax-highlighting ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
-    git clone https://github.com/zsh-users/zsh-history-substring-search ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-history-substring-search
-fi
-
 # Make zsh default shell
 sudo chsh -s $(which zsh)
 
@@ -59,6 +51,9 @@ if [ ! -d rc_files ]; then
     done
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
+
+# Install zsh plugins
+source .zshrc
 
 # Git configurations
 # git default user, password, ignore file
