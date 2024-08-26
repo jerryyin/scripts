@@ -94,6 +94,7 @@ tar -xzf $GDB.tar.gz && cd $GDB
 git clone https://github.com/koutheir/libcxx-pretty-printers.git
 
 # Install nodejs and neovim
+curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 add-apt-repository -y ppa:neovim-ppa/stable
 dockerInstall nodejs neovim
 mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
