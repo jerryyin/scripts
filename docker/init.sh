@@ -99,3 +99,7 @@ add-apt-repository -y ppa:neovim-ppa/stable
 dockerInstall nodejs neovim
 mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
 mkdir -p ~/.config/nvim && ln -s ~/.vimrc ~/.config/nvim/init.vim
+
+wget https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
+sudo cp AMD_CA.crt /usr/local/share/ca-certificates
+sudo update-ca-certificates
