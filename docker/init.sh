@@ -79,13 +79,13 @@ git clone https://github.com/universal-ctags/ctags.git && cd ctags
 cd ~ && rm -rf ctags
 
 # Build latest gtags(gnu global)
-GLOBAL=global-6.6.9
+GLOBAL=global-6.6.13
 wget https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
 tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
 ./configure --with-universal-ctags=/usr/local/bin/ctags && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GLOBAL*
 
-GDB=gdb-13.1
+GDB=gdb-15.1
 dockerInstall libgmp-dev
 wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
 tar -xzf $GDB.tar.gz && cd $GDB
@@ -94,7 +94,6 @@ tar -xzf $GDB.tar.gz && cd $GDB
 git clone https://github.com/koutheir/libcxx-pretty-printers.git
 
 # Install nodejs and neovim
-curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash -
 add-apt-repository -y ppa:neovim-ppa/stable
 dockerInstall nodejs neovim
 mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
