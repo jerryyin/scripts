@@ -14,7 +14,7 @@ echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/h
 
 shopt -s expand_aliases
 export DEBIAN_FRONTEND=noninteractive
-alias dockerInstall='sudo apt-get install -f -y -qq'
+alias dockerInstall='sudo apt-get install -f -y -qq -o Dpkg::Options::="--force-confold"'
 
 sudo apt-get update --allow-insecure-repositories -qq
 
@@ -82,21 +82,21 @@ git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
 # Build latest universal ctags
 git clone https://github.com/universal-ctags/ctags.git && cd ctags
-./autogen.sh && ./configure CFLAGS="-w" CXXFLAGS="-w"
+./autogen.sh && ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w"
 cd ~ && rm -rf ctags
 
 # Build latest gtags(gnu global)
 GLOBAL=global-6.6.13
 wget https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
 tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
-./configure --with-universal-ctags=/usr/local/bin/ctags CFLAGS="-w" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
+./configure --with-universal-ctags=/usr/local/bin/ctags CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GLOBAL*
 
 GDB=gdb-15.1
-dockerInstall libgmp-dev
+dockerInstall libgmp-dev texinfo
 wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
 tar -xzf $GDB.tar.gz && cd $GDB
-./configure CFLAGS="-w" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
+./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GDB*
 # GDB pretty printers
 git clone https://github.com/koutheir/libcxx-pretty-printers.git
@@ -113,10 +113,12 @@ sudo cp AMD_CA.crt /usr/local/share/ca-certificates
 sudo update-ca-certificates
 
 # Create a heredoc that will be executed in zsh
-zsh << 'EOF'
-
+zsh << EOF
 # Ensure we're still redirecting to regular.log
-# exec 1>>regular.log
+exec 1>>regular.log
+
+# Supressing tput output
+export TERM=xterm
 
 # Install zsh plugins
 source .zshrc
