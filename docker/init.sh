@@ -50,6 +50,9 @@ fi
 # Make zsh default shell
 sudo chsh -s $(which zsh)
 
+# Switch to zsh for rest of the script
+exec zsh
+
 # rc files
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
