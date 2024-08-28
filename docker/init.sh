@@ -38,7 +38,7 @@ dockerInstall ca-certificates apt-utils ssh curl cscope git vim stow xclip local
 dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build
 # https://github.com/universal-ctags/ctags/blob/master/docs/autotools.rst
 dockerInstall gcc make pkg-config autoconf automake python3-docutils \
-              libseccomp-dev libjansson-dev libyaml-dev libxml2-dev
+              libseccomp-dev libjansson-dev libyaml-dev libxml2-dev texinfo
 
 sudo apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -87,14 +87,14 @@ cd ~ && rm -rf ctags
 
 # Build latest gtags(gnu global)
 GLOBAL=global-6.6.13
-wget https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
+wget -q https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
 tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
 ./configure --with-universal-ctags=/usr/local/bin/ctags CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GLOBAL*
 
 GDB=gdb-15.1
-dockerInstall libgmp-dev texinfo
-wget http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
+dockerInstall libgmp-dev
+wget -q http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
 tar -xzf $GDB.tar.gz && cd $GDB
 ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
 cd ~ && rm -rf $GDB*
