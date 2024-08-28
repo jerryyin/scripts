@@ -14,9 +14,9 @@ echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/h
 
 shopt -s expand_aliases
 export DEBIAN_FRONTEND=noninteractive
-alias dockerInstall='sudo apt-get install -f -y'
+alias dockerInstall='sudo apt-get install -f -y -qq'
 
-sudo apt-get update --allow-insecure-repositories
+sudo apt-get update --allow-insecure-repositories -qq
 
 dockerInstall software-properties-common  # Install add-apt-repository
 dockerInstall apt-transport-https         # Dependency from kitware, for https
@@ -50,9 +50,6 @@ fi
 # Make zsh default shell
 sudo chsh -s $(which zsh)
 
-# Switch to zsh for rest of the script
-exec zsh
-
 # rc files
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
@@ -64,9 +61,6 @@ if [ ! -d rc_files ]; then
     done
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
-
-# Install zsh plugins
-source .zshrc
 
 # Git configurations
 # git default user, password, ignore file
@@ -117,3 +111,16 @@ mkdir -p ~/.config/nvim && ln -s ~/.vimrc ~/.config/nvim/init.vim
 wget https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
 sudo cp AMD_CA.crt /usr/local/share/ca-certificates
 sudo update-ca-certificates
+
+# Create a heredoc that will be executed in zsh
+zsh << 'EOF'
+
+# Ensure we're still redirecting to regular.log
+# exec 1>>regular.log
+
+# Install zsh plugins
+source .zshrc
+
+EOF
+
+exec zsh
