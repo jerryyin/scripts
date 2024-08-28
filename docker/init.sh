@@ -13,8 +13,7 @@ apt-get update && apt-get -y install sudo
 echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
 
 shopt -s expand_aliases
-export DEBIAN_FRONTEND=noninteractive
-alias dockerInstall='sudo apt-get install -f -y -qq -o Dpkg::Options::="--force-confold"'
+alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq -o Dpkg::Options::="--force-confold"'
 
 sudo apt-get update --allow-insecure-repositories -qq
 
@@ -29,6 +28,7 @@ add-apt-repository -y ppa:jonathonf/vim
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+sudo apt-get update --allow-insecure-repositories -qq
 dockerInstall kitware-archive-keyring
 
 # Install misc pkgs (For macos: the_silver_searcher)
