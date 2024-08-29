@@ -13,7 +13,7 @@ apt-get update && apt-get -y install sudo
 echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
 
 shopt -s expand_aliases
-alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq -o Dpkg::Options::="--force-confold"'
+alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq "'
 
 sudo apt-get update --allow-insecure-repositories -qq
 
