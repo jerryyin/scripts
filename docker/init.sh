@@ -80,26 +80,29 @@ if [ ! -d scripts ]; then
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
-# Build latest universal ctags
-git clone https://github.com/universal-ctags/ctags.git && cd ctags
-./autogen.sh && ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w"
-cd ~ && rm -rf ctags
-
-# Build latest gtags(gnu global)
-GLOBAL=global-6.6.13
-wget -q https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
-tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
-./configure --with-universal-ctags=/usr/local/bin/ctags CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
-cd ~ && rm -rf $GLOBAL*
-
-GDB=gdb-15.1
-dockerInstall libgmp-dev
-wget -q http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
-tar -xzf $GDB.tar.gz && cd $GDB
-./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
-cd ~ && rm -rf $GDB*
-# GDB pretty printers
-git clone https://github.com/koutheir/libcxx-pretty-printers.git
+# User needs explicitly add tools argument to turn on expensive setups
+if [ $1 == "tools" ]; then
+  # Build latest universal ctags
+  git clone https://github.com/universal-ctags/ctags.git && cd ctags
+  ./autogen.sh && ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w"
+  cd ~ && rm -rf ctags
+  
+  # Build latest gtags(gnu global)
+  GLOBAL=global-6.6.13
+  wget -q https://ftp.gnu.org/pub/gnu/global/$GLOBAL.tar.gz
+  tar -xzf $GLOBAL.tar.gz && cd $GLOBAL
+  ./configure --with-universal-ctags=/usr/local/bin/ctags CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
+  cd ~ && rm -rf $GLOBAL*
+  
+  GDB=gdb-15.1
+  dockerInstall libgmp-dev
+  wget -q http://ftp.gnu.org/gnu/gdb/$GDB.tar.gz
+  tar -xzf $GDB.tar.gz && cd $GDB
+  ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w" && make -j$(nproc) && sudo make install
+  cd ~ && rm -rf $GDB*
+  # GDB pretty printers
+  git clone https://github.com/koutheir/libcxx-pretty-printers.git
+fi
 
 # Install nodejs and neovim
 curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
