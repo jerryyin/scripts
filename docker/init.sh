@@ -36,9 +36,6 @@ dockerInstall ca-certificates apt-utils ssh curl cscope git vim stow xclip local
               python3-autopep8 zsh fonts-powerline tmux silversearcher-ag less
 # https://github.com/google/llvm-premerge-checks/blob/master/containers/base-debian/Dockerfile
 dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build
-# https://github.com/universal-ctags/ctags/blob/master/docs/autotools.rst
-dockerInstall gcc make pkg-config autoconf automake python3-docutils \
-              libseccomp-dev libjansson-dev libyaml-dev libxml2-dev texinfo
 
 sudo apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -81,8 +78,11 @@ fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
 # User needs explicitly add tools argument to turn on expensive setups
-if [ $1 == "tools" ]; then
+if [ "$1" = "tools" ]; then
   # Build latest universal ctags
+  # https://github.com/universal-ctags/ctags/blob/master/docs/autotools.rst
+  dockerInstall gcc make pkg-config autoconf automake python3-docutils \
+              libseccomp-dev libjansson-dev libyaml-dev libxml2-dev texinfo
   git clone https://github.com/universal-ctags/ctags.git && cd ctags
   ./autogen.sh && ./configure CFLAGS="-w -Wno-deprecated" CXXFLAGS="-w"
   cd ~ && rm -rf ctags
