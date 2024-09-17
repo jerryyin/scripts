@@ -11,10 +11,10 @@ setupMlirTag () {
   popd
 }
 
-if [ ! -d llvm-project-mlir ]; then
-  git clone https://github.com/ROCmSoftwarePlatform/llvm-project-mlir.git
-  setupMlirTag "${PWD}/llvm-project-mlir"
-  git -C llvm-project-mlir remote set-url origin git@github.com:ROCmSoftwarePlatform/llvm-project-mlir.git
+if [ ! -d rocMLIR ]; then
+  git clone https://github.com/ROCmSoftwarePlatform/rocMLIR.git
+  setupMlirTag "${PWD}/rocMLIR"
+  git -C llvm-project-mlir remote set-url origin git@github.com:ROCmSoftwarePlatform/rocMLIR.git
 else
-  setupMlirTag "${PWD}/llvm-project-mlir"
+  setupMlirTag "${PWD}/rocMLIR"
 fi
