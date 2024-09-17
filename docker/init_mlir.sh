@@ -14,7 +14,7 @@ setupMlirTag () {
 if [ ! -d rocMLIR ]; then
   git clone https://github.com/ROCmSoftwarePlatform/rocMLIR.git
   setupMlirTag "${PWD}/rocMLIR"
-  git -C llvm-project-mlir remote set-url origin git@github.com:ROCmSoftwarePlatform/rocMLIR.git
+  git -C rocMLIR remote set-url origin git@github.com:ROCmSoftwarePlatform/rocMLIR.git
 else
   setupMlirTag "${PWD}/rocMLIR"
 fi
