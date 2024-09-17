@@ -127,5 +127,3 @@ export TERM=xterm
 source .zshrc
 
 EOF
-
-exec zsh
