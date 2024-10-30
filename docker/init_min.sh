@@ -24,7 +24,7 @@ add-apt-repository -y ppa:jonathonf/vim
 add-apt-repository -y ppa:neovim-ppa/stable
 
 # Install misc pkgs (For macos: the_silver_searcher)
-dockerInstall vim zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim
+dockerInstall git vim zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim
 sudo apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # install tmux plugin manager
