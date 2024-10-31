@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 19,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ROCm",
+      "displayName": "Clang - ROCm Build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../build/ROCm",
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/../install/ROCm",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER_LAUNCHER": "/usr/bin/ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "/usr/bin/ccache",
+        "MLIR_INCLUDE_TESTS": "ON",
+        "LLVM_INCLUDE_TESTS": "ON",
+        "IREE_ENABLE_LLD": "ON",
+        "IREE_HAL_DRIVER_METAL": "OFF",
+        "IREE_HAL_DRIVER_CUDA": "OFF",
+        "IREE_HAL_DRIVER_VULKAN": "OFF",
+        "IREE_HAL_DRIVER_HIP": "OFF",
+        "IREE_TARGET_BACKEND_ROCM": "ON"
+      }
+    }
+  ]
+}
+
