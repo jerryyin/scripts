@@ -17,4 +17,4 @@ dockerInstall cmake \
               lld 
 
 ln -s /zyin/iree .
-ln -fs ~/scripts/iree/CMakePresets.json ./iree/
+ln -sf ~/scripts/iree/CMakePresets.json ./iree/CMakePresets.json
