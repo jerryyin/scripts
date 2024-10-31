@@ -13,7 +13,6 @@ apt-get update && apt-get -y install sudo software-properties-common
 echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
 
 shopt -s expand_aliases
-alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq '
 
 sudo apt-get update --allow-insecure-repositories -qq
 
@@ -24,7 +23,8 @@ sudo add-apt-repository -y ppa:jonathonf/vim
 sudo add-apt-repository -y ppa:neovim-ppa/stable
 
 # Install misc pkgs (For macos: the_silver_searcher)
-dockerInstall git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget pkgs
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
+     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget pkgs
 
 # Fixup ROCm keys
 wget --no-check-certificate -qO - http://repo.radeon.com/rocm/rocm.gpg.key 2>/dev/null | apt-key add -
