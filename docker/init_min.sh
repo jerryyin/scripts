@@ -19,13 +19,15 @@ sudo apt-get update --allow-insecure-repositories -qq
 
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa.
-add-apt-repository -y ppa:jonathonf/vim
+sudo add-apt-repository -y ppa:jonathonf/vim
 # neovim ppa
-add-apt-repository -y ppa:neovim-ppa/stable
+sudo add-apt-repository -y ppa:neovim-ppa/stable
 
 # Install misc pkgs (For macos: the_silver_searcher)
-dockerInstall git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim 
-sudo apt-get clean && rm -rf /var/lib/apt/lists/*
+dockerInstall git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget
+
+# Fixup ROCm keys
+wget --no-check-certificate -qO - http://repo.radeon.com/rocm/rocm.gpg.key 2>/dev/null | apt-key add -
 
 # install tmux plugin manager
 if [ ! -d .tmux/plugins/tpm ]; then

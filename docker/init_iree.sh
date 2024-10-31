@@ -7,5 +7,5 @@ apt-get update && apt-get -y install cmake \
                                      clang \
                                      lld 
 
-ln -s /zyin/iree ~/iree
+ln -sf /zyin/iree ~/
 ln -sf ~/scripts/iree/CMakePresets.json /zyin/iree/CMakePresets.json
