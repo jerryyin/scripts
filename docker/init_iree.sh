@@ -8,13 +8,10 @@ REGULAR_LOG="regular.log"
 # Redirect stdout to regular.log and stderr remains visible
 exec 1>>"$REGULAR_LOG"
 
-alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq '
-
-dockerInstall cmake \
-              ccache \
-              ninja-build \
-              clang \
-              lld 
+RUN apt-get update && apt-get -y install cmake \
+                                         ccache \
+                                         ninja-build \
+                                         clang \
+                                         lld 
 
 ln -s /zyin/iree ~/iree
-ln -sf ~/scripts/iree/CMakePresets.json /zyin/iree/CMakePresets.json
