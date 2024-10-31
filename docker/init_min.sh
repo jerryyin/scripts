@@ -8,7 +8,7 @@ REGULAR_LOG="regular.log"
 # Redirect stdout to regular.log and stderr remains visible
 exec 1>>"$REGULAR_LOG"
 
-apt-get update && apt-get -y install sudo
+apt-get update && apt-get -y install sudo software-properties-common
 # Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
 echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
 
