@@ -10,5 +10,11 @@ exec 1>>"$REGULAR_LOG"
 
 alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq '
 
-dockerInstall cmake ninja-build clang lld 
+dockerInstall cmake \
+              ccache \
+              ninja-build \
+              clang \
+              lld 
+
 ln -s /zyin/iree .
+ln -fs ~/scripts/iree/CMakePresets.json ./iree/
