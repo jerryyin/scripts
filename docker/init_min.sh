@@ -24,7 +24,7 @@ sudo add-apt-repository -y ppa:jonathonf/vim
 sudo add-apt-repository -y ppa:neovim-ppa/stable
 
 # Install misc pkgs (For macos: the_silver_searcher)
-dockerInstall git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget
+dockerInstall git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget pkgs
 
 # Fixup ROCm keys
 wget --no-check-certificate -qO - http://repo.radeon.com/rocm/rocm.gpg.key 2>/dev/null | apt-key add -
