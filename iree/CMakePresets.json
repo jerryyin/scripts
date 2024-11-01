@@ -2,17 +2,17 @@
   "version": 3,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 19,
+    "minor": 23,
     "patch": 0
   },
   "configurePresets": [
     {
-      "name": "ROCm",
+      "name": "rocm",
       "displayName": "Clang - ROCm Build",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/../build/ROCm",
+      "binaryDir": "${sourceDir}/../build",
       "cacheVariables": {
-        "CMAKE_INSTALL_PREFIX": "${sourceDir}/../install/ROCm",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/../install",
         "CMAKE_C_COMPILER": "/usr/bin/clang",
         "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -24,8 +24,9 @@
         "IREE_HAL_DRIVER_METAL": "OFF",
         "IREE_HAL_DRIVER_CUDA": "OFF",
         "IREE_HAL_DRIVER_VULKAN": "OFF",
-        "IREE_HAL_DRIVER_HIP": "OFF",
-        "IREE_TARGET_BACKEND_ROCM": "ON"
+        "IREE_HAL_DRIVER_HIP": "ON",
+        "IREE_TARGET_BACKEND_ROCM": "ON",
+        "IREE_HIP_TEST_TARGET_CHIP": "gfx942"
       }
     }
   ]
