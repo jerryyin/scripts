@@ -21,6 +21,8 @@ sudo apt-get update --allow-insecure-repositories -qq
 sudo add-apt-repository -y ppa:jonathonf/vim
 # neovim ppa
 sudo add-apt-repository -y ppa:neovim-ppa/stable
+# setup nodejs
+curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
@@ -67,8 +69,7 @@ if [ ! -d scripts ]; then
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
-# Install nodejs and neovim
-curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
+# Configure neovim
 mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
 mkdir -p ~/.config/nvim && ln -s ~/.vimrc ~/.config/nvim/init.vim
 
