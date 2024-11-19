@@ -8,6 +8,9 @@ REGULAR_LOG="regular.log"
 # Redirect stdout to regular.log and stderr remains visible
 exec 1>>"$REGULAR_LOG"
 
+# Delete rocm sources if any, they tend to cause problem with apt update
+find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
+
 apt-get update && apt-get -y install sudo software-properties-common
 # Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
 echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
@@ -27,9 +30,6 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
      git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget
-
-# Fixup ROCm keys
-wget --no-check-certificate -qO - http://repo.radeon.com/rocm/rocm.gpg.key 2>/dev/null | apt-key add -
 
 # install tmux plugin manager
 if [ ! -d .tmux/plugins/tpm ]; then
