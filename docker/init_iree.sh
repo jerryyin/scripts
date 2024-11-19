@@ -34,4 +34,7 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
 
 pip install numpy
 
-cp -r /zyin/iree ~/
+if [ ! -d iree ]; then
+    git clone https://github.com/iree-org/iree.git
+    git -C iree remote set-url origin git@github.com:iree-org/iree.git
+fi
