@@ -34,4 +34,4 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
 
 pip install numpy
 
-ln -sf /zyin/iree ~/
+cp -r /zyin/iree ~/
