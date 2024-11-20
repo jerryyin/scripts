@@ -10,26 +10,27 @@ apt-get update && apt-get install -f -y -qq cmake ccache ninja-build
 # Keep this section up-to-date with the upstream
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
 # LLVM must be installed after prerequisite packages.
+export LLVM_VERSION=17
 LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
     wget --no-verbose https://apt.llvm.org/llvm.sh && \
     chmod +x llvm.sh && \
     ./llvm.sh ${LLVM_VERSION} && \
     apt-get update && \
     apt-get install -y clang-${LLVM_VERSION} clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} lld-${LLVM_VERSION} && \
-    ln -s /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang && \
-    ln -s /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ && \
-    ln -s /usr/bin/clang-tidy-${LLVM_VERSION} /usr/bin/clang-tidy && \
-    ln -s /usr/bin/clang-tidy-diff-${LLVM_VERSION}.py /usr/bin/clang-tidy-diff && \
-    ln -s /usr/bin/clang-format-${LLVM_VERSION} /usr/bin/clang-format && \
-    ln -s /usr/bin/git-clang-format-${LLVM_VERSION} /usr/bin/git-clang-format && \
-    ln -s /usr/bin/clang-format-diff-${LLVM_VERSION} /usr/bin/clang-format-diff && \
-    ln -s /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld && \
-    ln -s /usr/bin/lldb-${LLVM_VERSION} /usr/bin/lldb && \
-    ln -s /usr/bin/ld.lld-${LLVM_VERSION} /usr/bin/ld.lld && \
-    ln -s /usr/bin/llvm-profdata-${LLVM_VERSION} /usr/bin/llvm-profdata && \
-    ln -s /usr/bin/llvm-cov-${LLVM_VERSION} /usr/bin/llvm-cov && \
-    ln -s /usr/bin/llvm-symbolizer-${LLVM_VERSION} /usr/bin/llvm-symbolizer && \
-    ln -s /usr/bin/llvm-cxxfilt-${LLVM_VERSION} /usr/bin/llvm-cxxfilt && \
+    ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang && \
+    ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ && \
+    ln -sf /usr/bin/clang-tidy-${LLVM_VERSION} /usr/bin/clang-tidy && \
+    ln -sf /usr/bin/clang-tidy-diff-${LLVM_VERSION}.py /usr/bin/clang-tidy-diff && \
+    ln -sf /usr/bin/clang-format-${LLVM_VERSION} /usr/bin/clang-format && \
+    ln -sf /usr/bin/git-clang-format-${LLVM_VERSION} /usr/bin/git-clang-format && \
+    ln -sf /usr/bin/clang-format-diff-${LLVM_VERSION} /usr/bin/clang-format-diff && \
+    ln -sf /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld && \
+    ln -sf /usr/bin/lldb-${LLVM_VERSION} /usr/bin/lldb && \
+    ln -sf /usr/bin/ld.lld-${LLVM_VERSION} /usr/bin/ld.lld && \
+    ln -sf /usr/bin/llvm-profdata-${LLVM_VERSION} /usr/bin/llvm-profdata && \
+    ln -sf /usr/bin/llvm-cov-${LLVM_VERSION} /usr/bin/llvm-cov && \
+    ln -sf /usr/bin/llvm-symbolizer-${LLVM_VERSION} /usr/bin/llvm-symbolizer && \
+    ln -sf /usr/bin/llvm-cxxfilt-${LLVM_VERSION} /usr/bin/llvm-cxxfilt && \
     clang --version
 
 pip install numpy
@@ -37,4 +38,5 @@ pip install numpy
 if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
+    git -C iree submodule update --init
 fi
