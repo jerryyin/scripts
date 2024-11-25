@@ -33,10 +33,10 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
     ln -sf /usr/bin/llvm-cxxfilt-${LLVM_VERSION} /usr/bin/llvm-cxxfilt && \
     clang --version
 
-pip install numpy
-
 if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
     git -C iree submodule update --init
+    #python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
+    ln -s ~/scripts/iree/CMakePresets.json ~/iree/CmakePresets.json
 fi
