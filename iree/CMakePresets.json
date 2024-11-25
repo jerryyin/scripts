@@ -53,7 +53,7 @@
         "IREE_TARGET_BACKEND_ROCM": "ON",
         "IREE_HIP_TEST_TARGET_CHIP": "gfx942",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
-        "Python3_EXECUTABLE": "$(which python3)"
+        "Python3_EXECUTABLE": "$(which python3.11)"
       }
     }
   ]
