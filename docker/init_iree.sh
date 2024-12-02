@@ -38,5 +38,5 @@ if [ ! -d iree ]; then
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
     git -C iree submodule update --init
     #python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
-    ln -s ~/scripts/iree/CMakePresets.json ~/iree/CmakePresets.json
+    ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
 fi
