@@ -77,6 +77,8 @@ wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771de
 sudo cp AMD_CA.crt /usr/local/share/ca-certificates
 sudo update-ca-certificates
 
+sudo apt-get install -y locales && locale-gen en_US.UTF-8
+
 # Create a heredoc that will be executed in zsh
 zsh << EOF
 # Ensure we're still redirecting to regular.log
