@@ -62,6 +62,8 @@ fi
 
 # Make vim-plug to intialize submodules: vimrc does it now
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
+# Install coc dependencies
+vim --not-a-term +":CocInstall coc-json coc-tsserver" +q
 
 # Clone scripts
 if [ ! -d scripts ]; then
