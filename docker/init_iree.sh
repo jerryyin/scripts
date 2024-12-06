@@ -18,6 +18,7 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
     apt-get update && \
     apt-get install -y clang-${LLVM_VERSION} clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} lld-${LLVM_VERSION} && \
     ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang && \
+    ln -sf /usr/bin/clangd-${LLVM_VERSION} /usr/bin/clangd && \
     ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ && \
     ln -sf /usr/bin/clang-tidy-${LLVM_VERSION} /usr/bin/clang-tidy && \
     ln -sf /usr/bin/clang-tidy-diff-${LLVM_VERSION}.py /usr/bin/clang-tidy-diff && \
