@@ -120,7 +120,7 @@ zsh << EOF
 exec 1>>regular.log
 
 # Supressing tput output
-export TERM=xterm
+export TERM=xterm-256color
 
 # Install zsh plugins
 source .zshrc
