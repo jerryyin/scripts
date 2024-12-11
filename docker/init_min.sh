@@ -81,15 +81,4 @@ sudo update-ca-certificates
 
 sudo apt-get install -y locales && locale-gen en_US.UTF-8
 
-# Create a heredoc that will be executed in zsh
-zsh << EOF
-# Ensure we're still redirecting to regular.log
-exec 1>>regular.log
-
-# Supressing tput output
-export TERM=xterm-256color
-
-# Install zsh plugins
-source .zshrc
-
-EOF
+zsh -c "source /root/.zshrc; exit"
