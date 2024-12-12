@@ -24,11 +24,6 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
      git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget
 
-# install tmux plugin manager
-if [ ! -d .tmux/plugins/tpm ]; then
-    git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
-fi
-
 # rc files
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
@@ -39,6 +34,14 @@ if [ ! -d rc_files ]; then
       stow -d ~/rc_files $dir -v -R -t ~
     done
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
+fi
+
+# install tmux plugin manager
+if [ ! -d .tmux/plugins/tpm ]; then
+    git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+    # Install plugins, this is dependent on existence of .tmux.conf
+    tmux start-server && tmux new-session -d && \
+    ~/.tmux/plugins/tpm/scripts/install_plugins.sh && tmux kill-server
 fi
 
 # Git configurations
@@ -53,7 +56,7 @@ fi
 # Make vim-plug to intialize submodules: vimrc does it now
 vim -E -s -u ~/.vimrc +PlugInstall +qall || true
 # Install coc dependencies
-vim --not-a-term +":CocInstall coc-json coc-tsserver" +q
+vim --not-a-term +":CocInstall coc-json coc-tsserver coc-pyright" +q
 
 # Clone scripts
 if [ ! -d scripts ]; then
@@ -73,6 +76,6 @@ sudo apt-get install -y locales && locale-gen en_US.UTF-8
 
 # Make zsh default shell, and install zsh dependencies
 sudo chsh -s $(which zsh)
+# Remove wait because otherwise waited plugins won't be initialized
 sed "/zinit ice/s/wait'[^']*'//g" .zshrc > /tmp/zshrc_processed
-cat /tmp/zshrc_processed
 zsh -c "source /tmp/zshrc_processed; exit"
