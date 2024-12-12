@@ -13,8 +13,8 @@ shopt -s expand_aliases
 sudo apt-get update --allow-insecure-repositories -qq
 
 # PPA:  TODO remove when it becomes default ubuntu package
-# vim8 packge ppa.
-sudo add-apt-repository -y ppa:jonathonf/vim
+# vim8 packge ppa. This is unecessary in ubuntu 24.04
+#sudo add-apt-repository -y ppa:jonathonf/vim
 # neovim ppa
 sudo add-apt-repository -y ppa:neovim-ppa/stable
 # setup nodejs
@@ -22,7 +22,7 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget
+     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget npm
 
 # rc files
 if [ ! -d rc_files ]; then
@@ -40,8 +40,7 @@ fi
 if [ ! -d .tmux/plugins/tpm ]; then
     git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
     # Install plugins, this is dependent on existence of .tmux.conf
-    tmux start-server && tmux new-session -d && \
-    ~/.tmux/plugins/tpm/scripts/install_plugins.sh && tmux kill-server
+    TMUX_PLUGIN_MANAGER_PATH=.tmux/plugins/tpm ~/.tmux/plugins/tpm/scripts/install_plugins.sh
 fi
 
 # Git configurations
