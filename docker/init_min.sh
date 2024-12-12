@@ -5,8 +5,6 @@ set -x
 find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
 
 apt-get update && apt-get -y install sudo software-properties-common
-# Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
-echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
 
 shopt -s expand_aliases
 
@@ -22,7 +20,8 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget npm
+     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget npm \
+     python-is-python3
 
 # rc files
 if [ ! -d rc_files ]; then
