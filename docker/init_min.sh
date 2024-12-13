@@ -4,11 +4,16 @@ set -x
 # Delete rocm sources if any, they tend to cause problem with apt update
 find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
 
-apt-get update && apt-get -y install sudo software-properties-common
+apt-get update && apt-get -y install sudo software-properties-common apt-utils
+
+# Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
+if ! grep -q "$HOSTNAME" /etc/hosts; then
+    echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/hosts
+fi
 
 shopt -s expand_aliases
 
-sudo apt-get update --allow-insecure-repositories -qq
+sudo apt-get update --allow-insecure-repositories
 
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa. This is unecessary in ubuntu 24.04
@@ -19,8 +24,8 @@ sudo add-apt-repository -y ppa:neovim-ppa/stable
 curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 
 # Install misc pkgs (For macos: the_silver_searcher)
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget npm \
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
+     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget \
      python-is-python3
 
 # rc files
@@ -75,5 +80,5 @@ sudo apt-get install -y locales && locale-gen en_US.UTF-8
 # Make zsh default shell, and install zsh dependencies
 sudo chsh -s $(which zsh)
 # Remove wait because otherwise waited plugins won't be initialized
-sed "/zinit ice/s/wait'[^']*'//g" .zshrc > /tmp/zshrc_processed
+sed "/zinit ice/s/wait'[^']*'//g" ~/.zshrc > /tmp/zshrc_processed
 zsh -c "source /tmp/zshrc_processed; exit"
