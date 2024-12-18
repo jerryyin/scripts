@@ -12,6 +12,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/../build",
       "cacheVariables": {
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/../install",
         "CMAKE_C_COMPILER": "/usr/bin/clang",
         "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
@@ -35,6 +36,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/../build",
       "cacheVariables": {
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/../install",
         "CMAKE_C_COMPILER": "/usr/bin/clang",
         "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
