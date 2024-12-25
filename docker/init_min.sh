@@ -31,20 +31,8 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
 # rc files
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
-    for dotpath in $(find rc_files -name "\.*"); do
-      rm "$(basename -- $dotpath)"
-    done
-    for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
-      stow -d ~/rc_files $dir -v -R -t ~
-    done
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
-fi
-
-# install tmux plugin manager
-if [ ! -d .tmux/plugins/tpm ]; then
-    git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
-    # Install plugins, this is dependent on existence of .tmux.conf
-    TMUX_PLUGIN_MANAGER_PATH=.tmux/plugins/tpm ~/.tmux/plugins/tpm/scripts/install_plugins.sh
+    bash rc_files/install.sh
 fi
 
 # Git configurations
@@ -56,29 +44,14 @@ if [ ! -d .git ]; then
     git config --global core.excludesfile ~/.gitignore
 fi
 
-# Make vim-plug to intialize submodules: vimrc does it now
-vim -E -s -u ~/.vimrc +PlugInstall +qall || true
-# Install coc dependencies
-vim --not-a-term +":CocInstall coc-json coc-tsserver coc-pyright" +q
-
 # Clone scripts
 if [ ! -d scripts ]; then
     git clone https://github.com/jerryyin/scripts.git
 fi
 git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
-# Configure neovim
-mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
-mkdir -p ~/.config/nvim && ln -s ~/.vimrc ~/.config/nvim/init.vim
-
 wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
 sudo cp AMD_CA.crt /usr/local/share/ca-certificates
 sudo update-ca-certificates
 
 sudo apt-get install -y locales && locale-gen en_US.UTF-8
-
-# Make zsh default shell, and install zsh dependencies
-sudo chsh -s $(which zsh)
-# Remove wait because otherwise waited plugins won't be initialized
-sed "/zinit ice/s/wait'[^']*'//g" ~/.zshrc > /tmp/zshrc_processed
-zsh -c "source /tmp/zshrc_processed; exit"
