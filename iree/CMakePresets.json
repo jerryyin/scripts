@@ -7,8 +7,8 @@
   },
   "configurePresets": [
     {
-      "name": "rocm",
-      "displayName": "Clang - ROCm Build",
+      "name": "base-config",
+      "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
@@ -17,7 +17,6 @@
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
         "CMAKE_C_COMPILER": "/usr/bin/clang",
         "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_COMPILER_LAUNCHER": "/usr/bin/ccache",
         "CMAKE_CXX_COMPILER_LAUNCHER": "/usr/bin/ccache",
         "MLIR_INCLUDE_TESTS": "ON",
@@ -31,34 +30,26 @@
         "IREE_TARGET_BACKEND_ROCM": "ON",
         "IREE_HIP_TEST_TARGET_CHIP": "gfx942"
       }
-    },{
+    },
+    {
+      "name": "rocm",
+      "displayName": "Clang - ROCm Build",
+      "inherits": "base-config",
+      "description": "Default ROCm build with minimal customization",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
       "name": "model",
       "displayName": "Clang - ROCm Build for model benchmarking",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
+      "inherits": "base-config",
+      "description": "ROCm build for model benchmarking with Python bindings",
       "cacheVariables": {
-        "CMAKE_COLOR_DIAGNOSTICS": "ON",
-        "CMAKE_WARN_DEPRECATED": "OFF",
-        "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
-        "CMAKE_C_COMPILER": "/usr/bin/clang",
-        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_COMPILER_LAUNCHER": "/usr/bin/ccache",
-        "CMAKE_CXX_COMPILER_LAUNCHER": "/usr/bin/ccache",
-        "MLIR_INCLUDE_TESTS": "ON",
-        "LLVM_INCLUDE_TESTS": "ON",
-        "IREE_ENABLE_ASSERTIONS": "ON",
-        "IREE_ENABLE_LLD": "ON",
-        "IREE_HAL_DRIVER_METAL": "OFF",
-        "IREE_HAL_DRIVER_CUDA": "OFF",
-        "IREE_HAL_DRIVER_VULKAN": "OFF",
-        "IREE_HAL_DRIVER_HIP": "ON",
-        "IREE_TARGET_BACKEND_ROCM": "ON",
-        "IREE_HIP_TEST_TARGET_CHIP": "gfx942",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
         "Python3_EXECUTABLE": "$(which python3.11)"
       }
     }
   ]
 }
-
