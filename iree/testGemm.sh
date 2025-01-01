@@ -2,7 +2,7 @@
 set -e
 
 # Compile the compiler first
-ninja -C /root/build all
+ninja -C $HOME/iree/build all
 
 # batch:
 #gemmA="12x577x577"
