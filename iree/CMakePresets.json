@@ -10,7 +10,6 @@
       "name": "base-config",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_COLOR_DIAGNOSTICS": "ON",
         "CMAKE_WARN_DEPRECATED": "OFF",
@@ -36,8 +35,20 @@
       "displayName": "Clang - ROCm Build",
       "inherits": "base-config",
       "description": "Default ROCm build with minimal customization",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "dbg",
+      "displayName": "Clang - ROCm Build",
+      "inherits": "base-config",
+      "description": "Default ROCm build with minimal customization",
+      "binaryDir": "${sourceDir}/dbgBuild",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS": "-g -fno-inline-functions"
       }
     },
     {
@@ -45,6 +56,7 @@
       "displayName": "Clang - ROCm Build for model benchmarking",
       "inherits": "base-config",
       "description": "ROCm build for model benchmarking with Python bindings",
+      "binaryDir": "${sourceDir}/modelBuild",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
