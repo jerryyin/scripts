@@ -35,7 +35,7 @@
       "displayName": "Clang - ROCm Build",
       "inherits": "base-config",
       "description": "Default ROCm build with minimal customization",
-      "binaryDir": "${sourceDir}/build",
+      "binaryDir": "${sourceDir}/build/rel",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
@@ -45,7 +45,7 @@
       "displayName": "Clang - ROCm Build",
       "inherits": "base-config",
       "description": "Default ROCm build with minimal customization",
-      "binaryDir": "${sourceDir}/dbgBuild",
+      "binaryDir": "${sourceDir}/build/dbg",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CXX_FLAGS": "-g -fno-inline-functions"
@@ -56,7 +56,7 @@
       "displayName": "Clang - ROCm Build for model benchmarking",
       "inherits": "base-config",
       "description": "ROCm build for model benchmarking with Python bindings",
-      "binaryDir": "${sourceDir}/modelBuild",
+      "binaryDir": "${sourceDir}/build/model",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
