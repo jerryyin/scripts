@@ -30,7 +30,7 @@ readonly TD_SPEC="$SDXL_DIR/attention_and_matmul_spec.mlir"
 readonly WEIGHTS="$SDXL_DIR/punet_weights.irpa"
 
 # Note: Please remove $VMFB if recompile is needed
-if [ ! -d $VMFB ]; then
+if [ ! -f $VMFB ]; then
   iree-compile \
     --iree-execution-model=async-external \
     --iree-hal-target-backends=rocm \
