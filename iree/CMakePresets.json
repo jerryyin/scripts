@@ -31,7 +31,7 @@
       }
     },
     {
-      "name": "rocm",
+      "name": "rel",
       "displayName": "Clang - ROCm Build",
       "inherits": "base-config",
       "description": "Default ROCm build with minimal customization",
