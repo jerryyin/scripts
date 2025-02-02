@@ -35,15 +35,6 @@ if [ ! -d rc_files ]; then
     bash rc_files/install.sh
 fi
 
-# Git configurations
-# git default user, password, ignore file
-if [ ! -d .git ]; then
-    git config --global user.email "zhuoryin@amd.com"
-    git config --global user.name "jerryyin"
-    git config --global pager.branch false
-    git config --global core.excludesfile ~/.gitignore
-fi
-
 # Clone scripts
 if [ ! -d scripts ]; then
     git clone https://github.com/jerryyin/scripts.git
