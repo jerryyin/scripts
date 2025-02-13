@@ -7,7 +7,7 @@ sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f
     
 apt-get update && apt-get install -f -y cmake ccache ninja-build
 
-apt-get update && apt-get install -f -y python3-numpy
+apt-get update && apt-get install -f -y python3-numpy pybind11-dev
 
 # Keep this section up-to-date with the upstream
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
@@ -40,6 +40,6 @@ if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
     git -C iree submodule update --init
-    #python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
+    python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt --break-system-packages
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
 fi
