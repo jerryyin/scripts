@@ -40,6 +40,8 @@ if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
     git -C iree submodule update --init
-    python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt --break-system-packages
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
+    python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt --break-system-packages
+    pip install pytest --break-system-packages
+    pip install -e experimental/regression_suite --break-system-packages
 fi
