@@ -60,7 +60,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
-        "Python3_EXECUTABLE": "$(which python3.11)"
+        "Python3_EXECUTABLE": "$(which python)"
       }
     }
   ]
