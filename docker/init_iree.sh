@@ -42,6 +42,6 @@ if [ ! -d iree ]; then
     git -C iree submodule update --init
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt --break-system-packages
-    pip install pytest --break-system-packages
-    pip install -e experimental/regression_suite --break-system-packages
+    python -m pip install pytest --break-system-packages
+    python -m pip install -e iree/experimental/regression_suite --break-system-packages
 fi
