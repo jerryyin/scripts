@@ -38,8 +38,8 @@ fi
 # Clone scripts
 if [ ! -d scripts ]; then
     git clone https://github.com/jerryyin/scripts.git
+    git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 fi
-git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 
 wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
 sudo cp AMD_CA.crt /usr/local/share/ca-certificates
