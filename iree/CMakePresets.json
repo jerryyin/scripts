@@ -27,7 +27,9 @@
         "IREE_HAL_DRIVER_VULKAN": "OFF",
         "IREE_HAL_DRIVER_HIP": "ON",
         "IREE_TARGET_BACKEND_ROCM": "ON",
-        "IREE_HIP_TEST_TARGET_CHIP": "gfx942"
+        "IREE_HIP_TEST_TARGET_CHIP": "gfx942",
+        "IREE_ENABLE_RUNTIME_TRACING": "ON",
+        "IREE_BUILD_TRACY": "ON"
       }
     },
     {
