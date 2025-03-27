@@ -7,7 +7,7 @@ sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f
     
 apt-get update && apt-get install -f -y cmake ccache ninja-build
 
-apt-get update && apt-get install -f -y python3-numpy pybind11-dev
+apt-get update && apt-get install -f -y python3-numpy pybind11-dev libdbus-1-dev
 
 # Keep this section up-to-date with the upstream
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
@@ -36,12 +36,13 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
     ln -sf /usr/bin/llvm-cxxfilt-${LLVM_VERSION} /usr/bin/llvm-cxxfilt && \
     clang --version
 
+python -m pip config set global.break-system-packages true
 if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
     git -C iree submodule update --init
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
-    python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt --break-system-packages
-    python -m pip install pytest --break-system-packages
-    python -m pip install -e iree/experimental/regression_suite --break-system-packages
+    python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
+    python -m pip install pytest
+    python -m pip install -e iree/experimental/regression_suite
 fi
