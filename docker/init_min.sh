@@ -4,7 +4,7 @@ set -x
 # Delete rocm sources if any, they tend to cause problem with apt update
 find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
 
-apt-get update && apt-get -y install sudo software-properties-common apt-utils
+apt-get update && apt-get -y install sudo software-properties-common apt-utils curl
 
 # Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
 if ! grep -q "$HOSTNAME" /etc/hosts; then
@@ -25,7 +25,7 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim curl vim wget \
+     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim vim wget \
      python-is-python3 gdb
 
 # rc files
