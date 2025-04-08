@@ -20,7 +20,7 @@ if [ ! -d $SDXL_DIR ]; then
   wget https://sharkpublic.blob.core.windows.net/sharkpublic/sai/sdxl-punet/punet_weights.irpa
 
   # tuning spec
-  wget https://raw.githubusercontent.com/nod-ai/sdxl-scripts/shared/sdxl_on_main/int8-model/specs/attention_and_matmul_spec.mlir
+  #wget https://raw.githubusercontent.com/nod-ai/sdxl-scripts/shared/sdxl_on_main/int8-model/specs/attention_and_matmul_spec.mlir
 fi
 
 # Compile
