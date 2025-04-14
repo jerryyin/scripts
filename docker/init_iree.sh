@@ -44,5 +44,6 @@ if [ ! -d iree ]; then
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
     python -m pip install pytest
-    python -m pip install -e iree/experimental/regression_suite
+    # Has migrated to iree-test-suite
+    #python -m pip install -e iree/experimental/regression_suite
 fi
