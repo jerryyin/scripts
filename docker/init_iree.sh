@@ -40,6 +40,8 @@ python -m pip config set global.break-system-packages true
 if [ ! -d iree ]; then
     git clone https://github.com/iree-org/iree.git
     git -C iree remote set-url origin git@github.com:iree-org/iree.git
+    git -C iree/third_party/llvm-project remote set-url origin git@github.com:iree-org/llvm-project.git
+    git -C iree/third_party/llvm-project remote add upstream git@github.com:llvm/llvm-project.git
     git -C iree submodule update --init
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
