@@ -29,7 +29,9 @@
         "IREE_TARGET_BACKEND_ROCM": "ON",
         "IREE_HIP_TEST_TARGET_CHIP": "gfx942",
         "IREE_ENABLE_RUNTIME_TRACING": "ON",
-        "IREE_BUILD_TRACY": "ON"
+        "IREE_BUILD_TRACY": "ON",
+        "TRACY_DELAYED_INIT": "ON",
+        "TRACY_MANUAL_LIFETIME": "ON"
       }
     },
     {
