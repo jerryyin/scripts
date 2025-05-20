@@ -7,6 +7,7 @@ cmake -B csvexport/build -S csvexport -DCMAKE_BUILD_TYPE=Release && \
 
 cd ~
 git clone git@github.com:iree-org/iree-turbine.git
+pip install -r ~/iree-turbine/pytorch-rocm-requirements.txt
 pip install -e ~/iree-turbine && pip uninstall -y iree-base-compiler iree-base-runtime
 
 # Debug for boo driver:
