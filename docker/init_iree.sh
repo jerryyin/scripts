@@ -5,7 +5,7 @@ wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | 
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f -y -qq kitware-archive-keyring
     
-apt-get update && apt-get install -f -y cmake ccache ninja-build libdbus-1-dev
+apt-get update && apt-get install -f -y cmake ccache ninja-build libdbus-1-dev python3-pybind11
 
 # Keep this section up-to-date with the upstream
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
@@ -43,7 +43,7 @@ if [ ! -d iree ]; then
     git -C iree submodule update --init
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
-    python -m pip install pytest numpy pybind11
+    python -m pip install pytest numpy
     
     # Has migrated to iree-test-suite
     #python -m pip install -e iree/experimental/regression_suite
