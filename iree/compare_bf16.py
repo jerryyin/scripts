@@ -43,11 +43,17 @@ def compare_arrays(file1, file2, dtype, threshold):
         data1 = bfloat16_to_float32(data1)
         data2 = bfloat16_to_float32(data2)
 
-    # Compare the arrays element-wise
+    error_count = 0
     for i in range(element_count):
         if np.abs(data1[i] - data2[i]) > threshold:
-            print(f"Difference exceeds threshold at index {i}: {data1[i]} vs {data2[i]}")
-            return False
+            if error_count <= 10:
+                print(f"Difference exceeds threshold at index {i}: {data1[i]} vs {data2[i]}")
+            error_count += 1
+
+    if error_count > 0:
+        proportion = error_count / element_count
+        print(f"Total differences: {error_count} out of {element_count} elements ({proportion:.2%})")
+        return False
 
     return True
 
@@ -63,8 +69,6 @@ def main():
     result = compare_arrays(args.file1, args.file2, args.dtype, args.threshold)
     if result:
         print("All differences are within the threshold.")
-    else:
-        print("Some differences exceed the threshold.")
 
 if __name__ == "__main__":
     main()
