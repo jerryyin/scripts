@@ -35,16 +35,16 @@ def convert_to_bf16(data: np.ndarray) -> np.ndarray:
     """Convert a float32 numpy array to bf16."""
     if data.dtype != np.float32:
         raise ValueError("Expected float32 input for bf16 conversion.")
-    # Treat data as int bits
-    int_data = data.view(np.int32)
+    int_data = data.view(np.uint32)
     # Shift right to keep most significant bits corresponding to bf16
     bf16_data = ((int_data >> 16) & 0xFFFF)
     return bf16_data.astype(np.uint16)  # Represent data in bf16 bit format
 
 def bf16_to_float32(bf16_data: np.ndarray) -> np.ndarray:
     """Convert bf16 stored data back to float32."""
-    # Create an int version of bf16 data interpreted as float32
-    float32_data = (bf16_data.astype(np.int32) << 16).view(np.float32)
+    if bf16_data.dtype != np.uint16:
+        raise ValueError("Expected uint16 input for fp32 conversion.")
+    float32_data = (bf16_data.astype(np.uint32) << 16).view(np.float32)
     return float32_data
 
 if args.input:
