@@ -46,26 +46,3 @@ EOF
 }
 
 generate_conv input_tensor weight_tensor output_tensor conv_test
-
-generate_input() {
-    # Generate random input tensors
-    local input_shape=$1
-    echo "Generating random $input_shape.bin..."
-    # Remove datatype suffix
-    shape_str=$(echo "$input_shape" | sed 's/xf[0-9]*$//')
-    # Replace 'x' with ',' to make it a tuple
-    shape=$(echo "$shape_str" | sed 's/x/,/g')
-
-    python3 - <<EOF
-import numpy as np;
-import struct
-a = np.random.rand(${shape}).astype(np.float16)
-with open('$input_shape.bin', "wb") as f:
-    bytearr = struct.pack("%se" % a.size, *a.flatten())
-    f.write(bytearr)
-EOF
-}
-
-generate_input $input_shape
-generate_input $weight_shape
-
