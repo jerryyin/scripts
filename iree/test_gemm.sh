@@ -2,7 +2,7 @@
 set -e
 
 # Compile the compiler first
-ninja -C $HOME/iree/build all
+ninja -C $HOME/iree/build/dbg all
 
 # batch:
 #gemmA="12x577x577"
@@ -30,9 +30,9 @@ ninja -C $HOME/iree/build all
 #gemmK="1024"
 # 1023 is Okay:
 # The pattern seem to be "lots of" padding can cause issues
-gemmM="1027"
-gemmN="1027"
-gemmK="1027"
+gemmM="457"
+gemmN="512"
+gemmK="330"
 #gemmM="577"
 #gemmN="577"
 #gemmK="577"
@@ -120,7 +120,7 @@ generate_input $lhs_type
 generate_input $rhs_type
 
 debug() {
-    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-codegen-llvmgpu-test-tile-and-fuse-matmul $gemm_test --mlir-print-ir-after-all -mlir-print-ir-after-change --debug-only=iree-llvmgpu-kernel-config,iree-gpu-config-utils,iree-codegen-gpu-heuristics,iree-codegen-gpu-resource-usage,iree-codegen-llvmgpu-prefetch-shared-memory-copy -o output_tileandfuse.vmfb
+    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 $gemm_test --mlir-print-ir-after-all -mlir-print-ir-after-change --debug-only=iree-llvmgpu-kernel-config,iree-gpu-config-utils,iree-codegen-gpu-heuristics,iree-codegen-gpu-resource-usage,iree-codegen-llvmgpu-prefetch-shared-memory-copy -o output_tileandfuse.vmfb
     # Lower before iree-gpu-lower-ops to observe the ir before that pass:
     #iree-opt --iree-hal-target-backends=rocm --pass-pipeline="builtin.module(func.func(iree-gpu-lower-ops))" --mlir-disable-threading --iree-hip-target=gfx942 before_iree_gpu_lower_ops.mlir  &> after_iree_gpu_lower_ops_with_barrier.mlir
 }
@@ -128,7 +128,7 @@ debug() {
 # Function to compile
 compile() {
     echo "Compiling modules..."
-    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-codegen-llvmgpu-test-tile-and-fuse-matmul $gemm_test -o output_tileandfuse.vmfb
+    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 $gemm_test -o output_tileandfuse.vmfb
     iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 $gemm_test -o output_simt.vmfb
     iree-compile --iree-hal-target-backends=llvm-cpu  --iree-llvmcpu-target-cpu=host $gemm_test -o output_cpu.vmfb
 }

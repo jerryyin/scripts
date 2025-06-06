@@ -10,9 +10,9 @@ import sys
 
 # Mapping for numpy dtype and struct format character
 DTYPE_MAP = {
-    'fp32': (np.float32, 'f'),
-    'fp16': (np.float16, 'e'),
-    'int8': (np.int8, 'b'),
+    'f32': (np.float32, 'f'),
+    'f16': (np.float16, 'e'),
+    'i8': (np.int8, 'b'),
     'bf16': (np.float32, 'f')  # bf16 in numpy is not supported directly, workaround by using float32.
 }
 
