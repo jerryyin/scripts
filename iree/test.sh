@@ -1,63 +1,67 @@
 #!/bin/bash
 
-mlir_test_file="test_conv.mlir"
-input_type_1="2x130x130x4xf16"
-input_type_2="3x3x4x320xf16"
-operation_name="conv_2d_nhwc_hwcf"
+set -e
 
-gpu_vmfb="default.vmfb"
-
-debug() {
-    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 $mlir_test_file --mlir-print-ir-after-all -mlir-print-ir-after-change --debug-only=iree-llvmgpu-kernel-config,iree-gpu-config-utils,iree-codegen-gpu-heuristics,iree-codegen-gpu-resource-usage,iree-codegen-llvmgpu-prefetch-shared-memory-copy -o ${gpu_vmfb} \
+# Help message
+function usage() {
+    echo "Usage: $0 -f <input_mlir_file> -s1 <shape1> -s2 <shape2> [-d <dtype>] [-t <tuning_spec>]"
+    exit 1
 }
 
-# Function to compile
-compile() {
-    echo "Compiling modules..."
-    iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 $mlir_test_file -o ${gpu_vmfb}
-   
-    iree-compile --iree-hal-target-backends=llvm-cpu --iree-llvmcpu-target-cpu=host $mlir_test_file -o output_cpu.vmfb
-}
+# Default values for variables
+dtype=""
+input_mlir_file=""
+shape1=""
+shape2=""
+tuning_spec=""
 
-# Function to run correctness tests
-test() {
-    compile
+# Parse command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -f) input_mlir_file="$2"; shift ;;
+        -s1) shape1="$2"; shift ;;
+        -s2) shape2="$2"; shift ;;
+        -d) dtype="$2"; shift ;;
+        -t) tuning_spec="$2"; shift ;;
+        *) usage ;;
+    esac
+    shift
+done
 
-    echo "Running correctness tests..."
-    # CPU baseline
-    iree-run-module --device=local-task --module=output_cpu.vmfb --input="$input_type_1=@$input_type_1.bin" --input="$input_type_2=@$input_type_2.bin" --output=@cpu_output.npy
+# Check required arguments
+if [ -z "$input_mlir_file" ] || [ -z "$shape1" ] || [ -z "$shape2" ] || [ -z "$dtype" ] ; then
+    usage
+fi
 
-    # GPU tests against CPU output
-    iree-run-module --device=hip --module=${gpu_vmfb} --input="$input_type_1=@$input_type_1.bin" --input="$input_type_2=@$input_type_2.bin" --expected_output=@cpu_output.npy #--expected_f32_threshold=0.1f
-}
+# Output files
+cpu_output_file="cpu.vmfb"
+gpu_output_file="gpu.vmfb"
 
-# Function to run performance benchmarks
-bench() {
-    compile
+# Compile with CPU
+if [ ! -f "${cpu_output_file}" ]; then
+    iree-compile --iree-hal-target-backends=llvm-cpu --iree-llvmcpu-target-cpu=host "${input_mlir_file}" -o "${cpu_output_file}"
+fi
 
-    echo "Running performance benchmarks..."
-    # CPU baseline
-    iree-benchmark-module --device=local-task --module=output_cpu.vmfb --input="$input_type_1=@$input_type_1.bin" --input="$input_type_2=@$input_type_2.bin" --function=$operation_name
-    # GPU benchmarks
-    iree-benchmark-module --device=hip --module=${gpu_vmfb} --input="$input_type_1=@$input_type_1.bin" --input="$input_type_2=@$input_type_2.bin" --function=$operation_name
-}
+# Compile with ROCm, include tuning spec if provided
+rocm_compile_cmd="iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-llvmgpu-set-workgroup-distribution-along=x ${input_mlir_file} -o ${gpu_output_file}"
 
-# Handle script arguments
-case "$1" in
-    compile)
-        compile
-        ;;
-    test)
-        test
-        ;;
-    bench)
-        bench
-        ;;
-    debug)
-        debug
-        ;;
-    *)
-        echo "Usage: $0 {compile|test|bench|debug}"
-        exit 1
-        ;;
-esac
+if [ -n "$tuning_spec" ]; then
+    rocm_compile_cmd+=" --iree-codegen-tuning-spec-path=${tuning_spec}"
+fi
+
+eval $rocm_compile_cmd
+
+# Generate random BF16 inputs
+input1_file="${shape1}x${dtype}.bin"
+input2_file="${shape2}x${dtype}.bin"
+python ~/scripts/iree/genRandInput.py "${input1_file}" --shape ${shape1} --dtype $dtype
+python ~/scripts/iree/genRandInput.py "${input2_file}" --shape ${shape2} --dtype $dtype
+
+# Compute
+cpu_output_bin="cpu_output.bin"
+gpu_output_bin="gpu_output.bin"
+iree-run-module --device=local-task --module="${cpu_output_file}" --input="${shape1}x${dtype}=@${input1_file}" --input="${shape2}x${dtype}=@${input2_file}" --output="@${cpu_output_bin}"
+iree-run-module --device=hip --module="${gpu_output_file}" --input="${shape1}x${dtype}=@${input1_file}" --input="${shape2}x${dtype}=@${input2_file}" --output="@${gpu_output_bin}"
+
+# Compare results
+python ~/scripts/iree/compare.py "${cpu_output_bin}" "${gpu_output_bin}" --dtype ${dtype}

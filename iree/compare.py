@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 def read_binary_file(file_path, dtype):
-    """Reads a binary file and interprets it as an array with the specified dtype and shape."""
+    """Reads a binary file and interprets it as an array with the specified dtype."""
     with open(file_path, "rb") as f:
         array_data = np.frombuffer(f.read(), dtype=dtype)
     return array_data
@@ -23,25 +23,36 @@ def compare_arrays(file1, file2, dtype, threshold):
     Parameters:
         file1 (str): Path to the first binary file.
         file2 (str): Path to the second binary file.
-        dtype (str): Data type of the array in the binary files. Current support is for "bf16".
+        dtype (str): Data type of the array in the binary files. Supports "bf16", "f32", "f16", "i32".
         threshold (float): The absolute threshold for comparison.
 
     Returns:
         bool: True if all differences are within the threshold, False otherwise.
     """
-    # Determine element count using the size of file1
     file_size = os.path.getsize(file1)
-    element_size = 2 if dtype == "bf16" else np.dtype(dtype).itemsize
+    dtype_map = {
+        "bf16": np.uint16,
+        "f32": np.float32,
+        "f16": np.float16,
+        "i32": np.int32
+    }
+
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported dtype: {dtype}. Supported types are bf16, f32, f16, i32.")
+
+    element_size = 2 if dtype == "bf16" else np.dtype(dtype_map[dtype]).itemsize
     element_count = file_size // element_size
 
-    # Read the binary files
-    data1 = read_binary_file(file1, np.uint16)
-    data2 = read_binary_file(file2, np.uint16)
+    data1 = read_binary_file(file1, dtype_map[dtype])
+    data2 = read_binary_file(file2, dtype_map[dtype])
 
-    # Convert data to float32 if dtype is bfloat16
     if dtype == "bf16":
         data1 = bfloat16_to_float32(data1)
         data2 = bfloat16_to_float32(data2)
+
+    if dtype == "f16":
+        data1 = data1.astype(np.float32)
+        data2 = data2.astype(np.float32)
 
     error_count = 0
     for i in range(element_count):
