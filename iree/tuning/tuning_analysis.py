@@ -9,36 +9,42 @@ def parse_conv_function_name(name):
     match_conv_2d_bfloat16_forward_16x96x64x48_nhwc_48x5x5x48_fhwc_nhwf_1x1s_8x8p_4x4d_1g
     and prints interpreted shapes and GEMM dimensions.
     """
-    try:
-        # Split and extract the parts
-        parts = name.split('_')
-        input_shape = list(map(int, parts[5].split('x')))  # e.g. 16x96x64x48
-        filter_shape = list(map(int, parts[7].split('x')))  # e.g. 48x5x5x48
-        layout = parts[6]  # e.g. nhwc
-        filter_layout = parts[8]  # e.g. fhwc
+   # Match: input_dims_layout_filter_dims_layout
+    pattern = r'(\d+(?:x\d+)+)_(\w+?)_(\d+(?:x\d+)+)_(\w+?)_nhwf'
+    match = re.search(pattern, name)
+    if not match:
+        print(f"Could not parse function name: {name}")
+        return None
 
-        # Print input and filter
-        print(f"Input shape: {input_shape}")
-        print(f"Filter shape: {filter_shape}")
+    input_str, input_layout, filter_str, filter_layout = match.groups()
+    input_shape = list(map(int, input_str.split('x')))
+    filter_shape = list(map(int, filter_str.split('x')))
 
-        # Assume standard NHWC and FHWC format for now
-        if layout != 'nhwc' or filter_layout != 'fhwc':
-            print(f"Unexpected layouts: input={layout}, filter={filter_layout}")
-            return
+    if input_layout != 'nhwc' or filter_layout != 'fhwc':
+        raise ValueError(f"Unexpected layout: input={input_layout}, filter={filter_layout} (expected nhwc/fhwc)")
 
-        N, H, W, C = input_shape
-        F, KH, KW, IC = filter_shape  # IC should match C
+    if len(input_shape) != 4 or len(filter_shape) != 4:
+        raise ValueError(f"Unexpected dimensions: input={input_shape}, filter={filter_shape}")
 
-        gemmM = N * H * W
-        gemmN = F
-        gemmK = KH * KW * C
+    N, H, W, C = input_shape
+    F, KH, KW, IC = filter_shape
 
-        print(f" - gemmM = nhw dimension = {N} x {H} x {W} = {gemmM}")
-        print(f" - gemmN = f dimension = {F} = {gemmN}")
-        print(f" - gemmK = hwc in fhwc dimension = {KH} x {KW} x {C} = {gemmK}")
+    # Print input and filter
+    print(f"Input shape: {input_shape}")
+    print(f"Filter shape: {filter_shape}")
 
-    except Exception as e:
-        print(f"Failed to parse function name '{name}': {e}")
+    gemmM = N * H * W
+    gemmN = F
+    gemmK = KH * KW * C
+
+    print(f" - gemmM = nhw dimension = {N} x {H} x {W} = {gemmM}")
+    print(f" - gemmN = f dimension = {F} = {gemmN}")
+    print(f" - gemmK = hwc in fhwc dimension = {KH} x {KW} x {C} = {gemmK}")
+
+    return {
+        'gemmM': gemmM,
+        'gemmN': gemmN,
+        'gemmK': gemmK}
 
 def extract_trip_count(body):
     """Extracts the total trip count from the outermost scf.forall loop."""
@@ -96,13 +102,23 @@ def compare_functions(funcs):
             continue
 
         trip1 = extract_trip_count(bodies[0])
+        assert trip1 is not None, f"Failed to extract trip count for function @{name} (first body)"
         trip2 = extract_trip_count(bodies[1])
+        assert trip2 is not None, f"Failed to extract trip count for function @{name} (second body)"
+
         cfg1 = extract_lowering_config(bodies[0])
         cfg2 = extract_lowering_config(bodies[1])
 
         print(f"Function: @{name}")
-        parse_conv_function_name(name)
         print(f"  Trip count: {trip1}  vs  {trip2}")
+
+        gemmInfo = parse_conv_function_name(name)
+        if gemmInfo is not None:
+            waveWork = gemmInfo['gemmM'] * gemmInfo['gemmN'] / trip2
+            print(f"  Workgroup work: {waveWork:.2f} (gemmM * gemmN / trip2)")
+            gemmSizeBy512 = gemmInfo['gemmM'] * gemmInfo['gemmN'] / 512 / 512
+            print(f"  GEMM size by 512: {gemmSizeBy512:.2f} (gemmM * gemmN / 512^2)")
+
         print(f"  Lowering config:")
         print(f"    First : {cfg1}")
         print(f"    Second: {cfg2}")
