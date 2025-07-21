@@ -121,6 +121,9 @@ def print_conv_info(name, info, indent=1):
         indent
     )
 
+def print_conv_name(name):
+    """Reports the function name."""
+    report(f"{name}", 0)
 
 def print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2):
     """Reports comparison of two function variants."""
@@ -174,25 +177,27 @@ def compare_functions(funcs):
         except ValueError as e:
             errors.append(str(e))
 
-        # text output
-        # print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2)
+        print_conv_name(name)
 
-        # CSV output
-        in_shape = 'x'.join(map(str, gemm_info['input_shape'])) if gemm_info else ''
-        f_shape = 'x'.join(map(str, gemm_info['filter_shape'])) if gemm_info else ''
-        gm = gemm_info['gemmM'] if gemm_info else ''
-        gn = gemm_info['gemmN'] if gemm_info else ''
-        gk = gemm_info['gemmK'] if gemm_info else ''
-        print(','.join(map(str, [
-            name,
-            trip1,
-            trip2,
-            in_shape,
-            f_shape,
-            gm,
-            gn,
-            gk
-        ])))
+        # text output
+        #print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2)
+
+        ## CSV output
+        #in_shape = 'x'.join(map(str, gemm_info['input_shape'])) if gemm_info else ''
+        #f_shape = 'x'.join(map(str, gemm_info['filter_shape'])) if gemm_info else ''
+        #gm = gemm_info['gemmM'] if gemm_info else ''
+        #gn = gemm_info['gemmN'] if gemm_info else ''
+        #gk = gemm_info['gemmK'] if gemm_info else ''
+        #print(','.join(map(str, [
+        #    name,
+        #    trip1,
+        #    trip2,
+        #    in_shape,
+        #    f_shape,
+        #    gm,
+        #    gn,
+        #    gk
+        #])))
 
     if errors:
         report("Errors:")
