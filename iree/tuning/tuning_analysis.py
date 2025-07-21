@@ -148,6 +148,17 @@ def print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2):
 
 def compare_functions(funcs):
     errors = []
+    print(','.join([
+        'name',
+        'tripcount_heuristic',
+        'tripcount_tuned',
+        'input_shape',
+        'filter_shape',
+        'gemmM',
+        'gemmN',
+        'gemmK'
+    ]))
+
     for name, bodies in funcs.items():
         if len(bodies) != 2:
             errors.append(f"@{name} appeared {len(bodies)} times (expected 2)")
@@ -163,7 +174,25 @@ def compare_functions(funcs):
         except ValueError as e:
             errors.append(str(e))
 
-        print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2)
+        # text output
+        # print_comparison(name, trip1, trip2, gemm_info, cfg1, cfg2)
+
+        # CSV output
+        in_shape = 'x'.join(map(str, gemm_info['input_shape'])) if gemm_info else ''
+        f_shape = 'x'.join(map(str, gemm_info['filter_shape'])) if gemm_info else ''
+        gm = gemm_info['gemmM'] if gemm_info else ''
+        gn = gemm_info['gemmN'] if gemm_info else ''
+        gk = gemm_info['gemmK'] if gemm_info else ''
+        print(','.join(map(str, [
+            name,
+            trip1,
+            trip2,
+            in_shape,
+            f_shape,
+            gm,
+            gn,
+            gk
+        ])))
 
     if errors:
         report("Errors:")
