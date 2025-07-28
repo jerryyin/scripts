@@ -36,8 +36,8 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
 
 python -m pip config set global.break-system-packages true
 if [ ! -d iree ]; then
-    git clone https://github.com/iree-org/iree.git
-    git -C iree remote set-url origin git@github.com:iree-org/iree.git
+    git clone https://github.com/iree-org/iree.git && cd ~/iree
+    git remote set-url origin git@github.com:iree-org/iree.git
     cd ~/iree/third_party/llvm-project
     git remote set-url origin git@github.com:iree-org/llvm-project.git
     git remote add upstream git@github.com:llvm/llvm-project.git
