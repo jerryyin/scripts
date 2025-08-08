@@ -5,7 +5,7 @@ wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | 
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f -y -qq kitware-archive-keyring
     
-apt-get update && apt-get install -f -y cmake ccache ninja-build libdbus-1-dev python3-pybind11
+apt-get update && apt-get install -f -y cmake ccache ninja-build libdbus-1-dev
 
 # Keep this section up-to-date with the upstream
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
@@ -36,16 +36,18 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
 
 python -m pip config set global.break-system-packages true
 if [ ! -d iree ]; then
-    git clone https://github.com/iree-org/iree.git && cd ~/iree
-    git remote set-url origin git@github.com:iree-org/iree.git
+    git clone https://github.com/iree-org/iree.git
+    git -C iree remote set-url origin git@github.com:iree-org/iree.git
+
+    git -C iree submodule update --init
     cd ~/iree/third_party/llvm-project
     git remote set-url origin git@github.com:iree-org/llvm-project.git
     git remote add upstream git@github.com:llvm/llvm-project.git
     cd ~
-    git -C iree submodule update --init
+
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
-    python -m pip install pytest numpy
+    python -m pip install pytest numpy pybind11
     
     # Has migrated to iree-test-suite
     #python -m pip install -e iree/experimental/regression_suite
