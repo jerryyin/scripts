@@ -63,6 +63,7 @@
         "IREE_ENABLE_RUNTIME_TRACING": "ON",
         "TRACY_DELAYED_INIT": "ON",
         "TRACY_MANUAL_LIFETIME": "ON",
+        "MLIR_DISABLE_CONFIGURE_PYTHON_DEV_PACKAGES": "OFF",
         "IREE_BUILD_PYTHON_BINDINGS": "ON",
         "Python3_EXECUTABLE": "$(which python)"
       }
