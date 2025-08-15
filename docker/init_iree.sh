@@ -48,6 +48,7 @@ if [ ! -d iree ]; then
     ln -s ~/scripts/iree/CMakePresets.json ~/iree/CMakePresets.json
     python -m pip install -r iree/runtime/bindings/python/iree/runtime/build_requirements.txt
     python -m pip install pytest numpy pybind11 nanobind
+    python -m pip install pandas matplotlib optuna
     
     # Has migrated to iree-test-suite
     #python -m pip install -e iree/experimental/regression_suite
