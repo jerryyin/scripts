@@ -26,7 +26,6 @@ fi
 # Compile
 readonly PUNET_MODEL="$SDXL_DIR/punet.mlir"
 readonly VMFB="$SDXL_DIR/punet_main.vmfb"
-readonly TD_SPEC="$SDXL_DIR/attention_and_matmul_spec.mlir"
 readonly WEIGHTS="$SDXL_DIR/punet_weights.irpa"
 
 # Note: Please remove $VMFB if recompile is needed
@@ -36,9 +35,7 @@ if [ ! -f $VMFB ]; then
     --iree-hal-target-backends=rocm \
     --iree-hip-target=gfx942 \
     --iree-hip-waves-per-eu=2 \
-    --iree-codegen-gpu-native-math-precision=true \
     --iree-codegen-llvmgpu-use-vector-distribution \
-    --iree-codegen-transform-dialect-library="${TD_SPEC}" \
     --iree-dispatch-creation-enable-aggressive-fusion=true \
     --iree-global-opt-propagate-transposes=true \
     --iree-llvmgpu-enable-prefetch=true \
