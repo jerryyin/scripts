@@ -17,7 +17,7 @@ sudo apt-get update --allow-insecure-repositories
 
 # PPA:  TODO remove when it becomes default ubuntu package
 # vim8 packge ppa. This is unecessary in ubuntu 24.04
-#sudo add-apt-repository -y ppa:jonathonf/vim
+sudo add-apt-repository -y ppa:jonathonf/vim
 # neovim ppa
 sudo add-apt-repository -y ppa:neovim-ppa/stable
 # setup nodejs
