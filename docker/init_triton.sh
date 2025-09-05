@@ -14,7 +14,7 @@ setupMlirTag () {
 if [ ! -d triton ]; then
   git clone https://github.com/triton-lang/triton.git
   setupMlirTag "${PWD}/triton"
-  git -C triton remote set-url origin git@github.com:ROCmSoftwarePlatform/triton.git
+  git -C triton remote set-url origin https://github.com/triton-lang/triton.git
 else
   setupMlirTag "${PWD}/triton"
 fi
