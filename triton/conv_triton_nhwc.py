@@ -25,18 +25,12 @@ def triton_tem_fused_convolution_0(arg_X, arg_W, out_ptr0):
     STRIDE_W : tl.constexpr = 1
     PADDING_H : tl.constexpr = 1
     PADDING_W : tl.constexpr = 1
-    GROUPS : tl.constexpr = 1
-    UNROLL : tl.constexpr = False
-    ALLOW_TF32 : tl.constexpr = False
     BLOCK_M : tl.constexpr = 128
     BLOCK_N : tl.constexpr = 128
     BLOCK_K : tl.constexpr = 32
-    matrix_instr_nonkdim : tl.constexpr = 0
-    kpack : tl.constexpr = 2
-    X = arg_X
-    W = arg_W
+    ALLOW_TF32 : tl.constexpr = True
 
-    # Tensor dimensions
+    # Tensor sizes
     BATCH = 16
     IN_C = 768
     IN_H = 48
@@ -45,97 +39,115 @@ def triton_tem_fused_convolution_0(arg_X, arg_W, out_ptr0):
     OUT_H = 48
     OUT_W = 32
 
-    # Strides:
-    stride_xn = 1179648
-    stride_xc = 1536
-    stride_xh = 32
-    stride_xw = 1
-    stride_wc_out = 6912
-    stride_wc_in = 9
-    stride_wh = 3
-    stride_ww = 1
+    # ---- Strides for NHWC input ----
+    stride_xc = 1
+    stride_xw = IN_C
+    stride_xh = IN_W * IN_C
+    stride_xn = IN_H * IN_W * IN_C
 
+    # ---- Strides for OHWI weights ----
+    stride_wo = KERNEL_H * KERNEL_W * IN_C
+    stride_wh = KERNEL_W * IN_C
+    stride_ww = IN_C
+    stride_wi = 1
+
+    # ---- Strides for NHWC output ----
+    stride_yc = 1
+    stride_yw = OUT_C
+    stride_yh = OUT_W * OUT_C
+    stride_yn = OUT_H * OUT_W * OUT_C
+
+    # gemmM: (N * H * W)
     nhw = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     idx_y_w = nhw % OUT_W
     nh = nhw // OUT_W
     idx_y_h = nh % OUT_H
-    idx_n = nh // OUT_H
+    idx_n   = nh // OUT_H
+    # gemmN: (O)
     idx_y_c = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
-
-
-    group = 0
-    GROUP_IN_C = IN_C
-    GROUP_OUT_C = OUT_C
-
-
-    x_base = X + (group * stride_xc * GROUP_IN_C + idx_n * stride_xn)[:, None]
-    w_base = (
-        W + (group * stride_wc_out * GROUP_OUT_C + idx_y_c * stride_wc_out)[None, :]
-    )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-
-    # Could be simplified, but slightly slower:
-    # for i in range(KERNEL_H):
-    #     for j in range(KERNEL_W):
-    #         for k in range(0, GROUP_IN_C, BLOCK_K):
-    BLOCK_K_COUNT = (GROUP_IN_C + BLOCK_K - 1) // BLOCK_K
+    # Reduction loop over K = (IN_C * KH * KW)
+    BLOCK_K_COUNT = (IN_C + BLOCK_K - 1) // BLOCK_K
     for ijk in range(KERNEL_H * KERNEL_W * BLOCK_K_COUNT):
-        k = (ijk % BLOCK_K_COUNT) * BLOCK_K
+        k  = (ijk % BLOCK_K_COUNT) * BLOCK_K
         ij = ijk // BLOCK_K_COUNT
-        i = ij // KERNEL_W
-        j = ij % KERNEL_W
-        
+        i  = ij // KERNEL_W
+        j  = ij % KERNEL_W
+
+        # Input pixel coords
         idx_x_h = i - PADDING_H + idx_y_h * STRIDE_H
         idx_x_w = j - PADDING_W + idx_y_w * STRIDE_W
         idx_x_c = tl.arange(0, BLOCK_K) + k
 
-        x_ptrs = x_base + (
-            (idx_x_h * stride_xh)[:, None]
-            + (idx_x_w * stride_xw)[:, None]
-            + (idx_x_c * stride_xc)[None, :]
+        # Input pointer (NHWC)
+        x_ptrs = arg_X + (
+            idx_n[:, None] * stride_xn +
+            idx_x_h[:, None] * stride_xh +
+            idx_x_w[:, None] * stride_xw +
+            idx_x_c[None, :] * stride_xc
         )
         mask_x = (
-            (idx_n < BATCH)[:, None]
-            & (idx_x_h >= 0)[:, None]
-            & (idx_x_h < IN_H)[:, None]
-            & (idx_x_w >= 0)[:, None]
-            & (idx_x_w < IN_W)[:, None]
-            & (idx_x_c < GROUP_IN_C)[None, :]
+            (idx_n < BATCH)[:, None] &
+            (idx_x_h >= 0)[:, None] & (idx_x_h < IN_H)[:, None] &
+            (idx_x_w >= 0)[:, None] & (idx_x_w < IN_W)[:, None] &
+            (idx_x_c < IN_C)[None, :]
         )
         matrix_x = tl.load(x_ptrs, mask=mask_x, other=0.0)
 
-        w_ptrs = w_base + (
-            (idx_x_c * stride_wc_in)[:, None] + (i * stride_wh) + (j * stride_ww)
+        # Weight pointer (OHWI)
+        w_ptrs = arg_W + (
+            idx_y_c[None, :] * stride_wo +
+            i * stride_wh +
+            j * stride_ww +
+            idx_x_c[:, None] * stride_wi
         )
-        mask_w = (idx_x_c[:, None] < GROUP_IN_C) & (idx_y_c[None, :] < GROUP_OUT_C)
+        mask_w = (idx_x_c[:, None] < IN_C) & (idx_y_c[None, :] < OUT_C)
         matrix_w = tl.load(w_ptrs, mask=mask_w, other=0.0)
+
+        # Accumulate
         acc += tl.dot(matrix_x, matrix_w, allow_tf32=ALLOW_TF32)
 
-
-
-    mask = (
-        (idx_n < BATCH)[:, None]
-        & (idx_y_h < OUT_H)[:, None]
-        & (idx_y_w < OUT_W)[:, None]
-        & (idx_y_c < GROUP_OUT_C)[None, :]
+    # ---- Store output (NHWC) ----
+    mask_out = (
+        (idx_n < BATCH)[:, None] &
+        (idx_y_h < OUT_H)[:, None] &
+        (idx_y_w < OUT_W)[:, None] &
+        (idx_y_c < OUT_C)[None, :]
     )
-    idx_n = idx_n[:, None]
-    idx_c = idx_y_c[None, :] + group * GROUP_OUT_C
-    idx_h = idx_y_h[:, None]
-    idx_w = idx_y_w[:, None]
-
-    # inductor generates a suffix
-    xindex = idx_w + 32*idx_h + 1536*idx_c + 3145728*idx_n
-    tl.store(out_ptr0 + (tl.broadcast_to(xindex, acc.shape)), acc, mask)
+    out_ptrs = out_ptr0 + (
+        idx_n[:, None] * stride_yn +
+        idx_y_h[:, None] * stride_yh +
+        idx_y_w[:, None] * stride_yw +
+        idx_y_c[None, :] * stride_yc
+    )
+    tl.store(out_ptrs, acc, mask=mask_out)
 
 
 def get_args():
-    arg_0 = rand_strided((16, 768, 48, 32), (1179648, 1536, 32, 1), device='cuda:0', dtype=torch.bfloat16)
-    arg_1 = rand_strided((2048, 768, 3, 3), (6912, 9, 3, 1), device='cuda:0', dtype=torch.bfloat16)
-    arg_2 = rand_strided((16, 2048, 48, 32), (3145728, 1536, 32, 1), device='cuda:0', dtype=torch.bfloat16)
-    return arg_0, arg_1, arg_2, 192, 16, 1,
+    # Input: NHWC
+    arg_0 = rand_strided(
+        (16, 48, 32, 768),
+        (1179648, 24576, 768, 1),
+        device='cuda:0',
+        dtype=torch.bfloat16,
+    )
+    # Weights: OHWI
+    arg_1 = rand_strided(
+        (2048, 3, 3, 768),
+        (6912, 2304, 768, 1),
+        device='cuda:0',
+        dtype=torch.bfloat16,
+    )
+    # Output: NHWC
+    arg_2 = rand_strided(
+        (16, 48, 32, 2048),
+        (3145728, 65536, 2048, 1),
+        device='cuda:0',
+        dtype=torch.bfloat16,
+    )
+    return arg_0, arg_1, arg_2, 192, 16, 1
 
 
 def call(args):
@@ -159,3 +171,4 @@ if __name__ == '__main__':
     num_gb = 0.166723584
     gb_per_s = num_gb / (ms / 1e3)
     print(f"{ms:.3f}ms    {num_gb:.3f}GB    {gb_per_s:.2f}GB/s")
+
