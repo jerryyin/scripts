@@ -1,11 +1,13 @@
 from torch._dynamo.testing import rand_strided
 from torch._C import _cuda_getCurrentRawStream as get_raw_stream
 import torch
+from torch._inductor.runtime.triton_heuristics import grid, split_scan_grid
 
 
 
 import triton
 import triton.language as tl
+from triton.compiler.compiler import AttrsDescriptor
 
 from torch._inductor.runtime import triton_helpers, triton_heuristics
 from torch._inductor.runtime.triton_helpers import libdevice, math as tl_math
@@ -14,8 +16,8 @@ from torch._inductor.runtime.hints import AutotuneHint, ReductionHint, TileHint,
 @triton_heuristics.template(
     num_stages=2,
     num_warps=8,
-    triton_meta={'signature': {'arg_X': '*bf16', 'arg_W': '*bf16', 'out_ptr0': '*bf16'}, 'device': DeviceProperties(type='hip', index=0, multi_processor_count=304, cc='gfx942', major=9, regs_per_multiprocessor=65536, max_threads_per_multi_processor=2048, warp_size=64), 'constants': {}, 'configs': [{(0,): [['tt.divisibility', 16]], (1,): [['tt.divisibility', 16]], (2,): [['tt.divisibility', 16]]}], 'kpack': 2},
-    inductor_meta={'kernel_name': 'triton_tem_fused_convolution_0', 'backend_hash': '7A325521123AD39FFA38A5922D97D8764127648FBA37B319CFE0CCCA43E52353', 'are_deterministic_algorithms_enabled': False, 'assert_indirect_indexing': True, 'autotune_local_cache': True, 'autotune_pointwise': True, 'autotune_remote_cache': None, 'force_disable_caches': False, 'dynamic_scale_rblock': True, 'max_autotune': True, 'max_autotune_pointwise': False, 'min_split_scan_rblock': 256, 'spill_threshold': 16, 'store_cubin': False, 'is_hip': True, 'coordinate_descent_tuning': True, 'coordinate_descent_search_radius': 1, 'coordinate_descent_check_all_directions': False, 'grid_type': 'FixedGrid', 'fixed_grid': ['_grid_0', '_grid_1', '_grid_2'], 'extra_launcher_args': ['_grid_0', '_grid_1', '_grid_2'], 'kernel_num_gb': 0.166723584},
+    triton_meta={'signature': {'arg_X': '*bf16', 'arg_W': '*bf16', 'out_ptr0': '*bf16'}, 'device': DeviceProperties(type='hip', index=0, multi_processor_count=304, cc='gfx942', major=9, regs_per_multiprocessor=65536, max_threads_per_multi_processor=2048, warp_size=64), 'constants': {}, 'configs': [AttrsDescriptor.from_dict({'arg_properties': {'tt.divisibility': (0, 1, 2), 'tt.equal_to': ()}, 'cls': 'AttrsDescriptor'})]},
+    inductor_meta={'kernel_name': 'triton_tem_fused_convolution_0', 'backend_hash': '62BEA4D65C6FD70208CBEA9DEA8405AC6F99DA36705E29D15C086C229AFFE751', 'are_deterministic_algorithms_enabled': False, 'assert_indirect_indexing': True, 'autotune_local_cache': True, 'autotune_pointwise': True, 'autotune_remote_cache': None, 'force_disable_caches': False, 'dynamic_scale_rblock': True, 'max_autotune': True, 'max_autotune_pointwise': False, 'min_split_scan_rblock': 256, 'spill_threshold': 16, 'store_cubin': False, 'is_hip': True, 'coordinate_descent_tuning': True, 'coordinate_descent_search_radius': 1, 'coordinate_descent_check_all_directions': False, 'kernel_num_gb': 0.166723584},
 )
 @triton.jit
 def triton_tem_fused_convolution_0(arg_X, arg_W, out_ptr0):
@@ -147,20 +149,20 @@ def get_args():
         device='cuda:0',
         dtype=torch.bfloat16,
     )
-    return arg_0, arg_1, arg_2, 192, 16, 1
+    return arg_0, arg_1, arg_2,
 
 
 def call(args):
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         stream0 = get_raw_stream(0)
-        triton_tem_fused_convolution_0.run(*args, stream=stream0)
+        triton_tem_fused_convolution_0.run(*args, grid=(192, 16, 1), stream=stream0)
 
 
 def benchmark_all_configs(args):
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
-        return triton_tem_fused_convolution_0.benchmark_all_configs(*args)
+        return triton_tem_fused_convolution_0.benchmark_all_configs(*args, grid=(192, 16, 1))
 
 
 if __name__ == '__main__':
