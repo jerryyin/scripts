@@ -1,3 +1,5 @@
+# Base docker rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
+# Triton commit: 35c6c7c6284582b3f41c71c150e11b517acf074a
 # rm -rf /tmp/torchinductor* && rm -rf torch_compile_debug* && TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_MAX_AUTOTUNE_CONV_BACKENDS="TRITON" TORCH_COMPILE_DEBUG=1 TORCHINDUCTOR_BENCHMARK_KERNEL=1 python conv.py
 
 import torch
