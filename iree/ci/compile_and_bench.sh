@@ -49,10 +49,21 @@ fi
 #
 
 # Compile a single model
+# Note: change pytest_sessionstart to only download necessary files
+# iree-test-suites/sharktank_models/quality_tests/conftest.py
+#def pytest_sessionstart(session):
+#    logger.info("Pytest quality test session is starting")
+#
+#    # Collect all .json files for quality tests
+#    session.config.quality_test_files = []
+#    path_of_quality_tests = Path(session.config.getoption("test_file_directory"))
+# --   #test_files = sorted(path_of_quality_tests.glob("**/*.json"))
+# ++   test_files = sorted(path_of_quality_tests.glob("sdxl/clip_rocm.json"))
+
 echo '=== Step: Compile model ==='
 pytest \
   "$TEST_SUITE_REPO/sharktank_models/quality_tests" \
-  -k $TEST \
+  -k "$TEST" \
   -s -v \
   --test-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/sharktank_models/quality_tests" \
   --external-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/test_suite_files"
@@ -61,7 +72,7 @@ pytest \
 echo '=== Step: Run benchmark tests ==='
 pytest \
   "$TEST_SUITE_REPO/sharktank_models/benchmarks" \
-  -k $TEST \
+  -k "$TEST" \
   --log-cli-level=info \
   --retries=7 \
   --timeout=600 \
