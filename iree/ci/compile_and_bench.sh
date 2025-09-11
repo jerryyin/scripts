@@ -2,6 +2,7 @@
 set -euo pipefail
 
 TEST_SUITE_REPO="iree-test-suites"
+IREE_EXTERNAL_REPO="iree"
 # From pkgci_test_sharktank.yml
 TEST_SUITE_COMMIT="615c14ea2dd082d132cd64cd92806bcc7fdb5c75"
 
@@ -28,33 +29,33 @@ fi
 
 # To compile all tests
 #pytest \
-#  iree-test-suites/sharktank_models/quality_tests \
+#  "$TEST_SUITE_REPO/sharktank_models/quality_tests" \
 #  -rpFe \
 #  --log-cli-level=info \
 #  --durations=0 \
 #  --timeout=1200 \
 #  --capture=no \
-#  --test-file-directory=/home/runner/_work/iree/iree/tests/external/iree-test-suites/sharktank_models/quality_tests \
-#  --external-file-directory=/home/runner/_work/iree/iree/tests/external/iree-test-suites/test_suite_files
+#  --test-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/sharktank_models/quality_tests" \
+#  --external-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/test_suite_files"
 
-# To gather test ids: 
+# To gather test ids:
 # 8b_f16_decode_rocm, 8b_f16_prefill_rocm, clip_rocm, mmdit_rocm, vae_rocm, punet_int8_fp16_rocm, punet_int8_fp8_rocm,
 # scheduler_rocm, unet_fp16_960_1024_rocm, unet_fp16_rocm
 #pytest \
 #  --collect-only -v \
-#  iree-test-suites/sharktank_models/quality_tests \
-#  --test-file-directory=tests/external/iree-test-suites/sharktank_models/quality_tests \
-#  --external-file-directory=tests/external/iree-test-suites/test_suite_files
-
+#  "$TEST_SUITE_REPO/sharktank_models/quality_tests" \
+#  --test-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/sharktank_models/quality_tests" \
+#  --external-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/test_suite_files"
+#
 
 # Compile a single model
 echo '=== Step: Compile model ==='
 pytest \
-  "$TEST_SUITE_REPO/sharktank_models/quality_tests/model_quality_run.py" \
+  "$TEST_SUITE_REPO/sharktank_models/quality_tests" \
   -k $TEST \
   -s -v \
-  --test-file-directory="$TEST_SUITE_REPO/sharktank_models/quality_tests" \
-  --external-file-directory="$TEST_SUITE_REPO/test_suite_files"
+  --test-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/sharktank_models/quality_tests" \
+  --external-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/test_suite_files"
 
 # Run benchmark tests
 echo '=== Step: Run benchmark tests ==='
@@ -64,6 +65,6 @@ pytest \
   --log-cli-level=info \
   --retries=7 \
   --timeout=600 \
-  --test-file-directory="$TEST_SUITE_REPO/sharktank_models/benchmarks" \
-  --external-file-directory="$TEST_SUITE_REPO/test_suite_files"
+  --test-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/sharktank_models/benchmarks" \
+  --external-file-directory="$IREE_EXTERNAL_REPO/tests/external/iree-test-suites/test_suite_files"
 
