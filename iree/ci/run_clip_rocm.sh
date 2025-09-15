@@ -6,6 +6,8 @@ ROOT="/root/iree-test-suites/sharktank_models"
 ARTIFACTS="$ROOT/artifacts/sdxl_clip"
 VMFBS="$ROOT/sdxl_clip_vmfbs"
 MODULE="$VMFBS/model.rocm_gfx942.vmfb"
+DUMP_DIR="$ROOT/dump"
+#DUMP_DIR="$ROOT/taf_default_dump"
 
 mkdir -p "$VMFBS"
 
@@ -14,6 +16,8 @@ iree-compile \
   -o "$MODULE" \
   "$ARTIFACTS/model.mlir" \
   --mlir-timing \
+  --iree-hal-executable-debug-level=3 \
+  --iree-hal-dump-executable-files-to=$DUMP_DIR \
   --mlir-timing-display=list \
   --iree-consteval-jit-debug \
   --iree-hal-target-device=hip \
