@@ -1,4 +1,4 @@
-// RUN: iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-llvmgpu-set-workgroup-distribution-along=x %s -o gpu.vmfb --debug-only=iree-codegen-gpu-heuristics --mlir-print-ir-after-all --iree-flow-export-benchmark-funcs
+// RUN: iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-llvmgpu-set-workgroup-distribution-along=x %s -o gpu.vmfb --debug-only=iree-gpu-config-utils,iree-codegen-gpu-heuristics --mlir-print-ir-after-all --iree-flow-export-benchmark-funcs
 
 #map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
 #map2 = affine_map<(d0, d1, d2) -> (d1, d2)>
