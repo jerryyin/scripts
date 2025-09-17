@@ -3,8 +3,8 @@ set -e
 
 # Help message
 function usage() {
-    echo "Usage: $0 -f <input_mlir_file> -d <dtype> -i <shape1> -i <shape2> ... [-t <tuning_spec>] [--cpu] [--bench]"
-    echo "Example: $0 -f kernel.mlir -d f16 -i 1280 -i 64x1280 -i 512x512 --cpu --bench"
+    echo "Usage: $0 -f <input_mlir_file> -d <dtype> -i <shape1> -i <shape2> ... [-t <tuning_spec>] [--cpu] [--bench] [--flag] <extra_flag>]"
+    echo "Example: $0 -f kernel.mlir -d f16 -i 1280 -i 64x1280 -i 512x512 --cpu --bench --flag='--iree-codegen-llvmgpu-use-ile-and-fuse-matmul=false'"
     exit 1
 }
 
@@ -15,6 +15,7 @@ tuning_spec=""
 shapes=()
 do_cpu=false
 do_bench=false
+flag=""
 
 # Parse command-line arguments
 while [[ "$#" -gt 0 ]]; do
@@ -25,6 +26,7 @@ while [[ "$#" -gt 0 ]]; do
         -i) shapes+=("$2"); shift ;;
         --cpu) do_cpu=true ;;
         --bench) do_bench=true ;;
+        --flag) flag="$2"; shift ;;
         *) usage ;;
     esac
     shift
@@ -56,7 +58,15 @@ rocm_compile_cmd="iree-compile --iree-hal-target-backends=rocm --iree-hip-target
 if [ -n "$tuning_spec" ]; then
     rocm_compile_cmd+=" --iree-codegen-tuning-spec-path=${tuning_spec}"
 fi
+if [ $do_bench = true ]; then
+    rocm_compile_cmd+=" --iree-flow-export-benchmark-funcs"
+fi
+if [ -n "$flag" ]; then
+    rocm_compile_cmd+=" ${flag}"
+fi
+set -x
 eval $rocm_compile_cmd
+set +x
 
 # -------------------
 # Generate random inputs
