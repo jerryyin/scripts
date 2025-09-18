@@ -3,6 +3,8 @@ set -x
 
 # Delete rocm sources if any, they tend to cause problem with apt update
 #find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
+# Re-import gpg key to not have warnings all over the place
+curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/rocm.gpg
 
 apt-get update && apt-get -y install sudo software-properties-common apt-utils curl
 
@@ -15,9 +17,15 @@ shopt -s expand_aliases
 
 sudo apt-get update --allow-insecure-repositories
 
-# PPA:  TODO remove when it becomes default ubuntu package
-# vim8 packge ppa. This is unecessary in ubuntu 24.04
-sudo add-apt-repository -y ppa:jonathonf/vim
+# Get Ubuntu codename (focal, jammy, noble, etc.)
+CODENAME=$(lsb_release -sc 2>/dev/null || . /etc/os-release && echo "$VERSION_CODENAME")
+
+if [ "$CODENAME" = "focal" ] || [ "$CODENAME" = "jammy" ]; then
+  sudo add-apt-repository -y ppa:jonathonf/vim
+else
+  echo "Skipping jonathonf/vim PPA on $CODENAME"
+fi
+
 # neovim ppa
 sudo add-apt-repository -y ppa:neovim-ppa/stable
 # setup nodejs
