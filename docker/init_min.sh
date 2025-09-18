@@ -2,7 +2,7 @@
 set -x
 
 # Delete rocm sources if any, they tend to cause problem with apt update
-find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
+#find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
 
 apt-get update && apt-get -y install sudo software-properties-common apt-utils curl
 
