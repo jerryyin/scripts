@@ -74,7 +74,10 @@ set +x
 input_args=""
 for shape in "${shapes[@]}"; do
     file="${shape}x${dtype}.bin"
-    python ~/scripts/iree/genRandInput.py "${file}" --shape ${shape} --dtype $dtype
+    if [ ! -f "${file}" ]; then
+        echo "[INFO] Generating random input for shape ${shape} and dtype ${dtype}..."
+        python ~/scripts/iree/genRandInput.py "${file}" --shape ${shape} --dtype $dtype
+    fi
     input_args+=" --input=${shape}x${dtype}=@${file}"
 done
 
@@ -86,6 +89,7 @@ gpu_output_bin="gpu_output.bin"
 
 set -x
 if $do_cpu; then
+    echo "[INFO] Running on CPU..."
     iree-run-module \
         --device=local-task \
         --module="${cpu_output_file}" \
@@ -94,6 +98,7 @@ if $do_cpu; then
 fi
 
 if $do_bench; then
+    echo "[INFO] Benchmarking on GPU..."
     iree-benchmark-module \
         --device=hip \
         --module="${gpu_output_file}" \
@@ -102,6 +107,7 @@ if $do_bench; then
         --benchmark_repetitions=10 \
         --benchmark_min_warmup_time=3.0
 else
+    echo "[INFO] Running on GPU..."
     iree-run-module \
         --device=hip \
         --module="${gpu_output_file}" \
