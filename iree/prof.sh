@@ -39,7 +39,7 @@ trace() {
 }
 
 att() {
-  local OUTBASE="rocprof_att"
+  local OUTBASE="/zyin/rocprof_att"
 
   # If output folder exists, move aside
   if [[ -d "$OUTBASE" ]]; then
@@ -50,7 +50,7 @@ att() {
   ROCPROF_ATT_LIBRARY_PATH=/opt/rocm/lib \
     rocprofv3 --att-perfcounter-ctrl 3 \
     --att-perfcounters "SQ_LDS_BANK_CONFLICT, SQ_WAIT_INST_LDS" \
-    -i "$SCRIPT_DIR/iree/att.json" -d "$OUTBASE" -- "$@"
+    -i "$SCRIPT_DIR/att.json" -d "$OUTBASE" -- "$@"
 }
 
 # --- Main entry point ---
