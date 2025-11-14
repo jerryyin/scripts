@@ -14,6 +14,7 @@ spec:
   containers:
     - name: interactive-web
       image: ghcr.io/nod-ai/ossci-gitops/rocm-dev:ossci-test@sha256:af655ad69c46c7af76db58c597d82d277c4f71d1343b2867c85b2bc77a66ca6a
+      imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -c
