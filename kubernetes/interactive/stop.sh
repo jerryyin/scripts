@@ -105,6 +105,10 @@ if [ -n "$PODS" ]; then
         echo ""
         echo "Deleting all $POD_COUNT pods..."
         for pod in "${POD_ARRAY[@]}"; do
+            echo "  Cleaning workspace for $pod..."
+            # Clean up workspace before deleting pod (using script from repo)
+            kubectl exec "$pod" -n "$NAMESPACE" -- bash ~/scripts/kubernetes/interactive/cleanup-workspace.sh 2>/dev/null || echo "    (workspace cleanup skipped - pod may be terminating)"
+            
             echo "  Deleting $pod..."
             kubectl delete pod "$pod" -n "$NAMESPACE" --grace-period=30
         done
@@ -121,6 +125,11 @@ if [ -n "$PODS" ]; then
             if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$POD_COUNT" ]; then
                 POD_INDEX=$((sel-1))
                 POD_TO_DELETE=${POD_ARRAY[$POD_INDEX]}
+                
+                echo "  Cleaning workspace for $POD_TO_DELETE..."
+                # Clean up workspace before deleting pod (using script from repo)
+                kubectl exec "$POD_TO_DELETE" -n "$NAMESPACE" -- bash ~/scripts/kubernetes/interactive/cleanup-workspace.sh 2>/dev/null || echo "    (workspace cleanup skipped - pod may be terminating)"
+                
                 echo "  Deleting $POD_TO_DELETE..."
                 kubectl delete pod "$POD_TO_DELETE" -n "$NAMESPACE" --grace-period=30
                 DELETED=$((DELETED+1))

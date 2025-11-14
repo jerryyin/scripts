@@ -19,6 +19,7 @@ spec:
       # Docker image to use for the interactive session.
       # ROCm base image for IREE development
       image: rocm/dev-ubuntu-24.04:latest
+      imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -c
@@ -26,18 +27,15 @@ spec:
           set -eux
           # Install sudo, openssh-server, and zsh as root first
           apt-get update -qq && apt-get install -y sudo openssh-server curl vim git zsh
-          
+
           # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
           useradd -u 1001 -m -s /bin/zsh ossci || true
-          
+
           # Give ossci user sudo privileges
           echo 'ossci ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ossci
           chmod 0440 /etc/sudoers.d/ossci
 
-          # Ensure proper ownership of home directory
-          chown -R ossci:ossci /home/ossci
-
-          # Setup SSH access
+          # Setup SSH access (fsGroup: 1001 handles PVC ownership)
           mkdir -p /home/ossci/.ssh
           cp /mnt/sshkey/authorized_keys /home/ossci/.ssh/authorized_keys
           chmod 700 /home/ossci/.ssh

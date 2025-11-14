@@ -6,7 +6,7 @@ set -x
 # Re-import gpg key to not have warnings all over the place
 curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/rocm.gpg
 
-apt-get update && apt-get -y install sudo software-properties-common apt-utils curl
+sudo apt-get update && sudo apt-get -y install sudo software-properties-common apt-utils curl
 
 # Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
 if ! grep -q "$HOSTNAME" /etc/hosts; then
@@ -49,8 +49,14 @@ if [ ! -d scripts ]; then
     git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
 fi
 
-wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
-sudo cp AMD_CA.crt /usr/local/share/ca-certificates
-sudo update-ca-certificates
+# Only download AMD_CA.crt if not already present (PVC persists across pods)
+if [ ! -f /usr/local/share/ca-certificates/AMD_CA.crt ]; then
+    wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
+    sudo cp AMD_CA.crt /usr/local/share/ca-certificates
+    sudo update-ca-certificates
+    rm -f AMD_CA.crt  # Clean up downloaded file
+else
+    echo "AMD_CA.crt already installed, skipping"
+fi
 
-sudo apt-get install -y locales && locale-gen en_US.UTF-8
+sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8

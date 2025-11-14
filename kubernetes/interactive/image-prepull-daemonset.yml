@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rocm-image-prepull
+  namespace: iree-dev
+spec:
+  selector:
+    matchLabels:
+      name: rocm-image-prepull
+  template:
+    metadata:
+      labels:
+        name: rocm-image-prepull
+    spec:
+      # This runs on ALL nodes in the cluster
+      containers:
+      - name: prepull
+        image: rocm/dev-ubuntu-24.04:latest
+        imagePullPolicy: IfNotPresent
+        # Just sleep forever - the image pull is what we care about
+        command: ["sleep", "infinity"]
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "100m"
+          limits:
+            memory: "200Mi"
+            cpu: "200m"
+      # Tolerate all taints so it runs on every node
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+

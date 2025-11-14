@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Default values
-DATE=$(date +%Y%m%d)
-TIME=$(date +%H%M%S)
+DATE=$(date +%m%d)  # Format: MMDD (e.g., 1114)
+TIME=$(date +%H%M%S)  # Format: HHMMSS (e.g., 142111)
 POD_NAME="${USER}-iree-${DATE}-${TIME}"
 LOCAL_PORT="8000"
 REMOTE_PORT="9000"
@@ -76,7 +76,7 @@ if ! kubectl get ns >/dev/null 2>&1; then
     echo "Please complete the Okta sign-in in your browser."
     echo "Waiting for authentication..."
     echo ""
-    
+
     # Trigger authentication (show output so user can see what's happening)
     if kubectl get ns 2>&1 | head -3; then
         echo ""
@@ -261,7 +261,7 @@ else
         fi
         sleep 2
     done
-    
+
     echo ""
     echo "================================================================"
     echo "  Interactive Pod Ready"
@@ -274,7 +274,79 @@ else
     echo ""
     echo "Connecting to pod via SSH..."
     echo ""
-    
+
+    # Always run container setup for new pods
+    # Check if this is a new container (system packages not installed)
+    if ! ssh -o ConnectTimeout=5 ossci "command -v tmux >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1" 2>/dev/null; then
+        echo ""
+        echo "🔧 New container detected! Running system setup..."
+        echo ""
+        echo "This will:"
+        echo "  1. Install system packages (git, zsh, tmux, neovim, cmake, etc.)"
+        echo "  2. Setup dotfiles (if not already present)"
+        echo "  3. Clone repos (if not already present)"
+        echo "  4. Install Python packages"
+        echo ""
+        echo "Note: Existing repos/dotfiles will be reused from PVC"
+        echo "This may take 10-15 minutes..."
+        echo ""
+
+        # Ensure scripts repo exists in pod
+        echo "📤 Checking for scripts repository in pod..."
+        if ! ssh ossci "test -d ~/scripts/.git" 2>/dev/null; then
+            echo "   Scripts repo not found, cloning..."
+            ssh ossci "git clone https://github.com/jerryyin/scripts.git ~/scripts && git -C ~/scripts remote set-url origin git@github.com:jerryyin/scripts.git" || {
+                echo "❌ Failed to clone scripts repository"
+                echo "   Please check network connectivity and try again"
+                exit 1
+            }
+            echo "✅ Scripts repository cloned"
+        else
+            echo "✅ Scripts repository already exists"
+        fi
+        echo ""
+
+        # Run init_min.sh (installs system packages, sets up dotfiles)
+        echo "📦 Step 1/2: Running init_min.sh (system packages + dotfiles)..."
+        ssh ossci "cd ~ && bash scripts/docker/init_min.sh" || {
+            echo "❌ init_min.sh failed. Please check the pod and run manually:"
+            echo "   ssh ossci"
+            echo "   bash ~/scripts/docker/init_min.sh"
+            exit 1
+        }
+
+        # Run init_iree.sh (installs cmake, python packages)
+        echo ""
+        echo "📦 Step 2/2: Running init_iree.sh (IREE dependencies)..."
+        ssh ossci "cd ~ && bash scripts/docker/init_iree.sh" || {
+            echo "❌ init_iree.sh failed. Please check the pod and run manually:"
+            echo "   ssh ossci"
+            echo "   bash ~/scripts/docker/init_iree.sh"
+            exit 1
+        }
+
+        echo ""
+        echo "✅ Container setup complete!"
+        echo ""
+    else
+        echo ""
+        echo "✅ Container already set up (reusing existing pod)"
+        echo ""
+    fi
+
+    # Setup isolated workspace for this pod
+    echo "Setting up isolated workspace..."
+
+    # Run workspace setup script from scripts repo
+    ssh ossci "bash ~/scripts/kubernetes/interactive/setup-workspace.sh" || {
+        echo "❌ setup-workspace.sh failed. Please check the pod and run manually:"
+        echo "   ssh ossci"
+        echo "   bash ~/scripts/kubernetes/interactive/setup-workspace.sh"
+        exit 1
+    }
+
+    echo ""
+
     # SSH into the pod
     ssh ossci
 fi
