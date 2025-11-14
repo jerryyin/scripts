@@ -19,18 +19,33 @@ echo ""
 # Find all port-forward PIDs
 PID_FILES=$(ls /tmp/kubectl-port-forward-${USER}-*.pid 2>/dev/null || true)
 if [ -n "$PID_FILES" ]; then
-    echo "Killing port-forward processes..."
+    echo "🔌 Port-forward processes:"
     for pid_file in $PID_FILES; do
         if [ -f "$pid_file" ]; then
             PID=$(cat "$pid_file")
             POD=$(basename "$pid_file" | sed "s/kubectl-port-forward-${USER}-//;s/.pid//")
             if kill -0 "$PID" 2>/dev/null; then
-                echo "  - Stopping port-forward for $POD (PID: $PID)"
-                kill "$PID" 2>/dev/null || true
+                echo "  - $POD (PID: $PID)"
             fi
-            rm -f "$pid_file"
         fi
     done
+    echo ""
+    read -p "Kill all port-forwards? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        for pid_file in $PID_FILES; do
+            if [ -f "$pid_file" ]; then
+                PID=$(cat "$pid_file")
+                if kill -0 "$PID" 2>/dev/null; then
+                    kill "$PID" 2>/dev/null || true
+                fi
+                rm -f "$pid_file"
+            fi
+        done
+        echo "✓ Port-forwards killed"
+    else
+        echo "Port-forwards not killed"
+    fi
 else
     echo "No port-forward processes found."
 fi
@@ -41,24 +56,67 @@ echo ""
 PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | .metadata.name" 2>/dev/null || true)
 
 if [ -n "$PODS" ]; then
-    echo "Found interactive pod(s):"
-    echo "$PODS" | sed 's/^/  - /'
+    POD_ARRAY=($PODS)
+    POD_COUNT=${#POD_ARRAY[@]}
+    
+    echo "📦 Found $POD_COUNT pod(s):"
     echo ""
-    read -p "Delete all these pods? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        for pod in $PODS; do
+    
+    # Display pods with numbers
+    for i in "${!POD_ARRAY[@]}"; do
+        POD=${POD_ARRAY[$i]}
+        # Get pod age and status
+        AGE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "unknown")
+        STATUS=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+        echo "  $((i+1)). $POD"
+        echo "     Status: $STATUS | Started: $AGE"
+    done
+    
+    echo ""
+    echo "Options:"
+    echo "  a       - Delete ALL pods"
+    echo "  1-$POD_COUNT   - Delete specific pod by number"
+    echo "  1,3,5   - Delete multiple pods (comma-separated)"
+    echo "  q       - Quit without deleting"
+    echo ""
+    read -p "Choose pods to delete: " -r CHOICE
+    
+    if [[ "$CHOICE" =~ ^[Qq]$ ]]; then
+        echo "No pods deleted."
+        exit 0
+    elif [[ "$CHOICE" =~ ^[Aa]$ ]]; then
+        # Delete all pods
+        echo ""
+        echo "Deleting all $POD_COUNT pods..."
+        for pod in "${POD_ARRAY[@]}"; do
             echo "  Deleting $pod..."
             kubectl delete pod "$pod" -n "$NAMESPACE" --grace-period=30
         done
-        echo "✅ Pods deleted"
+        echo "✅ All pods deleted"
     else
-        echo "Pods not deleted."
+        # Parse selection (handles single numbers or comma-separated)
+        IFS=',' read -ra SELECTIONS <<< "$CHOICE"
+        DELETED=0
         echo ""
-        echo "To delete manually:"
-        for pod in $PODS; do
-            echo "  kubectl delete pod $pod -n $NAMESPACE"
+        for sel in "${SELECTIONS[@]}"; do
+            # Trim whitespace
+            sel=$(echo "$sel" | xargs)
+            # Check if valid number
+            if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$POD_COUNT" ]; then
+                POD_INDEX=$((sel-1))
+                POD_TO_DELETE=${POD_ARRAY[$POD_INDEX]}
+                echo "  Deleting $POD_TO_DELETE..."
+                kubectl delete pod "$POD_TO_DELETE" -n "$NAMESPACE" --grace-period=30
+                DELETED=$((DELETED+1))
+            else
+                echo "  ⚠ Invalid selection: $sel (skipping)"
+            fi
         done
+        if [ $DELETED -gt 0 ]; then
+            echo "✅ Deleted $DELETED pod(s)"
+        else
+            echo "No pods deleted."
+        fi
     fi
 else
     echo "No interactive pods found."
@@ -66,4 +124,3 @@ fi
 
 echo ""
 echo "Done."
-
