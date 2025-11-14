@@ -36,15 +36,13 @@ if [ ! -d "$WORKSPACE/iree" ]; then
     echo "📦 Creating isolated workspace for pod: $POD_NAME"
     mkdir -p "$WORKSPACE"
     
-    # Copy from reference (faster than cloning)
-    echo "   Copying from reference..."
-    cp -r "$REFERENCE/iree" "$WORKSPACE/iree"
+    # Clone from reference using --reference --dissociate (fast clone, fully independent)
+    echo "   Cloning from reference (creating independent copy)..."
+    cd "$WORKSPACE"
+    git clone --reference "$REFERENCE/iree" --dissociate "$REFERENCE/iree" iree
     
-    # Update to latest
-    echo "   Updating to latest..."
     cd "$WORKSPACE/iree"
-    git fetch origin
-    git reset --hard origin/main
+    git remote set-url origin git@github.com:iree-org/iree.git
     git submodule update --init
     
     # Setup llvm-project remotes

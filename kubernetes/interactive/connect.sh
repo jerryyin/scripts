@@ -291,18 +291,22 @@ else
         echo "This may take 10-15 minutes..."
         echo ""
 
-        # Ensure scripts repo exists in pod
+        # Ensure scripts repo exists in pod (copy from local)
         echo "📤 Checking for scripts repository in pod..."
-        if ! ssh ossci "test -d ~/scripts/.git" 2>/dev/null; then
-            echo "   Scripts repo not found, cloning..."
-            ssh ossci "git clone https://github.com/jerryyin/scripts.git ~/scripts && git -C ~/scripts remote set-url origin git@github.com:jerryyin/scripts.git" || {
-                echo "❌ Failed to clone scripts repository"
-                echo "   Please check network connectivity and try again"
+        if ! ssh ossci "test -d ~/scripts" 2>/dev/null; then
+            echo "   Scripts not found, copying from local..."
+            kubectl cp "$HOME/scripts" "$NAMESPACE/$POD_NAME:/home/ossci/" || {
+                echo "❌ Failed to copy scripts directory"
+                echo "   Please ensure ~/scripts exists locally"
                 exit 1
             }
-            echo "✅ Scripts repository cloned"
+            echo "✅ Scripts copied to pod"
         else
-            echo "✅ Scripts repository already exists"
+            echo "   Updating scripts from local..."
+            # Sync key directories that we actively develop
+            kubectl cp "$HOME/scripts/docker" "$NAMESPACE/$POD_NAME:/home/ossci/scripts/" 2>/dev/null || true
+            kubectl cp "$HOME/scripts/kubernetes" "$NAMESPACE/$POD_NAME:/home/ossci/scripts/" 2>/dev/null || true
+            echo "✅ Scripts synchronized"
         fi
         echo ""
 
