@@ -1,0 +1,9 @@
+# Add this to your ~/.ssh/config
+
+Host ossci
+  HostName 127.0.0.1
+  User ossci
+  Port 2222
+  IdentityFile ~/.ssh/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
