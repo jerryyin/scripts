@@ -152,6 +152,9 @@ kubectl apply -f ~/scripts/kubernetes/pvc/iree-dev-zyin-pvc.yaml
 # - Creates new pod if none exist
 # - SSH's you into the pod
 
+# To start a second/third pod (for parallel work):
+~/scripts/kubernetes/interactive/connect.sh --new
+
 # 2. Work in the pod
 # (you're already connected)
 
@@ -232,23 +235,50 @@ vim ~/scripts/kubernetes/interactive/pod-ssh.yml
 ```bash
 # SSH mode (default) - just run this!
 ~/scripts/kubernetes/interactive/connect.sh
-# First time: browser opens for Okta login
-# After that: instant connection
+# Attaches to existing pod if available
+
+# Create a NEW pod (even if others exist)
+~/scripts/kubernetes/interactive/connect.sh --new
+# Useful for running multiple pods simultaneously
 
 # Web mode (browser-based code-server)
 ~/scripts/kubernetes/interactive/connect.sh web
 # Access: http://localhost:8000
 ```
 
+**Multiple Pods:**
+- By default, script attaches to existing pod (reuses your environment)
+- Use `--new` flag to create additional pods for parallel work
+- Each pod gets unique name: `${USER}-iree-YYYYMMDD-HHMMSS`
+
 **Reconnect:**
 ```bash
 ssh ossci
 ```
 
-**stop.sh** - Cleanup pods:
+**stop.sh** - Selective cleanup:
 ```bash
 ~/scripts/kubernetes/interactive/stop.sh
-# Stops port-forwards and deletes pods
+# Interactive menu to choose which pods to delete:
+# - a: Delete all pods
+# - 1,2,3: Delete specific pods by number
+# - q: Quit without deleting
+```
+
+**Example:**
+```
+📦 Found 3 pod(s):
+  1. zyin-iree-20251114-100000
+  2. zyin-iree-20251114-110000
+  3. zyin-iree-20251114-120000
+
+Options:
+  a     - Delete ALL pods
+  1-3   - Delete specific pod
+  1,3   - Delete multiple pods
+  q     - Quit
+
+Choose pods to delete: 2
 ```
 
 ---

@@ -11,14 +11,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMP_YAML="${SCRIPT_DIR}/pod-temp.yml"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
 
-MODE=${1:-ssh}
+# Parse arguments
+FORCE_NEW=false
+MODE="ssh"
 
-if [[ "$MODE" != "web" && "$MODE" != "ssh" ]]; then
-  echo "Usage: $0 <web|ssh>"
-  echo "  web : run browser-based code-server"
-  echo "  ssh : run SSH-accessible interactive pod (default)"
-  exit 1
-fi
+for arg in "$@"; do
+    case $arg in
+        -n|--new)
+            FORCE_NEW=true
+            shift
+            ;;
+        web|ssh)
+            MODE=$arg
+            shift
+            ;;
+        *)
+            echo "Usage: $0 [OPTIONS] <web|ssh>"
+            echo ""
+            echo "Options:"
+            echo "  -n, --new    Force creation of new pod (don't attach to existing)"
+            echo ""
+            echo "Modes:"
+            echo "  ssh          SSH-accessible interactive pod (default)"
+            echo "  web          Browser-based code-server"
+            exit 1
+            ;;
+    esac
+done
 
 # Read config
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -47,6 +66,7 @@ if [ -d "$HOME/.krew/bin" ] && [[ ":$PATH:" != *":$HOME/.krew/bin:"* ]]; then
 fi
 
 # Check authentication
+echo "Checking authentication..."
 if ! kubectl get ns >/dev/null 2>&1; then
     echo ""
     echo "⚠ Not authenticated with Kubernetes cluster"
@@ -54,10 +74,12 @@ if ! kubectl get ns >/dev/null 2>&1; then
     echo ""
     echo "This will open your browser at http://localhost:8000"
     echo "Please complete the Okta sign-in in your browser."
+    echo "Waiting for authentication..."
     echo ""
     
-    # Trigger authentication (this will open the browser)
-    if kubectl get ns >/dev/null 2>&1; then
+    # Trigger authentication (show output so user can see what's happening)
+    if kubectl get ns 2>&1 | head -3; then
+        echo ""
         echo "✓ Authentication successful!"
         echo ""
     else
@@ -95,18 +117,29 @@ YAML_TEMPLATE="${SCRIPT_DIR}/pod-${MODE}.yml"
 echo "Checking for existing interactive pods..."
 EXISTING_PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | select(.status.phase == \"Running\") | .metadata.name" 2>/dev/null || true)
 
-if [ -n "$EXISTING_PODS" ]; then
+if [ -n "$EXISTING_PODS" ] && [ "$FORCE_NEW" = false ]; then
     # Get the latest pod (newest timestamp)
     LATEST_POD=$(echo "$EXISTING_PODS" | sort -r | head -1)
+    POD_COUNT=$(echo "$EXISTING_PODS" | wc -l)
     echo ""
-    echo "Found existing pod(s):"
+    echo "Found $POD_COUNT existing pod(s):"
     echo "$EXISTING_PODS" | sed 's/^/  - /'
     echo ""
     echo "Using latest pod: $LATEST_POD"
+    echo ""
+    echo "💡 Tip: To create a new pod instead, run: $0 --new"
     POD_NAME="$LATEST_POD"
     SKIP_CREATE=true
+elif [ -n "$EXISTING_PODS" ] && [ "$FORCE_NEW" = true ]; then
+    POD_COUNT=$(echo "$EXISTING_PODS" | wc -l)
+    echo ""
+    echo "Found $POD_COUNT existing pod(s):"
+    echo "$EXISTING_PODS" | sed 's/^/  - /'
+    echo ""
+    echo "Creating new pod (--new flag): $POD_NAME"
+    SKIP_CREATE=false
 else
-    echo "No existing pods found. Will create new pod: $POD_NAME"
+    echo "No existing pods found. Creating new pod: $POD_NAME"
     SKIP_CREATE=false
 fi
 
