@@ -21,10 +21,14 @@ if [ ! -d "$REFERENCE/iree" ]; then
 else
     echo "📦 Updating reference IREE to latest..."
     cd "$REFERENCE/iree"
-    git fetch origin
-    git reset --hard origin/main
-    git submodule update --init
-    echo "✅ Reference IREE updated"
+    # Try to fetch, but don't fail if SSH isn't set up yet
+    if git fetch origin 2>/dev/null; then
+        git reset --hard origin/main
+        git submodule update --init
+        echo "✅ Reference IREE updated"
+    else
+        echo "   ℹ️  Could not fetch (SSH not set up yet), using existing reference"
+    fi
 fi
 
 # Create workspace for this pod if it doesn't exist
