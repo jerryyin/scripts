@@ -42,14 +42,44 @@ echo ""
 echo "📦 Pods (one per node):"
 kubectl get pods -n "$NAMESPACE" -l name=rocm-image-prepull -o wide
 echo ""
-echo "💡 To watch progress:"
-echo "   kubectl get pods -n $NAMESPACE -l name=rocm-image-prepull -w"
+echo "💡 Commands:"
+echo "   Watch progress:  kubectl get pods -n $NAMESPACE -l name=rocm-image-prepull -w"
+echo "   Check status:    kubectl get daemonset rocm-image-prepull -n $NAMESPACE"
 echo ""
-echo "💡 To check logs on a specific pod:"
-echo "   kubectl logs -n $NAMESPACE <pod-name>"
+echo "⏰ Wait for completion and auto-cleanup? (y/N): "
+read -r -n 1 AUTO_CLEANUP
 echo ""
-echo "💡 Once all pods are Running, the image is cached on all nodes!"
-echo ""
-echo "🧹 To cleanup after image pull completes:"
-echo "   kubectl delete daemonset rocm-image-prepull -n $NAMESPACE"
+
+if [[ $AUTO_CLEANUP =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "⏳ Waiting for all nodes to pull the image..."
+    echo "   (This may take 10-20 minutes depending on cluster size)"
+    echo ""
+    
+    # Wait for DaemonSet to be ready
+    kubectl rollout status daemonset/rocm-image-prepull -n "$NAMESPACE" --timeout=30m || {
+        echo "⚠️  Timeout or error waiting for DaemonSet"
+        echo "   You can check status with: kubectl get daemonset rocm-image-prepull -n $NAMESPACE"
+        echo "   And cleanup manually with: kubectl delete daemonset rocm-image-prepull -n $NAMESPACE"
+        exit 1
+    }
+    
+    echo ""
+    echo "✅ All nodes have successfully pulled the image!"
+    echo ""
+    echo "🧹 Cleaning up DaemonSet..."
+    kubectl delete daemonset rocm-image-prepull -n "$NAMESPACE"
+    echo "✅ Cleanup complete!"
+    echo ""
+    echo "🚀 All cluster nodes now have the ROCm image cached."
+    echo "   Your pods will start much faster from now on!"
+else
+    echo ""
+    echo "⚠️  REMINDER: Don't forget to cleanup the DaemonSet when done!"
+    echo ""
+    echo "   Check if complete:  kubectl get daemonset rocm-image-prepull -n $NAMESPACE"
+    echo "   Cleanup command:    kubectl delete daemonset rocm-image-prepull -n $NAMESPACE"
+    echo ""
+    echo "   (Look for DESIRED == READY to know when it's done)"
+fi
 
