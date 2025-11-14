@@ -66,7 +66,7 @@ if [ -d "$HOME/.krew/bin" ] && [[ ":$PATH:" != *":$HOME/.krew/bin:"* ]]; then
 fi
 
 # Check authentication
-echo "Checking authentication..."
+echo "Checking authentication (http://localhost:8000)..."
 if ! kubectl get ns >/dev/null 2>&1; then
     echo ""
     echo "⚠ Not authenticated with Kubernetes cluster"
@@ -181,7 +181,8 @@ if [ "$SKIP_CREATE" = false ]; then
     kubectl apply -f "$TEMP_YAML" -n "$NAMESPACE"
 
     echo "Waiting for pod '$POD_NAME' to be ready..."
-    kubectl wait pod "$POD_NAME" -n "$NAMESPACE" --for=condition=Ready --timeout=300s
+    echo "(This may take 10-15 minutes on first run while pulling the ROCm image...)"
+    kubectl wait pod "$POD_NAME" -n "$NAMESPACE" --for=condition=Ready --timeout=900s
 
     echo "Pod is ready!"
     rm -f "$TEMP_YAML"
@@ -245,13 +246,17 @@ if [[ "$MODE" == "web" ]]; then
     echo "================================================================"
 else
     echo "Waiting for SSH service to be ready..."
-    for i in {1..12}; do
-        if kubectl exec -n "$NAMESPACE" "$POD_NAME" -- bash -c "timeout 1 bash -c '</dev/tcp/localhost/22'" 2>/dev/null; then
+    echo "(Waiting for port-forward to establish and SSH daemon to start...)"
+    for i in {1..30}; do
+        # Test SSH connection via port-forward (localhost:2222 -> pod:22)
+        if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ossci "exit 0" >/dev/null 2>&1; then
             echo "✅ SSH service is ready!"
             break
         fi
-        if [ $i -eq 12 ]; then
-            echo "⚠ Timeout waiting for SSH service"
+        if [ $i -eq 30 ]; then
+            echo "⚠ Timeout waiting for SSH service (waited 60 seconds)"
+            echo "   Pod may still be starting up. Try:"
+            echo "   kubectl logs $POD_NAME -n $NAMESPACE"
             exit 1
         fi
         sleep 2
