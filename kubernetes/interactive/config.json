@@ -1,0 +1,6 @@
+{
+  "namespace": "iree-dev",
+  "pvc": "iree-dev-zyin-pvc",
+  "public_ssh_key_path": "/home/zyin/.ssh/id_rsa.pub",
+  "default_cluster": "tw-tus1-bm-private-sso.conf"
+}
