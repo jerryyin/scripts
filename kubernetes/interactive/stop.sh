@@ -12,6 +12,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 NAMESPACE=$(jq -r '.namespace' "$CONFIG_FILE")
+DEFAULT_CLUSTER=$(jq -r '.default_cluster' "$CONFIG_FILE")
+DEFAULT_KUBECONFIG="$HOME/.kube/configs/$DEFAULT_CLUSTER"
+
+# Setup kubeconfig
+if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+    # Use existing KUBECONFIG if set
+    :
+else
+    # Use default cluster from config
+    export KUBECONFIG="$DEFAULT_KUBECONFIG"
+fi
+
+# Add krew to PATH if needed
+if [ -d "$HOME/.krew/bin" ] && [[ ":$PATH:" != *":$HOME/.krew/bin:"* ]]; then
+    export PATH="${HOME}/.krew/bin:$PATH"
+fi
 
 echo "Stopping interactive pods and port-forwards..."
 echo ""

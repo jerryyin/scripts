@@ -11,33 +11,42 @@ spec:
       secret:
         secretName: ssh-key-{{USER}}
   securityContext:
-    runAsUser: 1001
-    runAsGroup: 1001
+    # Keep fsGroup to ensure PVC files are accessible
+    # Run as root to allow package installation
     fsGroup: 1001
   containers:
     - name: interactive-ssh
       # Docker image to use for the interactive session.
-      # Can change to any image that builds off this one.
-      image: ghcr.io/nod-ai/ossci-gitops/ossci-dev:main@sha256:4d76f74015ac2345ee17ef182921e00bc8d24feee39e36ae91906e2979e3c93e
+      # ROCm base image for IREE development
+      image: rocm/dev-ubuntu-24.04:latest
       command:
         - /bin/bash
         - -c
         - |
           set -eux
-          sudo apt-get update && sudo apt-get install -y sudo openssh-server curl vim
+          # Install sudo, openssh-server, and zsh as root first
+          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git zsh
+          
+          # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
+          useradd -u 1001 -m -s /bin/zsh ossci || true
+          
+          # Give ossci user sudo privileges
+          echo 'ossci ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ossci
+          chmod 0440 /etc/sudoers.d/ossci
 
-          # Ensure proper ownership
-          sudo chown -R ossci:ossci /home/ossci
+          # Ensure proper ownership of home directory
+          chown -R ossci:ossci /home/ossci
 
           # Setup SSH access
           mkdir -p /home/ossci/.ssh
           cp /mnt/sshkey/authorized_keys /home/ossci/.ssh/authorized_keys
           chmod 700 /home/ossci/.ssh
           chmod 600 /home/ossci/.ssh/authorized_keys
+          chown -R ossci:ossci /home/ossci/.ssh
 
           # Start SSH daemon
-          sudo mkdir -p /var/run/sshd
-          sudo /usr/sbin/sshd -D
+          mkdir -p /var/run/sshd
+          /usr/sbin/sshd -D
       volumeMounts:
         - name: home-vol
           mountPath: /home/ossci

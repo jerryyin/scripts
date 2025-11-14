@@ -96,7 +96,10 @@ Host ossci
   IdentityFile ~/.ssh/id_rsa
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+  ForwardAgent yes
 ```
+
+**Note:** `ForwardAgent yes` allows git operations (clone, push, pull) to use your laptop's SSH keys without copying them to the pod.
 
 ### Remote Machine Setup
 

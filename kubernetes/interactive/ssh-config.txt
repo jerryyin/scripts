@@ -7,3 +7,4 @@ Host ossci
   IdentityFile ~/.ssh/id_rsa
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+  ForwardAgent yes
