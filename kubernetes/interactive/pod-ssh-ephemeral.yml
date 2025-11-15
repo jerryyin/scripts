@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{POD_NAME}}
+spec:
+  volumes:
+    - name: home-vol
+      emptyDir:
+        sizeLimit: 50Gi  # Fast ephemeral storage (deleted when pod dies)
+    - name: ssh-key
+      secret:
+        secretName: ssh-key-{{USER}}
+  securityContext:
+    # Keep fsGroup for consistency
+    # Run as root to allow package installation
+    fsGroup: 1001
+  containers:
+    - name: interactive-ssh
+      # Docker image to use for the interactive session.
+      # ROCm base image for IREE development
+      image: rocm/dev-ubuntu-24.04:latest
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -c
+        - |
+          set -eux
+          # Install sudo, openssh-server, and zsh as root first
+          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git zsh
+          
+          # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
+          useradd -u 1001 -m -s /bin/zsh ossci || true
+          
+          # Give ossci user sudo privileges
+          echo 'ossci ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ossci
+          chmod 0440 /etc/sudoers.d/ossci
+
+          # Setup SSH access
+          mkdir -p /home/ossci/.ssh
+          
+          # Fix home directory ownership and permissions for SSH
+          # SSH requires home dir to be owned by user and not world-writable
+          # Do this AFTER mkdir to ensure the mounted emptyDir has correct perms
+          chown ossci:ossci /home/ossci
+          chmod 755 /home/ossci
+          cp /mnt/sshkey/authorized_keys /home/ossci/.ssh/authorized_keys
+          chmod 700 /home/ossci/.ssh
+          chmod 600 /home/ossci/.ssh/authorized_keys
+          chown -R ossci:ossci /home/ossci/.ssh
+
+          # Start SSH daemon
+          mkdir -p /var/run/sshd
+          /usr/sbin/sshd -D
+      volumeMounts:
+        - name: home-vol
+          mountPath: /home/ossci
+          readOnly: false
+        - name: ssh-key
+          mountPath: /mnt/sshkey
+          readOnly: true
+      resources:
+        # Number of gpus available in the interactive session.
+        limits:
+          amd.com/gpu: 1
+

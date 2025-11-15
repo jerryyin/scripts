@@ -14,11 +14,16 @@ CONFIG_FILE="${SCRIPT_DIR}/config.json"
 # Parse arguments
 FORCE_NEW=false
 MODE="ssh"
+EPHEMERAL=false
 
 for arg in "$@"; do
     case $arg in
         -n|--new)
             FORCE_NEW=true
+            shift
+            ;;
+        -e|--ephemeral)
+            EPHEMERAL=true
             shift
             ;;
         web|ssh)
@@ -29,11 +34,12 @@ for arg in "$@"; do
             echo "Usage: $0 [OPTIONS] <web|ssh>"
             echo ""
             echo "Options:"
-            echo "  -n, --new    Force creation of new pod (don't attach to existing)"
+            echo "  -n, --new         Force creation of new pod (don't attach to existing)"
+            echo "  -e, --ephemeral   Use ephemeral storage (fast startup, no persistence)"
             echo ""
             echo "Modes:"
-            echo "  ssh          SSH-accessible interactive pod (default)"
-            echo "  web          Browser-based code-server"
+            echo "  ssh               SSH-accessible interactive pod (default)"
+            echo "  web               Browser-based code-server"
             exit 1
             ;;
     esac
@@ -111,7 +117,13 @@ NAMESPACE=$(jq -r '.namespace' "$CONFIG_FILE")
 PVC_CLAIM_NAME=$(jq -r '.pvc' "$CONFIG_FILE")
 PUB_KEY_PATH=$(jq -r '.public_ssh_key_path' "$CONFIG_FILE")
 
-YAML_TEMPLATE="${SCRIPT_DIR}/pod-${MODE}.yml"
+# Select YAML template based on mode and storage type
+if [[ "$EPHEMERAL" == "true" ]]; then
+    YAML_TEMPLATE="${SCRIPT_DIR}/pod-${MODE}-ephemeral.yml"
+    echo "🚀 Using ephemeral storage (fast startup, no persistence)"
+else
+    YAML_TEMPLATE="${SCRIPT_DIR}/pod-${MODE}.yml"
+fi
 
 # Check for existing pods
 echo "Checking for existing interactive pods..."
@@ -275,19 +287,35 @@ else
     echo "Connecting to pod via SSH..."
     echo ""
 
-    # Always run container setup for new pods
-    # Check if this is a new container (system packages not installed)
-    if ! ssh -o ConnectTimeout=5 ossci "command -v tmux >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1" 2>/dev/null; then
+    # Check if setup is needed
+    # In ephemeral mode, always run setup (storage is empty)
+    # In PVC mode, check if packages are already installed
+    NEED_SETUP=false
+    if [[ "$EPHEMERAL" == "true" ]]; then
+        NEED_SETUP=true
+        echo ""
+        echo "🔧 Ephemeral mode: Running full setup (storage is empty)..."
+        echo ""
+    elif ! ssh -o ConnectTimeout=5 ossci "command -v tmux >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1" 2>/dev/null; then
+        NEED_SETUP=true
         echo ""
         echo "🔧 New container detected! Running system setup..."
         echo ""
+    fi
+    
+    if [[ "$NEED_SETUP" == "true" ]]; then
         echo "This will:"
         echo "  1. Install system packages (git, zsh, tmux, neovim, cmake, etc.)"
-        echo "  2. Setup dotfiles (if not already present)"
-        echo "  3. Clone repos (if not already present)"
+        echo "  2. Setup dotfiles"
+        echo "  3. Clone repos"
         echo "  4. Install Python packages"
+        echo "  5. Clone IREE repository"
         echo ""
-        echo "Note: Existing repos/dotfiles will be reused from PVC"
+        if [[ "$EPHEMERAL" == "true" ]]; then
+            echo "Note: Ephemeral storage - all data deleted when pod stops"
+        else
+            echo "Note: Existing repos/dotfiles will be reused from PVC"
+        fi
         echo "This may take 10-15 minutes..."
         echo ""
 

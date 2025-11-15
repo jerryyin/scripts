@@ -252,7 +252,21 @@ vim ~/scripts/kubernetes/interactive/pod-ssh.yml
 **Multiple Pods:**
 - By default, script attaches to existing pod (reuses your environment)
 - Use `--new` flag to create additional pods for parallel work
-- Each pod gets unique name: `${USER}-iree-YYYYMMDD-HHMMSS`
+- Each pod gets unique name: `${USER}-iree-MMDD-HHMMSS`
+
+**Ephemeral Mode (Fast Startup):**
+```bash
+~/scripts/kubernetes/interactive/connect.sh --ephemeral
+```
+- Uses fast ephemeral storage (no PVC mount delay)
+- Pod starts in **2-3 minutes** instead of 10-20 minutes
+- Storage is **deleted when pod stops** (no persistence)
+- Full setup runs every time (clones repos, installs packages)
+- Good for: quick testing, when PVC storage is slow/unavailable
+
+**When to use:**
+- ✅ Ephemeral: Quick one-off tasks, testing, PVC issues
+- ✅ PVC (default): Development work, multiple pods, persistent data
 
 **Reconnect:**
 ```bash
