@@ -51,10 +51,10 @@ fi
 
 # Only download AMD_CA.crt if not already present (PVC persists across pods)
 if [ ! -f /usr/local/share/ca-certificates/AMD_CA.crt ]; then
-    wget -q https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
-    sudo cp AMD_CA.crt /usr/local/share/ca-certificates
+    wget -q -O /tmp/AMD_CA.crt https://gist.githubusercontent.com/jerryyin/8da8f21024b5d4ef853b171771def28c/raw/d769419709807acfeff1a3c7a7f4acbc44b76b28/AMD_CA.crt
+    sudo cp /tmp/AMD_CA.crt /usr/local/share/ca-certificates
     sudo update-ca-certificates
-    rm -f AMD_CA.crt  # Clean up downloaded file
+    rm -f /tmp/AMD_CA.crt  # Clean up downloaded file
 else
     echo "AMD_CA.crt already installed, skipping"
 fi
