@@ -193,8 +193,8 @@ if [ "$SKIP_CREATE" = false ]; then
     kubectl apply -f "$TEMP_YAML" -n "$NAMESPACE"
 
     echo "Waiting for pod '$POD_NAME' to be ready..."
-    echo "(This may take 10-15 minutes on first run while pulling the ROCm image...)"
-    kubectl wait pod "$POD_NAME" -n "$NAMESPACE" --for=condition=Ready --timeout=900s
+    echo "(This may take time on first run while 1. pulling the ROCm image... 2. setting up pvc)"
+    kubectl wait pod "$POD_NAME" -n "$NAMESPACE" --for=condition=Ready --timeout=1200s
 
     echo "Pod is ready!"
     rm -f "$TEMP_YAML"

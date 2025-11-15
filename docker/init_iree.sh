@@ -12,9 +12,10 @@ sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build libdb
 # LLVM must be installed after prerequisite packages.
 export LLVM_VERSION=17
 LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
-    wget --no-verbose https://apt.llvm.org/llvm.sh && \
-    chmod +x llvm.sh && \
-    sudo ./llvm.sh ${LLVM_VERSION} && \
+    wget --no-verbose -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh && \
+    chmod +x /tmp/llvm.sh && \
+    sudo /tmp/llvm.sh ${LLVM_VERSION} && \
+    rm -f /tmp/llvm.sh && \
     sudo apt-get update && \
     sudo apt-get install -y clang-${LLVM_VERSION} clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} lld-${LLVM_VERSION} && \
     sudo ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang && \
