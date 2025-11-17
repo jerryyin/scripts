@@ -56,35 +56,35 @@ fi
 # Clone directly to ~/iree (ephemeral workspace)
 if [ ! -d "$HOME/iree" ]; then
     echo "📦 Creating ephemeral workspace at ~/iree"
-    
-    # Clone from reference (fast, independent copy)
-    echo "   Cloning from reference..."
+
+    # Copy from reference (much faster than git clone + submodule download!)
+    echo "   Copying from reference (this is faster than git clone)..."
     cd "$HOME"
-    git clone --reference "$REFERENCE/iree" --dissociate "$REFERENCE/iree" iree
-    
+    cp -r "$REFERENCE/iree" iree
+
+    echo "   Updating git remotes..."
     cd "$HOME/iree"
     git remote set-url origin git@github.com:iree-org/iree.git
-    git submodule update --init
-    
+
     # Setup llvm-project remotes
     echo "   Setting up llvm-project remotes..."
     cd "$HOME/iree/third_party/llvm-project"
     git remote set-url origin git@github.com:iree-org/llvm-project.git 2>/dev/null || true
     git remote add upstream git@github.com:llvm/llvm-project.git 2>/dev/null || true
     cd "$HOME/iree"
-    
+
     # Setup CMakePresets.json symlink if available
     if [ -f "$HOME/scripts/iree/CMakePresets.json" ]; then
         echo "   Linking CMakePresets.json..."
         ln -sf "$HOME/scripts/iree/CMakePresets.json" "$HOME/iree/CMakePresets.json"
     fi
-    
+
     # Install Python requirements
     if [ -f "$HOME/iree/runtime/bindings/python/iree/runtime/build_requirements.txt" ]; then
         echo "   Installing IREE Python build requirements..."
         python -m pip install -q -r "$HOME/iree/runtime/bindings/python/iree/runtime/build_requirements.txt"
     fi
-    
+
     echo "✅ Ephemeral workspace created at ~/iree"
 else
     echo "✅ Workspace already exists at ~/iree"
