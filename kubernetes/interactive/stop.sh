@@ -12,18 +12,10 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Helper function to get SSH host alias for a pod
-get_ssh_host_alias() {
-    local pod_name="$1"
-    local pod_suffix
-    pod_suffix=$(echo "$pod_name" | sed -E 's/.*-iree-//')
-    echo "ossci-$pod_suffix"
-}
-
 # Helper function to clean up port mapping for a pod
 cleanup_pod_port() {
     local pod_name="$1"
-    
+
     if [ -f "$PORT_MAPPING_FILE" ]; then
         local tmp_file
         tmp_file=$(mktemp)
@@ -32,15 +24,10 @@ cleanup_pod_port() {
     fi
 }
 
-# Helper function to clean up SSH config for a pod
-cleanup_ssh_config() {
-    local ssh_alias="$1"
-    local ssh_config="$HOME/.ssh/config"
-    
-    if [ -f "$ssh_config" ]; then
-        sed -i "/^Host $ssh_alias$/,/^$/d" "$ssh_config" 2>/dev/null || true
-    fi
-}
+# No SSH config management - no cleanup needed
+
+# Display string for SSH command (for user reference)
+SSH_CMD_PREFIX="ssh -i ~/.ssh/id_rsa"
 
 NAMESPACE=$(jq -r '.namespace' "$CONFIG_FILE")
 DEFAULT_CLUSTER=$(jq -r '.default_cluster' "$CONFIG_FILE")
@@ -105,31 +92,30 @@ PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.meta
 if [ -n "$PODS" ]; then
     POD_ARRAY=($PODS)
     POD_COUNT=${#POD_ARRAY[@]}
-    
+
     echo "📦 Found $POD_COUNT pod(s):"
     echo ""
-    
+
     # Display pods with numbers
     for i in "${!POD_ARRAY[@]}"; do
         POD=${POD_ARRAY[$i]}
         # Get pod age and status
         AGE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "unknown")
         STATUS=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
-        
-        # Get port and SSH alias
-        SSH_ALIAS=$(get_ssh_host_alias "$POD")
+
+        # Get port
         PORT=""
         if [ -f "$PORT_MAPPING_FILE" ]; then
             PORT=$(jq -r --arg pod "$POD" '.[$pod] // "none"' "$PORT_MAPPING_FILE" 2>/dev/null || echo "none")
         else
             PORT="none"
         fi
-        
+
         echo "  $((i+1)). $POD"
         echo "     Status: $STATUS | Started: $AGE"
-        echo "     SSH: ssh $SSH_ALIAS | Port: $PORT"
+        echo "     SSH: $SSH_CMD_PREFIX -p $PORT ossci@localhost"
     done
-    
+
     echo ""
     echo "Options:"
     echo "  a       - Delete ALL pods"
@@ -138,7 +124,7 @@ if [ -n "$PODS" ]; then
     echo "  q       - Quit without deleting"
     echo ""
     read -p "Choose pods to delete: " -r CHOICE
-    
+
     if [[ "$CHOICE" =~ ^[Qq]$ ]]; then
         echo "No pods deleted."
         exit 0
@@ -147,14 +133,11 @@ if [ -n "$PODS" ]; then
         echo ""
         echo "Deleting all $POD_COUNT pods..."
         for pod in "${POD_ARRAY[@]}"; do
-            SSH_ALIAS=$(get_ssh_host_alias "$pod")
-            
             echo "  Deleting $pod..."
             kubectl delete pod "$pod" -n "$NAMESPACE" --grace-period=30
-            
-            echo "  Cleaning up port mapping and SSH config..."
+
+            echo "  Cleaning up port mapping..."
             cleanup_pod_port "$pod"
-            cleanup_ssh_config "$SSH_ALIAS"
         done
         echo "✅ All pods deleted and cleaned up"
     else
@@ -169,15 +152,13 @@ if [ -n "$PODS" ]; then
             if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$POD_COUNT" ]; then
                 POD_INDEX=$((sel-1))
                 POD_TO_DELETE=${POD_ARRAY[$POD_INDEX]}
-                SSH_ALIAS=$(get_ssh_host_alias "$POD_TO_DELETE")
-                
+
                 echo "  Deleting $POD_TO_DELETE..."
                 kubectl delete pod "$POD_TO_DELETE" -n "$NAMESPACE" --grace-period=30
-                
-                echo "  Cleaning up port mapping and SSH config..."
+
+                echo "  Cleaning up port mapping..."
                 cleanup_pod_port "$POD_TO_DELETE"
-                cleanup_ssh_config "$SSH_ALIAS"
-                
+
                 DELETED=$((DELETED+1))
             else
                 echo "  ⚠ Invalid selection: $sel (skipping)"

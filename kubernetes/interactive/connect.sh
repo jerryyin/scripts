@@ -60,7 +60,7 @@ done
 get_pod_port() {
     local pod_name="$1"
     local mode="$2"  # "ssh" or "web"
-    
+
     # Base port depends on mode
     local base_port
     if [[ "$mode" == "web" ]]; then
@@ -68,31 +68,31 @@ get_pod_port() {
     else
         base_port=2222
     fi
-    
+
     # Initialize port mapping file if it doesn't exist
     if [ ! -f "$PORT_MAPPING_FILE" ]; then
         echo "{}" > "$PORT_MAPPING_FILE"
     fi
-    
+
     # Check if this pod already has a port assigned
     local existing_port
     existing_port=$(jq -r --arg pod "$pod_name" '.[$pod] // empty' "$PORT_MAPPING_FILE" 2>/dev/null || echo "")
-    
+
     if [ -n "$existing_port" ]; then
         echo "$existing_port"
         return
     fi
-    
+
     # Find next available port
     local port=$base_port
     local max_attempts=100
     local attempts=0
-    
+
     while [ $attempts -lt $max_attempts ]; do
         # Check if port is in use by any pod
         local port_in_use
         port_in_use=$(jq -r --arg port "$port" 'to_entries[] | select(.value == ($port | tonumber)) | .key' "$PORT_MAPPING_FILE" 2>/dev/null || echo "")
-        
+
         if [ -z "$port_in_use" ]; then
             # Port is available, assign it
             local tmp_file
@@ -102,11 +102,11 @@ get_pod_port() {
             echo "$port"
             return
         fi
-        
+
         port=$((port + 1))
         attempts=$((attempts + 1))
     done
-    
+
     echo "Error: Could not find available port after $max_attempts attempts" >&2
     exit 1
 }
@@ -114,7 +114,7 @@ get_pod_port() {
 # Clean up port mapping for a pod
 cleanup_pod_port() {
     local pod_name="$1"
-    
+
     if [ -f "$PORT_MAPPING_FILE" ]; then
         local tmp_file
         tmp_file=$(mktemp)
@@ -123,14 +123,10 @@ cleanup_pod_port() {
     fi
 }
 
-# Get SSH host alias for a pod
-get_ssh_host_alias() {
-    local pod_name="$1"
-    # Extract date-time part from pod name (e.g., "1114-184054" from "zyin-iree-1114-184054")
-    local pod_suffix
-    pod_suffix=$(echo "$pod_name" | sed -E 's/.*-iree-//')
-    echo "ossci-$pod_suffix"
-}
+# No SSH config management - users connect via: ssh -p <port> ossci@localhost
+
+# SSH command options as array (proper argument splitting)
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ForwardAgent=yes -i ~/.ssh/id_rsa)
 
 # ============================================================================
 
@@ -223,10 +219,10 @@ if [ -n "$EXISTING_PODS" ] && [ "$FORCE_NEW" = false ]; then
     echo ""
     echo "Found $POD_COUNT existing pod(s):"
     echo ""
-    
+
     # Convert to array for menu
     readarray -t POD_ARRAY <<< "$EXISTING_PODS"
-    
+
     if [ ${#POD_ARRAY[@]} -eq 1 ]; then
         # Only one pod, use it directly
         POD_NAME="${POD_ARRAY[0]}"
@@ -239,16 +235,15 @@ if [ -n "$EXISTING_PODS" ] && [ "$FORCE_NEW" = false ]; then
         for i in "${!POD_ARRAY[@]}"; do
             pod="${POD_ARRAY[$i]}"
             port=$(get_pod_port "$pod" "$MODE")
-            ssh_alias=$(get_ssh_host_alias "$pod")
-            echo "  $((i+1))) $pod (port $port, ssh alias: $ssh_alias)"
+            echo "  $((i+1))) $pod (port $port)"
         done
         echo "  $((${#POD_ARRAY[@]}+1))) Create new pod"
         echo ""
-        
+
         # Get user selection
         while true; do
             read -p "Select pod to connect to [1-$((${#POD_ARRAY[@]}+1))]:" selection
-            
+
             if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le $((${#POD_ARRAY[@]}+1)) ]; then
                 if [ "$selection" -eq $((${#POD_ARRAY[@]}+1)) ]; then
                     # Create new pod
@@ -329,7 +324,6 @@ fi
 
 # Get or allocate port for this pod
 SSH_PORT=$(get_pod_port "$POD_NAME" "$MODE")
-SSH_ALIAS=$(get_ssh_host_alias "$POD_NAME")
 
 # Start port-forward in background
 echo ""
@@ -392,7 +386,7 @@ else
     echo "(Waiting for port-forward to establish and SSH daemon to start...)"
     for i in {1..30}; do
         # Test SSH connection via port-forward (localhost:$SSH_PORT -> pod:22)
-        if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" ossci@127.0.0.1 "exit 0" >/dev/null 2>&1; then
+        if ssh -o ConnectTimeout=2 "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost "exit 0" >/dev/null 2>&1; then
             echo "✅ SSH service is ready!"
             break
         fi
@@ -405,39 +399,13 @@ else
         sleep 2
     done
 
-    # Create/update SSH config for this pod
-    echo ""
-    echo "📝 Creating SSH config entry: $SSH_ALIAS"
-    SSH_CONFIG="$HOME/.ssh/config"
-    
-    # Remove old entry for this pod if it exists
-    if [ -f "$SSH_CONFIG" ]; then
-        # Create temp file without the old host entry
-        sed "/^Host $SSH_ALIAS$/,/^$/d" "$SSH_CONFIG" > "${SSH_CONFIG}.tmp" || true
-        mv "${SSH_CONFIG}.tmp" "$SSH_CONFIG"
-    fi
-    
-    # Append new entry
-    cat >> "$SSH_CONFIG" << EOF
-
-Host $SSH_ALIAS
-  HostName 127.0.0.1
-  User ossci
-  Port $SSH_PORT
-  IdentityFile ~/.ssh/id_rsa
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  ForwardAgent yes
-
-EOF
-    
-    echo "✅ SSH config updated"
+    # Pod is ready for SSH connection
     echo ""
     echo "================================================================"
     echo "  Interactive Pod Ready"
     echo "================================================================"
     echo "  Pod:   $POD_NAME"
-    echo "  SSH:   ssh $SSH_ALIAS"
+    echo "  SSH:   ssh -i ~/.ssh/id_rsa -p $SSH_PORT ossci@localhost"
     echo "  Port:  $SSH_PORT"
     echo ""
     echo "  Port-forward running in background (PID: $PORT_FORWARD_PID)"
@@ -454,18 +422,18 @@ EOF
         if [[ "$EPHEMERAL" == "true" ]]; then
             NEED_SETUP=true
             echo "   Ephemeral mode detected - setup required"
-        elif ! ssh -o ConnectTimeout=5 "$SSH_ALIAS" "command -v tmux >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1" 2>/dev/null; then
+        elif ! ssh -o ConnectTimeout=5 "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost "command -v tmux >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1" 2>/dev/null; then
             NEED_SETUP=true
             echo "   New container detected - setup required"
         else
             echo "   ✅ Container already configured (packages detected)"
         fi
         echo ""
-        
+
         if [[ "$NEED_SETUP" == "true" ]]; then
             # Ensure scripts repo exists in pod (copy from local)
             echo "📤 Copying scripts to pod..."
-            if ! ssh "$SSH_ALIAS" "test -d ~/scripts" 2>/dev/null; then
+            if ! ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost "test -d ~/scripts" 2>/dev/null; then
                 echo "   Scripts not found, copying entire directory..."
                 kubectl cp "$HOME/scripts" "$NAMESPACE/$POD_NAME:/home/ossci/" || {
                     echo "❌ Failed to copy scripts directory"
@@ -481,16 +449,16 @@ EOF
                 echo "   ✅ Scripts synchronized"
             fi
             echo ""
-            
+
             # Run setup script inside the pod
             echo "🚀 Running setup inside pod..."
             echo "════════════════════════════════════════════════════════════════"
-            ssh "$SSH_ALIAS" "bash ~/scripts/kubernetes/interactive/setup-pod.sh" || {
+            ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost "bash ~/scripts/kubernetes/interactive/setup-pod.sh" || {
                 echo ""
                 echo "════════════════════════════════════════════════════════════════"
                 echo "❌ Pod setup failed. You can:"
                 echo "   1. Retry setup:"
-                echo "      ssh $SSH_ALIAS"
+                echo "      ssh -i ~/.ssh/id_rsa -p $SSH_PORT ossci@localhost"
                 echo "      bash ~/scripts/kubernetes/interactive/setup-pod.sh"
                 echo ""
                 echo "   2. Connect without setup:"
@@ -507,7 +475,7 @@ EOF
     fi
 
     # SSH into the pod
-    ssh "$SSH_ALIAS"
+    ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost
 fi
 
 echo ""
@@ -515,11 +483,11 @@ echo "================================================================"
 echo "  Session Information"
 echo "================================================================"
 echo "  Pod:  $POD_NAME (still running)"
-echo "  SSH:  ssh $SSH_ALIAS"
+echo "  SSH:  ssh -i ~/.ssh/id_rsa -p $SSH_PORT ossci@localhost"
 echo "  Port: $SSH_PORT"
 echo "  Port-forward PID: $PORT_FORWARD_PID"
 echo ""
-echo "  To reconnect:    ssh $SSH_ALIAS"
+echo "  To reconnect:    ssh -i ~/.ssh/id_rsa -p $SSH_PORT ossci@localhost"
 echo "  To stop pod:     $SCRIPT_DIR/stop.sh"
 echo "  To kill forward: kill $PORT_FORWARD_PID"
 echo "================================================================"
