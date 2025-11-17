@@ -39,6 +39,10 @@ spec:
           chmod 0440 /etc/sudoers.d/ossci
 
           # Setup SSH access (fsGroup: 1001 handles PVC ownership)
+          # Fix home directory permissions (SSH requires home not be world-writable)
+          chmod 755 /home/ossci
+          chown ossci:ossci /home/ossci
+
           mkdir -p /home/ossci/.ssh
           cp /mnt/sshkey/authorized_keys /home/ossci/.ssh/authorized_keys
           chmod 700 /home/ossci/.ssh
