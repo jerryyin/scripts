@@ -1,14 +1,36 @@
 #!/bin/bash
-# Setup isolated workspace for this pod
+# Setup ephemeral IREE workspace for this pod
 # This script runs INSIDE the pod via SSH
+#
+# Architecture:
+#   - Reference clone: /zyin/.iree-reference/iree (persistent, shared)
+#   - Working clone:   ~/iree (ephemeral, fast)
+#   - When pod dies, ~/iree is automatically deleted (emptyDir)
 
 set -e
 
 POD_NAME=$(hostname)
-WORKSPACE="$HOME/workspace-$POD_NAME"
-REFERENCE="$HOME/.iree-reference"
 
-# Create or update reference IREE
+# Determine location for reference clone
+# Look for user-specific mount point (e.g., /zyin, /username)
+PERSISTENT_ROOT=""
+for candidate in "/$USER" "/$(whoami)" "/zyin"; do
+    if [ -d "$candidate" ] && [ "$candidate" != "/root" ] && [ "$candidate" != "/home" ]; then
+        PERSISTENT_ROOT="$candidate"
+        break
+    fi
+done
+
+if [ -n "$PERSISTENT_ROOT" ]; then
+    REFERENCE="$PERSISTENT_ROOT/.iree-reference"
+    echo "📦 Using persistent reference at $PERSISTENT_ROOT"
+else
+    # Fully ephemeral mode (no PVC available)
+    REFERENCE="$HOME/.iree-reference"
+    echo "📦 Using ephemeral reference in home directory"
+fi
+
+# Create or update reference IREE (shared across all your pods)
 if [ ! -d "$REFERENCE/iree" ]; then
     echo "📦 Creating reference IREE repository (one-time setup)..."
     mkdir -p "$REFERENCE"
@@ -31,59 +53,51 @@ else
     fi
 fi
 
-# Create workspace for this pod if it doesn't exist
-if [ ! -d "$WORKSPACE/iree" ]; then
-    echo "📦 Creating isolated workspace for pod: $POD_NAME"
-    mkdir -p "$WORKSPACE"
+# Clone directly to ~/iree (ephemeral workspace)
+if [ ! -d "$HOME/iree" ]; then
+    echo "📦 Creating ephemeral workspace at ~/iree"
     
-    # Clone from reference using --reference --dissociate (fast clone, fully independent)
-    echo "   Cloning from reference (creating independent copy)..."
-    cd "$WORKSPACE"
+    # Clone from reference (fast, independent copy)
+    echo "   Cloning from reference..."
+    cd "$HOME"
     git clone --reference "$REFERENCE/iree" --dissociate "$REFERENCE/iree" iree
     
-    cd "$WORKSPACE/iree"
+    cd "$HOME/iree"
     git remote set-url origin git@github.com:iree-org/iree.git
     git submodule update --init
     
     # Setup llvm-project remotes
     echo "   Setting up llvm-project remotes..."
-    cd "$WORKSPACE/iree/third_party/llvm-project"
+    cd "$HOME/iree/third_party/llvm-project"
     git remote set-url origin git@github.com:iree-org/llvm-project.git 2>/dev/null || true
     git remote add upstream git@github.com:llvm/llvm-project.git 2>/dev/null || true
-    cd "$WORKSPACE/iree"
+    cd "$HOME/iree"
     
     # Setup CMakePresets.json symlink if available
     if [ -f "$HOME/scripts/iree/CMakePresets.json" ]; then
         echo "   Linking CMakePresets.json..."
-        ln -sf "$HOME/scripts/iree/CMakePresets.json" "$WORKSPACE/iree/CMakePresets.json"
+        ln -sf "$HOME/scripts/iree/CMakePresets.json" "$HOME/iree/CMakePresets.json"
     fi
     
-    # Install Python requirements for this IREE workspace
-    if [ -f "$WORKSPACE/iree/runtime/bindings/python/iree/runtime/build_requirements.txt" ]; then
+    # Install Python requirements
+    if [ -f "$HOME/iree/runtime/bindings/python/iree/runtime/build_requirements.txt" ]; then
         echo "   Installing IREE Python build requirements..."
-        python -m pip install -q -r "$WORKSPACE/iree/runtime/bindings/python/iree/runtime/build_requirements.txt"
+        python -m pip install -q -r "$HOME/iree/runtime/bindings/python/iree/runtime/build_requirements.txt"
     fi
     
-    echo "✅ Workspace created at $WORKSPACE/iree"
+    echo "✅ Ephemeral workspace created at ~/iree"
 else
-    echo "✅ Using existing workspace: $WORKSPACE/iree"
+    echo "✅ Workspace already exists at ~/iree"
 fi
 
-# Create/update symlink ~/iree -> workspace
-if [ -L "$HOME/iree" ]; then
-    # Remove old symlink
-    rm "$HOME/iree"
-elif [ -e "$HOME/iree" ]; then
-    # Backup if it's a real directory (shouldn't happen)
-    echo "⚠️  Found real ~/iree directory, backing up..."
-    mv "$HOME/iree" "$HOME/iree.backup.$(date +%s)"
-fi
-
-ln -s "$WORKSPACE/iree" "$HOME/iree"
-echo "✅ Symlink created: ~/iree -> $WORKSPACE/iree"
-
-# Create convenience alias
-echo "export IREE_WORKSPACE=\"$WORKSPACE/iree\"" > ~/.workspace_env
-
-echo "✅ Workspace setup complete!"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "  ✅ Workspace Setup Complete!"
+echo "════════════════════════════════════════════════════════════════"
+echo "  Reference: $REFERENCE/iree (persistent, shared)"
+echo "  Workspace: ~/iree (ephemeral, pod-local)"
+echo ""
+echo "  💡 Remember: ~/iree is ephemeral and will be deleted when"
+echo "     the pod stops. Commit and push your changes regularly!"
+echo "════════════════════════════════════════════════════════════════"
 

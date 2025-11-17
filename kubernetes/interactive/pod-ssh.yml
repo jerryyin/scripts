@@ -5,13 +5,16 @@ metadata:
 spec:
   volumes:
     - name: home-vol
+      emptyDir:
+        sizeLimit: 10Gi
+    - name: persistent-vol
       persistentVolumeClaim:
         claimName: {{PVC_CLAIM_NAME}}
     - name: ssh-key
       secret:
         secretName: ssh-key-{{USER}}
   securityContext:
-    # Keep fsGroup to ensure PVC files are accessible
+    # Keep fsGroup to ensure PVC files are accessible at /$USER
     # Run as root to allow package installation
     fsGroup: 1001
   containers:
@@ -48,6 +51,9 @@ spec:
       volumeMounts:
         - name: home-vol
           mountPath: /home/ossci
+          readOnly: false
+        - name: persistent-vol
+          mountPath: /{{USER}}
           readOnly: false
         - name: ssh-key
           mountPath: /mnt/sshkey
