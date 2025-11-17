@@ -5,11 +5,42 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
+PORT_MAPPING_FILE="$HOME/.kube/pod-port-mappings.json"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: config.json not found at $CONFIG_FILE"
     exit 1
 fi
+
+# Helper function to get SSH host alias for a pod
+get_ssh_host_alias() {
+    local pod_name="$1"
+    local pod_suffix
+    pod_suffix=$(echo "$pod_name" | sed -E 's/.*-iree-//')
+    echo "ossci-$pod_suffix"
+}
+
+# Helper function to clean up port mapping for a pod
+cleanup_pod_port() {
+    local pod_name="$1"
+    
+    if [ -f "$PORT_MAPPING_FILE" ]; then
+        local tmp_file
+        tmp_file=$(mktemp)
+        jq --arg pod "$pod_name" 'del(.[$pod])' "$PORT_MAPPING_FILE" > "$tmp_file"
+        mv "$tmp_file" "$PORT_MAPPING_FILE"
+    fi
+}
+
+# Helper function to clean up SSH config for a pod
+cleanup_ssh_config() {
+    local ssh_alias="$1"
+    local ssh_config="$HOME/.ssh/config"
+    
+    if [ -f "$ssh_config" ]; then
+        sed -i "/^Host $ssh_alias$/,/^$/d" "$ssh_config" 2>/dev/null || true
+    fi
+}
 
 NAMESPACE=$(jq -r '.namespace' "$CONFIG_FILE")
 DEFAULT_CLUSTER=$(jq -r '.default_cluster' "$CONFIG_FILE")
@@ -84,8 +115,19 @@ if [ -n "$PODS" ]; then
         # Get pod age and status
         AGE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "unknown")
         STATUS=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+        
+        # Get port and SSH alias
+        SSH_ALIAS=$(get_ssh_host_alias "$POD")
+        PORT=""
+        if [ -f "$PORT_MAPPING_FILE" ]; then
+            PORT=$(jq -r --arg pod "$POD" '.[$pod] // "none"' "$PORT_MAPPING_FILE" 2>/dev/null || echo "none")
+        else
+            PORT="none"
+        fi
+        
         echo "  $((i+1)). $POD"
         echo "     Status: $STATUS | Started: $AGE"
+        echo "     SSH: ssh $SSH_ALIAS | Port: $PORT"
     done
     
     echo ""
@@ -105,14 +147,16 @@ if [ -n "$PODS" ]; then
         echo ""
         echo "Deleting all $POD_COUNT pods..."
         for pod in "${POD_ARRAY[@]}"; do
-            echo "  Cleaning workspace for $pod..."
-            # Clean up workspace before deleting pod (using script from repo)
-            kubectl exec "$pod" -n "$NAMESPACE" -- bash ~/scripts/kubernetes/interactive/cleanup-workspace.sh 2>/dev/null || echo "    (workspace cleanup skipped - pod may be terminating)"
+            SSH_ALIAS=$(get_ssh_host_alias "$pod")
             
             echo "  Deleting $pod..."
             kubectl delete pod "$pod" -n "$NAMESPACE" --grace-period=30
+            
+            echo "  Cleaning up port mapping and SSH config..."
+            cleanup_pod_port "$pod"
+            cleanup_ssh_config "$SSH_ALIAS"
         done
-        echo "✅ All pods deleted"
+        echo "✅ All pods deleted and cleaned up"
     else
         # Parse selection (handles single numbers or comma-separated)
         IFS=',' read -ra SELECTIONS <<< "$CHOICE"
@@ -125,13 +169,15 @@ if [ -n "$PODS" ]; then
             if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$POD_COUNT" ]; then
                 POD_INDEX=$((sel-1))
                 POD_TO_DELETE=${POD_ARRAY[$POD_INDEX]}
-                
-                echo "  Cleaning workspace for $POD_TO_DELETE..."
-                # Clean up workspace before deleting pod (using script from repo)
-                kubectl exec "$POD_TO_DELETE" -n "$NAMESPACE" -- bash ~/scripts/kubernetes/interactive/cleanup-workspace.sh 2>/dev/null || echo "    (workspace cleanup skipped - pod may be terminating)"
+                SSH_ALIAS=$(get_ssh_host_alias "$POD_TO_DELETE")
                 
                 echo "  Deleting $POD_TO_DELETE..."
                 kubectl delete pod "$POD_TO_DELETE" -n "$NAMESPACE" --grace-period=30
+                
+                echo "  Cleaning up port mapping and SSH config..."
+                cleanup_pod_port "$POD_TO_DELETE"
+                cleanup_ssh_config "$SSH_ALIAS"
+                
                 DELETED=$((DELETED+1))
             else
                 echo "  ⚠ Invalid selection: $sel (skipping)"
