@@ -58,22 +58,40 @@ echo "   - connect.sh: Run this to connect to interactive pod"
 echo "   - stop.sh: Run this to cleanup pods"
 echo ""
 
-# 4. SSH config reminder
-echo "4. SSH Configuration"
-echo "   Don't forget to add the SSH config snippet to your ~/.ssh/config:"
-echo "   See: $SCRIPT_DIR/interactive/ssh-config.txt"
+# 4. SSH config for pod access
+echo "4. SSH Configuration for Pod Access"
+echo "   The interactive pods use SSH on localhost:2222 (or other ports)"
 echo ""
-if ! grep -q "Host ossci" "$HOME/.ssh/config" 2>/dev/null; then
-    echo "   Would you like to add it now? (y/n)"
+
+# Check if user has rc_files setup (which includes SSH config)
+if [ -L "$HOME/.ssh/config" ] && [[ "$(readlink -f "$HOME/.ssh/config")" == *"rc_files"* ]]; then
+    echo "   ✓ Using rc_files SSH configuration (includes agent forwarding)"
+    echo "   ℹ Your rc_files already includes the necessary SSH config"
+elif grep -q "Host ossci" "$HOME/.ssh/config" 2>/dev/null; then
+    echo "   ✓ SSH config for 'ossci' already exists in ~/.ssh/config"
+else
+    # User doesn't have rc_files or existing config
+    echo "   No SSH config found for pod access."
+    echo "   You can add the config snippet from: $SCRIPT_DIR/interactive/ssh-config.txt"
+    echo ""
+    echo "   Would you like to add it to ~/.ssh/config now? (y/n)"
     read -r response
     if [[ "$response" =~ ^[Yy]$ ]]; then
-        cat "$SCRIPT_DIR/interactive/ssh-config.txt" >> "$HOME/.ssh/config"
+        # Create ~/.ssh if it doesn't exist
+        mkdir -p "$HOME/.ssh"
+        chmod 700 "$HOME/.ssh"
+        
+        # Add config if ~/.ssh/config doesn't exist or is empty
+        if [ ! -f "$HOME/.ssh/config" ] || [ ! -s "$HOME/.ssh/config" ]; then
+            cat "$SCRIPT_DIR/interactive/ssh-config.txt" > "$HOME/.ssh/config"
+        else
+            cat "$SCRIPT_DIR/interactive/ssh-config.txt" >> "$HOME/.ssh/config"
+        fi
+        chmod 600 "$HOME/.ssh/config"
         echo "   ✓ SSH config snippet added to ~/.ssh/config"
     else
-        echo "   ℹ You can manually add it later from ssh-config-snippet.txt"
+        echo "   ℹ You can manually add it later from: $SCRIPT_DIR/interactive/ssh-config.txt"
     fi
-else
-    echo "   ✓ SSH config for 'ossci' already exists in ~/.ssh/config"
 fi
 echo ""
 
