@@ -1,3 +1,24 @@
+# Web-based Interactive Development Pod Template
+#
+# PURPOSE:
+#   Provides browser-based VS Code (code-server) for development
+#   Alternative to SSH-based pods (pod-ssh.yml)
+#
+# FEATURES:
+#   - Runs code-server (web-based VS Code) on port 9000
+#   - No authentication required (use port-forward for security)
+#   - GPU access (amd.com/gpu: 1)
+#   - Persistent storage via PVC
+#
+# USAGE:
+#   1. Replace {{POD_NAME}} and {{PVC_CLAIM_NAME}} with actual values
+#   2. Apply: kubectl apply -f pod-web.yml -n iree-dev
+#   3. Port-forward: kubectl port-forward <pod-name> 9000:9000 -n iree-dev
+#   4. Access: http://localhost:9000 in your browser
+#
+# NOTE: Currently a template only - no wrapper script like connect.sh
+#       You'll need to manually substitute variables and apply
+#
 apiVersion: v1
 kind: Pod
 metadata:

@@ -1,4 +1,17 @@
-# Add this to your ~/.ssh/config
+# SSH Configuration for Kubernetes Interactive Pods
+#
+# This file provides SSH configuration for users who don't use the rc_files setup.
+# If you use rc_files, this is already included in your SSH config.
+#
+# Usage:
+#   1. Manually add this to your ~/.ssh/config
+#   2. Or run: ../setup-symlinks.sh (which will prompt to add it)
+#
+# This allows you to connect to pods with:
+#   ssh ossci          (connects to localhost:2222 by default)
+#   ssh -p 2223 ossci  (for additional pods on different ports)
+#
+# Add the following to your ~/.ssh/config:
 
 Host ossci
   HostName 127.0.0.1
@@ -8,3 +21,6 @@ Host ossci
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   ForwardAgent yes
+
+# Note: If you have multiple pods running, each uses a different port (2222, 2223, etc.)
+# You can connect using: ssh -p <port> ossci@localhost
