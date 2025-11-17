@@ -13,9 +13,13 @@ kubernetes/
 │   └── iree-dev-zyin-pvc.yaml      
 ├── interactive/                    # Interactive pod scripts
 │   ├── config.json                 # Your configuration
-│   ├── connect.sh                  # Connect to pod
-│   ├── stop.sh                     # Cleanup pods
-│   ├── pod-ssh.yml                 # Pod template (SSH)
+│   ├── connect.sh                  # Connect to pod (multi-pod support)
+│   ├── stop.sh                     # Cleanup pods (multi-pod support)
+│   ├── list-pods.sh                # List active pods with connection info
+│   ├── setup-pod.sh                # Setup pod (packages, dotfiles, workspace)
+│   ├── setup-workspace.sh          # Setup ephemeral IREE workspace
+│   ├── pod-ssh.yml                 # Pod template (SSH, PVC)
+│   ├── pod-ssh-ephemeral.yml       # Pod template (SSH, ephemeral)
 │   ├── pod-web.yml                 # Pod template (web)
 │   └── ssh-config.txt              # SSH config reference
 └── setup-symlinks.sh               # Setup script for new systems
@@ -87,9 +91,9 @@ kubectl apply -f ~/scripts/kubernetes/pvc/iree-dev-zyin-pvc.yaml
 - `~/.kube/switch-config.yaml` → `~/scripts/kubernetes/kube-configs/switch-config.yaml`
 - `~/.kube/configs/tw-tus1-bm-private-sso.conf` → `~/scripts/kubernetes/kube-configs/tw-tus1-bm-private-sso.conf`
 
-**SSH Config:** The setup script adds this to `~/.ssh/config`:
-```
-Host ossci
+**SSH Config:** The `connect.sh` script automatically creates SSH config entries for each pod in `~/.ssh/config`:
+```ssh-config
+Host ossci-1114-184054
   HostName 127.0.0.1
   User ossci
   Port 2222
@@ -99,7 +103,10 @@ Host ossci
   ForwardAgent yes
 ```
 
-**Note:** `ForwardAgent yes` allows git operations (clone, push, pull) to use your laptop's SSH keys without copying them to the pod.
+**Notes:** 
+- Each pod gets a unique SSH alias (e.g., `ossci-1114-184054`)
+- SSH configs are automatically created on connection and removed on pod deletion
+- `ForwardAgent yes` allows git operations to use your laptop's SSH keys without copying them to the pod
 
 ### Remote Machine Setup
 
@@ -151,12 +158,21 @@ kubectl apply -f ~/scripts/kubernetes/pvc/iree-dev-zyin-pvc.yaml
 # Script automatically:
 # - Sets kubeconfig
 # - Authenticates (opens browser if needed)
-# - Attaches to existing pod if available
+# - Shows existing pods if any (with selection menu)
 # - Creates new pod if none exist
 # - SSH's you into the pod
 
-# To start a second/third pod (for parallel work):
+# If multiple pods exist, you'll see:
+#   1) zyin-iree-1114-184054 (port 2222, ssh alias: ossci-1114-184054)
+#   2) zyin-iree-1114-191117 (port 2223, ssh alias: ossci-1114-191117)
+#   3) Create new pod
+#   Select pod to connect to [1-3]: 
+
+# To force creation of new pod (skip menu):
 ~/scripts/kubernetes/interactive/connect.sh --new
+
+# To skip setup (connect to already-configured pod):
+~/scripts/kubernetes/interactive/connect.sh --skip-setup
 
 # 2. Work in the pod
 # (you're already connected)
@@ -164,15 +180,21 @@ kubectl apply -f ~/scripts/kubernetes/pvc/iree-dev-zyin-pvc.yaml
 # 3. Exit when done (pod keeps running)
 exit
 
-# 4. To reconnect later
-ssh ossci
+# 4. To reconnect later (use pod-specific SSH alias)
+ssh ossci-1114-184054   # Connect to first pod
+ssh ossci-1114-191117   # Connect to second pod
 
-# 5. To stop and cleanup (when completely done)
+# 5. List all active pods with connection info
+~/scripts/kubernetes/interactive/list-pods.sh
+
+# 6. To stop and cleanup (when completely done)
 ~/scripts/kubernetes/interactive/stop.sh
+# Interactive menu lets you delete specific pods or all pods
 ```
 
 **Notes:** 
 - The script handles everything automatically (cluster selection, authentication, pod creation)
+- Each pod gets a unique SSH alias and port (2222, 2223, 2224, etc.)
 - Default cluster: `tw-tus1-bm-private-sso.conf` (configurable in `config.json`)
 - To use different cluster: run `switch` first, or edit `config.json`
 
