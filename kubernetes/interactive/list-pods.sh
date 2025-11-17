@@ -28,23 +28,20 @@ if [ -d "$HOME/.krew/bin" ] && [[ ":$PATH:" != *":$HOME/.krew/bin:"* ]]; then
     export PATH="${HOME}/.krew/bin:$PATH"
 fi
 
-# Helper function to get SSH host alias for a pod
-get_ssh_host_alias() {
-    local pod_name="$1"
-    local pod_suffix
-    pod_suffix=$(echo "$pod_name" | sed -E 's/.*-iree-//')
-    echo "ossci-$pod_suffix"
-}
+# No SSH config management - use direct port-based SSH
 
-echo "🔍 Active Interactive Pods"
+# Display string for SSH command (for user reference)
+SSH_CMD_PREFIX="ssh -i ~/.ssh/id_rsa"
+
+echo "🔍 Interactive Pods (All States)"
 echo "================================================================"
 echo ""
 
-# Find all interactive pods for this user
-PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | select(.status.phase == \"Running\") | .metadata.name" 2>/dev/null || true)
+# Find all interactive pods for this user (including non-Running states for debugging)
+PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | .metadata.name" 2>/dev/null || true)
 
 if [ -z "$PODS" ]; then
-    echo "No active pods found."
+    echo "No pods found."
     echo ""
     echo "💡 To create a new pod, run: $SCRIPT_DIR/connect.sh"
     exit 0
@@ -53,16 +50,29 @@ fi
 POD_ARRAY=($PODS)
 POD_COUNT=${#POD_ARRAY[@]}
 
-echo "Found $POD_COUNT active pod(s):"
+echo "Found $POD_COUNT pod(s):"
 echo ""
 
 for pod in "${POD_ARRAY[@]}"; do
     # Get pod info
     AGE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "unknown")
     STATUS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+    NODE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "unknown")
 
-    # Get port and SSH alias
-    SSH_ALIAS=$(get_ssh_host_alias "$pod")
+    # Get container state
+    CONTAINER_STATE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state}' 2>/dev/null | jq -r 'keys[0]' 2>/dev/null || echo "unknown")
+
+    # If container is waiting, get the reason
+    WAIT_REASON=""
+    if [ "$CONTAINER_STATE" = "waiting" ]; then
+        WAIT_REASON=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo "")
+    fi
+
+    # Get pod conditions (Ready status)
+    READY_CONDITION=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+    CONTAINERS_READY=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ContainersReady")].status}' 2>/dev/null || echo "Unknown")
+
+    # Get port
     PORT="not assigned"
     if [ -f "$PORT_MAPPING_FILE" ]; then
         MAPPED_PORT=$(jq -r --arg pod "$pod" '.[$pod] // empty' "$PORT_MAPPING_FILE" 2>/dev/null || echo "")
@@ -81,10 +91,27 @@ for pod in "${POD_ARRAY[@]}"; do
         fi
     fi
 
+    # Display pod information
     echo "📦 $pod"
     echo "   Status:        $STATUS"
-    echo "   Started:       $AGE"
-    echo "   SSH:           ssh $SSH_ALIAS"
+
+    # Show container state details
+    if [ "$CONTAINER_STATE" = "running" ]; then
+        STARTED_AT=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}' 2>/dev/null || echo "")
+        echo "   Container:     Running (started: $STARTED_AT)"
+    elif [ "$CONTAINER_STATE" = "waiting" ]; then
+        echo "   Container:     Waiting${WAIT_REASON:+ ($WAIT_REASON)}"
+    elif [ "$CONTAINER_STATE" = "terminated" ]; then
+        echo "   Container:     Terminated"
+    else
+        echo "   Container:     $CONTAINER_STATE"
+    fi
+
+    # Show conditions
+    echo "   Conditions:    Ready=$READY_CONDITION, ContainersReady=$CONTAINERS_READY"
+    echo "   Node:          $NODE"
+    echo "   Age:           $AGE"
+    echo "   SSH:           $SSH_CMD_PREFIX -p $PORT ossci@localhost"
     echo "   Port:          $PORT"
     echo "   Port-forward:  $PF_STATUS"
     echo ""
