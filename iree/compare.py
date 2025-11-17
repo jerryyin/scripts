@@ -54,16 +54,47 @@ def compare_arrays(file1, file2, dtype, threshold):
         data1 = data1.astype(np.float32)
         data2 = data2.astype(np.float32)
 
-    error_count = 0
-    for i in range(element_count):
-        if np.abs(data1[i] - data2[i]) > threshold:
-            if error_count <= 10:
-                print(f"Difference exceeds threshold at index {i}: {data1[i]} vs {data2[i]}")
-            error_count += 1
+    # Calculate differences
+    diff_values = np.abs(data1 - data2)
+    error_mask = diff_values > threshold
+    error_count = np.sum(error_mask)
+
+    # Print first few differences
+    if error_count > 0:
+        error_indices = np.where(error_mask)[0]
+        num_to_show = min(10, error_count)
+        for idx in error_indices[:num_to_show]:
+            print(f"Difference exceeds threshold at index {idx}: {data1[idx]} vs {data2[idx]}")
 
     if error_count > 0:
         proportion = error_count / element_count
         print(f"Total differences: {error_count} out of {element_count} elements ({proportion:.2%})")
+
+        # Enhanced statistics
+        print(f"")
+        print(f"Difference statistics:")
+        diff_nonzero = diff_values[error_mask]
+        print(f"  Mean absolute diff:      {np.mean(diff_nonzero):.6f}")
+        print(f"  Max absolute diff:       {np.max(diff_nonzero):.6f}")
+        print(f"  Min absolute diff:       {np.min(diff_nonzero):.6f}")
+        print(f"  Std dev of diff:         {np.std(diff_nonzero):.6f}")
+
+        # Percentiles for better understanding of distribution
+        print(f"  Median absolute diff:    {np.median(diff_nonzero):.6f}")
+        print(f"  95th percentile diff:    {np.percentile(diff_nonzero, 95):.6f}")
+        print(f"  99th percentile diff:    {np.percentile(diff_nonzero, 99):.6f}")
+
+        # Relative error if values are non-zero
+        abs_data1 = np.abs(data1[error_mask])
+        valid_for_rel_error = abs_data1 > 1e-10
+        if np.any(valid_for_rel_error):
+            rel_errors = diff_nonzero[valid_for_rel_error] / abs_data1[valid_for_rel_error]
+            print(f"")
+            print(f"Relative error statistics (where |value1| > 1e-10):")
+            print(f"  Mean relative error:     {np.mean(rel_errors):.6f} ({np.mean(rel_errors)*100:.4f}%)")
+            print(f"  Max relative error:      {np.max(rel_errors):.6f} ({np.max(rel_errors)*100:.4f}%)")
+            print(f"  Median relative error:   {np.median(rel_errors):.6f} ({np.median(rel_errors)*100:.4f}%)")
+
         return False
 
     return True

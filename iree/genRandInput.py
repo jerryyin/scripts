@@ -2,7 +2,7 @@
 ## Gen rand output:
 ##    python genRandInput.py 2x235x363x224xbf16.bin --shape 2 235 363 224 --dtype bf16
 ## Gen readable output from bin input:
-##    python3 ~/scripts/iree/genRandInput.py input.bin --shape 1 2 3 --dtype bf16 --dump
+##    python genRandInput.py input.bin --shape 1 2 3 --dtype bf16 --dump
 
 import numpy as np
 import argparse
