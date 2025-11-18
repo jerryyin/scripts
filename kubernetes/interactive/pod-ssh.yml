@@ -17,9 +17,10 @@ spec:
     # Keep fsGroup to ensure PVC files are accessible at /$USER
     # Run as root to allow package installation
     fsGroup: 1001
-  initContainers:
-    - name: install-prereqs
-      image: {{DOCKER_IMAGE}}
+  containers:
+    - name: interactive-ssh
+      image: rocm/dev-ubuntu-24.04:latest
+      imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -c
@@ -40,18 +41,6 @@ spec:
             install_packages
           fi
           rm -f /tmp/apt-install.log || true
-      securityContext:
-        runAsUser: 0
-*** End Patch
-  containers:
-    - name: interactive-ssh
-      image: rocm/dev-ubuntu-24.04:latest
-      imagePullPolicy: IfNotPresent
-      command:
-        - /bin/bash
-        - -c
-        - |
-          set -eux
 
           # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
           useradd -u 1001 -m -s /bin/zsh ossci || true
