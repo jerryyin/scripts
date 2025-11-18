@@ -17,10 +17,34 @@ spec:
     # Keep fsGroup to ensure PVC files are accessible at /$USER
     # Run as root to allow package installation
     fsGroup: 1001
+  initContainers:
+    - name: install-prereqs
+      image: {{DOCKER_IMAGE}}
+      command:
+        - /bin/bash
+        - -c
+        - |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          ESSENTIAL_PACKAGES="sudo openssh-server curl git"
+
+          install_packages() {
+            apt-get install -y --no-install-recommends $ESSENTIAL_PACKAGES
+          }
+
+          if ! install_packages >/tmp/apt-install.log 2>&1; then
+            echo "Initial package install failed, refreshing apt cache (this may take a while)..."
+            cat /tmp/apt-install.log || true
+            rm -f /tmp/apt-install.log
+            apt-get update -qq
+            install_packages
+          fi
+          rm -f /tmp/apt-install.log || true
+      securityContext:
+        runAsUser: 0
+*** End Patch
   containers:
     - name: interactive-ssh
-      # Docker image to use for the interactive session.
-      # ROCm base image for IREE development
       image: rocm/dev-ubuntu-24.04:latest
       imagePullPolicy: IfNotPresent
       command:
@@ -28,8 +52,6 @@ spec:
         - -c
         - |
           set -eux
-          # Install sudo, openssh-server, and zsh as root first
-          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git zsh
 
           # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
           useradd -u 1001 -m -s /bin/zsh ossci || true
