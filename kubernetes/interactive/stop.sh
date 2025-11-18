@@ -50,35 +50,56 @@ fi
 echo "Stopping interactive pods and port-forwards..."
 echo ""
 
-# Find all port-forward PIDs
-PID_FILES=$(ls /tmp/kubectl-port-forward-${USER}-*.pid 2>/dev/null || true)
-if [ -n "$PID_FILES" ]; then
+# Find all port-forward PID files (if any exist)
+PORT_FORWARD_GLOB="/tmp/kubectl-port-forward-${USER}-"*.pid
+PID_FILES=()
+if compgen -G "$PORT_FORWARD_GLOB" >/dev/null; then
+    # shellcheck disable=SC2206 # word splitting intentional for array population
+    PID_FILES=($PORT_FORWARD_GLOB)
+fi
+
+ACTIVE_PORT_FORWARDS=0
+STALE_PID_FILES=0
+
+if [ "${#PID_FILES[@]}" -gt 0 ]; then
     echo "🔌 Port-forward processes:"
-    for pid_file in $PID_FILES; do
-        if [ -f "$pid_file" ]; then
-            PID=$(cat "$pid_file")
-            POD=$(basename "$pid_file" | sed "s/kubectl-port-forward-${USER}-//;s/.pid//")
-            if kill -0 "$PID" 2>/dev/null; then
-                echo "  - $POD (PID: $PID)"
-            fi
+    for pid_file in "${PID_FILES[@]}"; do
+        [ -f "$pid_file" ] || continue
+        PID=$(cat "$pid_file")
+        POD=$(basename "$pid_file" | sed "s/kubectl-port-forward-${USER}-//;s/.pid//")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "  - $POD (PID: $PID)"
+            ACTIVE_PORT_FORWARDS=$((ACTIVE_PORT_FORWARDS + 1))
+        else
+            echo "  - $POD (stale entry, cleaning up)"
+            rm -f "$pid_file"
+            STALE_PID_FILES=$((STALE_PID_FILES + 1))
         fi
     done
-    echo ""
-    read -p "Kill all port-forwards? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        for pid_file in $PID_FILES; do
-            if [ -f "$pid_file" ]; then
+
+    if [ $STALE_PID_FILES -gt 0 ] && [ $ACTIVE_PORT_FORWARDS -eq 0 ]; then
+        echo "  (Removed $STALE_PID_FILES stale PID file(s).)"
+    fi
+
+    if [ $ACTIVE_PORT_FORWARDS -gt 0 ]; then
+        echo ""
+        read -r -p "Kill all active port-forwards? (y/N): " RESPONSE
+        if [[ $RESPONSE =~ ^[Yy]$ ]]; then
+            for pid_file in "${PID_FILES[@]}"; do
+                [ -f "$pid_file" ] || continue
                 PID=$(cat "$pid_file")
                 if kill -0 "$PID" 2>/dev/null; then
                     kill "$PID" 2>/dev/null || true
                 fi
                 rm -f "$pid_file"
-            fi
-        done
-        echo "✓ Port-forwards killed"
+            done
+            echo "✓ Port-forwards killed"
+        else
+            echo "Port-forwards not killed"
+        fi
     else
-        echo "Port-forwards not killed"
+        echo ""
+        echo "No active port-forward processes found."
     fi
 else
     echo "No port-forward processes found."
