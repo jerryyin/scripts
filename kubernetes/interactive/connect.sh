@@ -327,7 +327,11 @@ SSH_PORT=$(get_pod_port "$POD_NAME" "$MODE")
 
 # Start port-forward in background
 echo ""
-echo "Starting port-forward in background..."
+if [[ "$MODE" == "web" ]]; then
+    echo "Starting port-forward: localhost:$SSH_PORT -> pod:$REMOTE_PORT"
+else
+    echo "Starting port-forward: localhost:$SSH_PORT -> pod:22"
+fi
 PID_FILE="/tmp/kubectl-port-forward-${USER}-${POD_NAME}.pid"
 
 # Kill any existing port-forward for this pod
@@ -340,21 +344,20 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
-# Start port-forward in background
-if [[ "$MODE" == "web" ]]; then
-    kubectl port-forward -n "$NAMESPACE" "$POD_NAME" "$SSH_PORT:$REMOTE_PORT" > /dev/null 2>&1 &
+PORT_FORWARD_PID=""
+
+start_port_forward() {
+    if [[ "$MODE" == "web" ]]; then
+        kubectl port-forward -n "$NAMESPACE" "$POD_NAME" "$SSH_PORT:$REMOTE_PORT" >/dev/null 2>&1 &
+    else
+        kubectl port-forward -n "$NAMESPACE" "$POD_NAME" "$SSH_PORT:22" >/dev/null 2>&1 &
+    fi
     PORT_FORWARD_PID=$!
     echo "$PORT_FORWARD_PID" > "$PID_FILE"
-    echo "✅ Port-forward started (PID: $PORT_FORWARD_PID): localhost:$SSH_PORT -> pod:$REMOTE_PORT"
-    echo "   Access VSCode at: http://localhost:$SSH_PORT"
-    sleep 1
-else
-    kubectl port-forward -n "$NAMESPACE" "$POD_NAME" "$SSH_PORT:22" > /dev/null 2>&1 &
-    PORT_FORWARD_PID=$!
-    echo "$PORT_FORWARD_PID" > "$PID_FILE"
-    echo "✅ Port-forward started (PID: $PORT_FORWARD_PID): localhost:$SSH_PORT -> pod:22"
-    sleep 1
-fi
+    sleep 2
+}
+
+start_port_forward
 
 # Wait for service to be ready
 echo ""
@@ -383,18 +386,20 @@ if [[ "$MODE" == "web" ]]; then
     echo "================================================================"
 else
     echo "Waiting for SSH service to be ready..."
-    echo "(Waiting for port-forward to establish and SSH daemon to start...)"
-    for i in {1..30}; do
-        # Test SSH connection via port-forward (localhost:$SSH_PORT -> pod:22)
+    echo "(Waiting for port-forward to establish and SSH daemon to start; press Ctrl+C to abort)"
+    SSH_WAIT_ATTEMPTS=0
+    while true; do
+        ((++SSH_WAIT_ATTEMPTS))
+        if ! ps -p "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+            echo "↻ Port-forward exited; restarting..."
+            start_port_forward
+        fi
         if ssh -o ConnectTimeout=2 "${SSH_OPTS[@]}" -p "$SSH_PORT" ossci@localhost "exit 0" >/dev/null 2>&1; then
             echo "✅ SSH service is ready!"
             break
         fi
-        if [ $i -eq 30 ]; then
-            echo "⚠ Timeout waiting for SSH service (waited 60 seconds)"
-            echo "   Pod may still be starting up. Try:"
-            echo "   kubectl logs $POD_NAME -n $NAMESPACE"
-            exit 1
+        if (( SSH_WAIT_ATTEMPTS % 30 == 0 )); then
+            echo "  ...still waiting for SSH (attempt ${SSH_WAIT_ATTEMPTS}). Pod may still be configuring."
         fi
         sleep 2
     done
