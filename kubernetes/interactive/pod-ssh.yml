@@ -42,8 +42,8 @@ spec:
           fi
           rm -f /tmp/apt-install.log || true
 
-          # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
-          useradd -u 1001 -m -s /bin/zsh ossci || true
+          # Create ossci user with uid 1001 (matching fsGroup) with bash as default shell
+          useradd -u 1001 -m -s /bin/bash ossci || true
 
           # Give ossci user sudo privileges
           echo 'ossci ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ossci
