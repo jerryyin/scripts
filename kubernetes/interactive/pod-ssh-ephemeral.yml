@@ -25,11 +25,11 @@ spec:
         - -c
         - |
           set -eux
-          # Install sudo, openssh-server, and zsh as root first
-          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git zsh
+          # Install required packages
+          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git
           
-          # Create ossci user with uid 1001 (matching fsGroup) with zsh as default shell
-          useradd -u 1001 -m -s /bin/zsh ossci || true
+          # Create ossci user with uid 1001 (matching fsGroup) with bash as default shell
+          useradd -u 1001 -m -s /bin/bash ossci || true
           
           # Give ossci user sudo privileges
           echo 'ossci ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ossci
