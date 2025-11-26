@@ -18,3 +18,6 @@ if [ ! -d triton ]; then
 else
   setupMlirTag "${PWD}/triton"
 fi
+
+# Install pre-commit (run 'pre-commit install' in your repo to set up hooks)
+pip install pre-commit -q
