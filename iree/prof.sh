@@ -47,10 +47,14 @@ att() {
     mv "$OUTBASE" "${OUTBASE}_bkp"
   fi
 
-  ROCPROF_ATT_LIBRARY_PATH=/opt/rocm/lib \
-    rocprofv3 --att-perfcounter-ctrl 3 \
-    --att-perfcounters "SQ_LDS_BANK_CONFLICT, SQ_WAIT_INST_LDS" \
-    -i "$SCRIPT_DIR/att.json" -d "$OUTBASE" -- "$@"
+  # Use /opt/rocm (symlinked to ROCm 7.0) for all profiling
+  # IREE_HIP_DYLIB_PATH: tells IREE where to find libamdhip64.so
+  export IREE_HIP_DYLIB_PATH=/opt/rocm/lib
+
+  /opt/rocm/bin/rocprofv3 \
+    --preload /opt/rocm/lib/libamdhip64.so \
+    -i "$SCRIPT_DIR/att.json" \
+    -d "$OUTBASE" -- "$@"
 }
 
 # --- Main entry point ---
