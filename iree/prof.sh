@@ -47,11 +47,11 @@ att() {
     mv "$OUTBASE" "${OUTBASE}_bkp"
   fi
 
-  # Use /opt/rocm (symlinked to ROCm 7.0) for all profiling
+  # Use /opt/rocm (symlink to versioned ROCm) for all profiling
   # IREE_HIP_DYLIB_PATH: tells IREE where to find libamdhip64.so
   export IREE_HIP_DYLIB_PATH=/opt/rocm/lib
 
-  /opt/rocm/bin/rocprofv3 \
+  rocprofv3 \
     --preload /opt/rocm/lib/libamdhip64.so \
     -i "$SCRIPT_DIR/att.json" \
     -d "$OUTBASE" -- "$@"
@@ -70,4 +70,3 @@ case "$MODE" in
   att) att "$@" ;;
   *)       show_usage ;;
 esac
-
