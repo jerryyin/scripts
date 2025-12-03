@@ -58,9 +58,9 @@ bash scripts/docker/init_iree.sh || {
 echo ""
 echo "📦 Step 3/3: Setting up isolated IREE workspace..."
 cd "$HOME"
-bash ~/scripts/kubernetes/interactive/setup-workspace.sh || {
-    echo "❌ setup-workspace.sh failed. You can retry manually:"
-    echo "   bash ~/scripts/kubernetes/interactive/setup-workspace.sh"
+bash ~/scripts/kubernetes/interactive/setup-workspace-iree.sh || {
+    echo "❌ setup-workspace-iree.sh failed. You can retry manually:"
+    echo "   bash ~/scripts/kubernetes/interactive/setup-workspace-iree.sh"
     exit 1
 }
 

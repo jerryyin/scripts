@@ -37,7 +37,8 @@ LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
 
 python -m pip config set global.break-system-packages true
 
-# Note: IREE repository is handled by the workspace isolation setup (setup-workspace.sh)
+# Note: IREE repository is handled by the workspace isolation setup (setup-workspace-iree.sh)
+# Cursor rules symlinks are also set up there
 # This creates ~/iree as a symlink to ~/workspace-$POD_NAME/iree
 # We only install Python packages here that are needed system-wide
 
