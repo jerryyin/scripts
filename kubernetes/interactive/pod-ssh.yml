@@ -6,7 +6,7 @@ spec:
   volumes:
     - name: home-vol
       emptyDir:
-        sizeLimit: 10Gi
+        sizeLimit: 50Gi
     - name: persistent-vol
       persistentVolumeClaim:
         claimName: {{PVC_CLAIM_NAME}}
