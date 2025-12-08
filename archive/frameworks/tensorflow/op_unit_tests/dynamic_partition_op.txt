@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:dynamic_partition_op_test
-//tensorflow/python/kernel_tests:dynamic_partition_op_test

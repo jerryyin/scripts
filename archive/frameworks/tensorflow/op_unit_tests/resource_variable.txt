@@ -1,2 +1,0 @@
-#//tensorflow/core/kernels:
-//tensorflow/python/kernel_tests:resource_variable_ops_test

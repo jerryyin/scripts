@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:sequence_ops_test
-//tensorflow/python/kernel_tests:reverse_sequence_op_test

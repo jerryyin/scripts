@@ -1,4 +1,0 @@
-//tensorflow/python/kernel_tests:gather_op_test
-//tensorflow/python/kernel_tests:gather_nd_op_test
-//tensorflow/core/kernels:gather_op_test
-//tensorflow/core/kernels:gather_nd_op_test

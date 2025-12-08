@@ -1,2 +1,0 @@
-//tensorflow/python/kernel_tests:dense_update_ops_test
-//tensorflow/python/kernel_tests:dense_update_ops_no_tsan_test

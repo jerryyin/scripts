@@ -1,2 +1,0 @@
-//tensorflow/python/kernel_tests:parameterized_truncated_normal_op_test
-//tensorflow/core/kernels:parameterized_truncated_normal_op_test

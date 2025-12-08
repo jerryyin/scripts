@@ -1,5 +1,0 @@
-//tensorflow/python/kernel_tests:concat_op_test
-//tensorflow/python/kernel_tests:split_op_test
-//tensorflow/core/kernels:concat_op_test
-//tensorflow/core/kernels:split_op_test
-//tensorflow/core/kernels:split_v_op_test

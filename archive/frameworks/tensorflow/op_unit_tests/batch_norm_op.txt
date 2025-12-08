@@ -1,3 +1,0 @@
-//tensorflow/core/kernels:batch_norm_op_test
-//tensorflow/core/kernels:quantized_batch_norm_op_test
-#//tensorflow/python/kernel_tests:

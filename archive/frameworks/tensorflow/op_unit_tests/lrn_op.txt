@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:lrn_op_test
-//tensorflow/python/kernel_tests:lrn_op_test

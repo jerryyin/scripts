@@ -1,4 +1,0 @@
-//tensorflow/core/kernels:scatter_op_test
-//tensorflow/core/kernels:scatter_nd_op_test
-//tensorflow/python/kernel_tests:scatter_ops_test
-//tensorflow/python/kernel_tests:scatter_nd_ops_test
