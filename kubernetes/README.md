@@ -16,9 +16,7 @@ kubernetes/
 │   ├── connect.sh                  # Connect to pod (multi-pod support)
 │   ├── stop.sh                     # Cleanup pods (multi-pod support)
 │   ├── list-pods.sh                # List active pods with connection info
-│   ├── setup-pod.sh                # Setup pod (packages, dotfiles, workspace)
-│   ├── setup-workspace-iree.sh     # Setup ephemeral IREE workspace
-│   ├── setup-workspace-triton.sh   # Setup ephemeral Triton workspace
+│   ├── setup-pod.sh                # Setup pod (uses docker/env/* and docker/workspace/*)
 │   ├── pod-ssh.yml                 # Pod template (SSH, PVC)
 │   ├── pod-ssh-ephemeral.yml       # Pod template (SSH, ephemeral)
 │   ├── pod-web.yml                 # Pod template (web)

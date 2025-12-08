@@ -8,7 +8,7 @@ if [ -d "$HOME/triton" ]; then
     exit 0
 fi
 
-source "$HOME/scripts/kubernetes/interactive/setup-workspace.sh"
+source "$HOME/scripts/docker/workspace/base.sh"
 setup_workspace "triton" "https://github.com/triton-lang/triton.git"
 
 # Triton-specific setup (runs after clone, in $HOME/triton)
