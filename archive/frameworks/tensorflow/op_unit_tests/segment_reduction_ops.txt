@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:segment_reduction_ops_test
-//tensorflow/python/kernel_tests:segment_reduction_ops_test

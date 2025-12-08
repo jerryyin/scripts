@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:multinomial_op_test
-#//tensorflow/python/kernel_tests:

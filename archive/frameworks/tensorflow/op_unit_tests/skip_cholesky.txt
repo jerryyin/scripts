@@ -1,3 +1,0 @@
-//tensorflow/python:control_flow_ops_test
-//tensorflow/python:init_ops_test
-//tensorflow/python:init_ops_v2_test

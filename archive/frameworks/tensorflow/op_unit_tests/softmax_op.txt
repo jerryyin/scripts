@@ -1,2 +1,0 @@
-#//tensorflow/core/kernels:
-//tensorflow/python/kernel_tests:softmax_op_test

@@ -1,5 +1,0 @@
-//tensorflow/python/kernel_tests:slice_op_test
-//tensorflow/python/kernel_tests:huge_slice_op_test
-//tensorflow/python/kernel_tests:sparse_slice_op_test
-//tensorflow/core/kernels:slice_op_test
-//tensorflow/core/kernels:strided_slice_op_test

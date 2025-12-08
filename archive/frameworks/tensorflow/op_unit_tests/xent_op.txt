@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:xent_op_test
-//tensorflow/python/kernel_tests:xent_op_test

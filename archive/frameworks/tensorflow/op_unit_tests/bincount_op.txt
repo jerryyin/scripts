@@ -1,2 +1,0 @@
-//tensorflow/core/kernels:bincount_op_test
-//tensorflow/python/kernel_tests:bincount_op_test

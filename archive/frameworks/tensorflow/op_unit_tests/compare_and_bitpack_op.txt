@@ -1,2 +1,0 @@
-#//tensorflow/core/kernels:
-//tensorflow/python/kernel_tests:compare_and_bitpack_op_test
