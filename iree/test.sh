@@ -3,6 +3,7 @@ set -e
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLS_DIR="$(cd "$SCRIPT_DIR/../tools" && pwd)"
 
 # Help message
 function usage() {
@@ -132,7 +133,7 @@ for shape in "${shapes[@]}"; do
     file="${shape}x${dtype}.bin"
     if [ ! -f "${file}" ]; then
         echo "[INFO] Generating random input for shape ${shape} and dtype ${dtype}..."
-        python "$SCRIPT_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
+        python "$TOOLS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
 
         # Error check
         if [ ! -f "${file}" ]; then
@@ -209,7 +210,7 @@ if [ "$num_runs" -gt 1 ]; then
     failures=0
     for i in $(seq 2 $num_runs); do
         echo -n "Run $i vs Run 1: "
-        if python "$SCRIPT_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/compare_output_${i}.txt 2>&1; then
+        if python "$TOOLS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/compare_output_${i}.txt 2>&1; then
             echo "✓ IDENTICAL"
         else
             echo "✗ DIFFERENT"
@@ -236,5 +237,5 @@ fi
 if $do_cpu; then
     echo ""
     echo "[INFO] Comparing CPU and GPU outputs..."
-    python "$SCRIPT_DIR/compare.py" "${cpu_output_bin}" "${gpu_output_bin}" --dtype ${dtype}
+    python "$TOOLS_DIR/compare.py" "${cpu_output_bin}" "${gpu_output_bin}" --dtype ${dtype}
 fi
