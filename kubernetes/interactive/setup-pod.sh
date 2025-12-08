@@ -35,22 +35,22 @@ if [ ! -d "$HOME/scripts" ]; then
     exit 1
 fi
 
-# Run init_min.sh (installs system packages, sets up dotfiles)
-echo "📦 Step 1/3: Running init_min.sh (system packages + dotfiles)..."
+# Run env/min.sh (installs system packages, sets up dotfiles)
+echo "📦 Step 1/3: Running env/min.sh (system packages + dotfiles)..."
 cd "$HOME"
-bash scripts/docker/init_min.sh || {
-    echo "❌ init_min.sh failed. You can retry manually:"
-    echo "   bash ~/scripts/docker/init_min.sh"
+bash scripts/docker/env/min.sh || {
+    echo "❌ env/min.sh failed. You can retry manually:"
+    echo "   bash ~/scripts/docker/env/min.sh"
     exit 1
 }
 
-# Run init_iree.sh (installs cmake, python packages)
+# Run env/iree.sh (installs cmake, python packages)
 echo ""
-echo "📦 Step 2/3: Running init_iree.sh (IREE dependencies)..."
+echo "📦 Step 2/3: Running env/iree.sh (IREE dependencies)..."
 cd "$HOME"
-bash scripts/docker/init_iree.sh || {
-    echo "❌ init_iree.sh failed. You can retry manually:"
-    echo "   bash ~/scripts/docker/init_iree.sh"
+bash scripts/docker/env/iree.sh || {
+    echo "❌ env/iree.sh failed. You can retry manually:"
+    echo "   bash ~/scripts/docker/env/iree.sh"
     exit 1
 }
 
@@ -58,9 +58,9 @@ bash scripts/docker/init_iree.sh || {
 echo ""
 echo "📦 Step 3/3: Setting up isolated IREE workspace..."
 cd "$HOME"
-bash ~/scripts/kubernetes/interactive/setup-workspace-iree.sh || {
-    echo "❌ setup-workspace-iree.sh failed. You can retry manually:"
-    echo "   bash ~/scripts/kubernetes/interactive/setup-workspace-iree.sh"
+bash ~/scripts/docker/workspace/iree.sh || {
+    echo "❌ workspace/iree.sh failed. You can retry manually:"
+    echo "   bash ~/scripts/docker/workspace/iree.sh"
     exit 1
 }
 
