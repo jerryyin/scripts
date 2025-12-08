@@ -51,6 +51,7 @@ att() {
   # IREE_HIP_DYLIB_PATH: tells IREE where to find libamdhip64.so
   export IREE_HIP_DYLIB_PATH=/opt/rocm/lib
 
+  # att.json is in the same directory as this script (tools/)
   rocprofv3 \
     --preload /opt/rocm/lib/libamdhip64.so \
     -i "$SCRIPT_DIR/att.json" \
