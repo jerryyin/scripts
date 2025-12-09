@@ -13,6 +13,7 @@ set -e
 CURSOR_RULES_SOURCE="$HOME/rc_files/cursor/.cursor/rules"
 
 # Setup Cursor AI assistant rules for a workspace
+# Links rules based on their globs pattern: **/* = universal, otherwise match project name
 setup_cursor_rules() {
     local pattern="$1"
     local workspace_dir="$2"
@@ -30,17 +31,21 @@ setup_cursor_rules() {
     mkdir -p "$rules_dest"
 
     local count=0
-    for rule in "$CURSOR_RULES_SOURCE"/*"$pattern"*.mdc; do
+    for rule in "$CURSOR_RULES_SOURCE"/*.mdc; do
         [ -e "$rule" ] || continue
         local rulename
         rulename=$(basename "$rule")
-        ln -sf "$rule" "$rules_dest/$rulename"
-        echo "   Linked Cursor rule: $rulename"
-        count=$((count + 1))
+
+        # Check if rule applies: universal glob (**/*) or filename matches project
+        if grep -q '^globs:.*\*\*/\*' "$rule" || [[ "$rulename" == *"$pattern"* ]]; then
+            ln -sf "$rule" "$rules_dest/$rulename"
+            echo "   Linked Cursor rule: $rulename"
+            count=$((count + 1))
+        fi
     done
 
     if [ "$count" -eq 0 ]; then
-        echo "   ℹ️  No Cursor rules matching '*${pattern}*.mdc' found"
+        echo "   ℹ️  No applicable Cursor rules found for '$pattern'"
     fi
 }
 
