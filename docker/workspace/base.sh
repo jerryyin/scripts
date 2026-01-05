@@ -50,13 +50,36 @@ setup_cursor_rules() {
 }
 
 # Find persistent storage root if available
+# Looks for a mounted home directory at the root level by detecting home-like markers
 find_persistent_root() {
-    for candidate in "/$USER" "/$(whoami)" "/zyin"; do
-        if [ -d "$candidate" ] && [ "$candidate" != "/root" ] && [ "$candidate" != "/home" ]; then
+    # Strategy 1: Try username-based paths first
+    local username
+    username=$(id -un 2>/dev/null || whoami 2>/dev/null || echo "")
+
+    if [ -n "$username" ] && [ -d "/$username" ] && [ "/$username" != "/root" ] && [ "/$username" != "/home" ]; then
+        echo "/$username"
+        return 0
+    fi
+
+    # Strategy 2: Scan root-level directories for home-like markers
+    # (mounted home dirs typically have .bashrc, .ssh, rc_files, scripts, etc.)
+    for candidate in /*/; do
+        candidate="${candidate%/}"  # Remove trailing slash
+
+        # Skip system directories
+        case "$candidate" in
+            /bin|/boot|/dev|/etc|/home|/lib*|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/data|/ffm|/tools|/snap)
+                continue
+                ;;
+        esac
+
+        # Check for home directory markers
+        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ] || [ -d "$candidate/scripts" ]; then
             echo "$candidate"
             return 0
         fi
     done
+
     echo ""
 }
 
