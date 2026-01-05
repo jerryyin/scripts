@@ -128,7 +128,7 @@ setup_workspace() {
     if [ -z "$PERSISTENT_ROOT" ]; then
         echo "   No persistent storage found - cloning from GitHub..."
         cd "$HOME"
-        git clone "$GITHUB_URL"
+        git clone "$GITHUB_URL" "$PROJECT_NAME"
         cd "$PROJECT_NAME"
         [ -n "$USE_SUBMODULES" ] && git submodule update --init
         git remote set-url origin "$SSH_URL"
@@ -143,7 +143,7 @@ setup_workspace() {
             echo "   Creating reference clone (one-time setup)..."
             mkdir -p "$REFERENCE"
             cd "$REFERENCE"
-            git clone "$GITHUB_URL"
+            git clone "$GITHUB_URL" "$PROJECT_NAME"
             cd "$PROJECT_NAME"
             [ -n "$USE_SUBMODULES" ] && git submodule update --init
             git remote set-url origin "$SSH_URL"
