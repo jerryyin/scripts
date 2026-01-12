@@ -14,20 +14,26 @@ if ! grep -q "$HOSTNAME" /etc/hosts; then
 fi
 
 shopt -s expand_aliases
+add_ppa_if_available() {
+    local ppa="$1"
+    local codename
+    codename=$(lsb_release -cs 2>/dev/null || { . /etc/os-release && echo "$VERSION_CODENAME"; })
+    local ppa_path=${ppa#ppa:}
+    local url="https://ppa.launchpadcontent.net/${ppa_path}/ubuntu/dists/${codename}/Release"
+    if wget -q --spider "$url" 2>/dev/null; then
+        sudo add-apt-repository -y "$ppa"
+    else
+        echo "Warning: $ppa not available for ${codename}, skipping..." >&2
+    fi
+}
 
 sudo apt-get update --allow-insecure-repositories
 
 # Get Ubuntu codename (focal, jammy, noble, etc.)
 CODENAME=$(lsb_release -sc 2>/dev/null || . /etc/os-release && echo "$VERSION_CODENAME")
 
-if [ "$CODENAME" = "focal" ] || [ "$CODENAME" = "jammy" ]; then
-  sudo add-apt-repository -y ppa:jonathonf/vim
-else
-  echo "Skipping jonathonf/vim PPA on $CODENAME"
-fi
-
-# neovim ppa
-sudo add-apt-repository -y ppa:neovim-ppa/stable
+add_ppa_if_available ppa:jonathonf/vim
+add_ppa_if_available ppa:neovim-ppa/stable
 # setup nodejs
 curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 

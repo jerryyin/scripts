@@ -14,6 +14,18 @@ echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo -h 127.0.0.1 tee -a /etc/h
 
 shopt -s expand_aliases
 alias dockerInstall='sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq '
+add_ppa_if_available() {
+    local ppa="$1"
+    local codename
+    codename=$(lsb_release -cs 2>/dev/null || { . /etc/os-release && echo "$VERSION_CODENAME"; })
+    local ppa_path=${ppa#ppa:}
+    local url="https://ppa.launchpadcontent.net/${ppa_path}/ubuntu/dists/${codename}/Release"
+    if wget -q --spider "$url" 2>/dev/null; then
+        add-apt-repository -y "$ppa"
+    else
+        echo "Warning: $ppa not available for ${codename}, skipping..." >&2
+    fi
+}
 
 sudo apt-get update --allow-insecure-repositories -qq
 
@@ -21,9 +33,9 @@ dockerInstall software-properties-common  # Install add-apt-repository
 dockerInstall apt-transport-https         # Dependency from kitware, for https
 dockerInstall wget gpg
 
-# PPA:  TODO remove when it becomes default ubuntu package
-# vim8 packge ppa.
-add-apt-repository -y ppa:jonathonf/vim
+# PPA: vim8 package ppa (only for Ubuntu < 24.04; noble+ ships with Vim 9.1+)
+# Note: jonathonf/vim PPA is deprecated and may not be available for all releases
+add_ppa_if_available ppa:jonathonf/vim
 
 # cmake, dependent on apt-transport-https. Refer to https://apt.kitware.com
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
@@ -106,7 +118,7 @@ fi
 
 # Install nodejs and neovim
 curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
-add-apt-repository -y ppa:neovim-ppa/stable
+add_ppa_if_available ppa:neovim-ppa/stable
 dockerInstall nodejs neovim
 mkdir -p ~/.local/share/nvim && ln -s ~/.vim ~/.local/share/nvim/site
 
