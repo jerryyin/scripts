@@ -61,19 +61,59 @@ def print_subsection(title):
     print(f"{Colors.CYAN}{title}{Colors.ENDC}")
     print(f"{Colors.CYAN}{'─' * 60}{Colors.ENDC}")
 
+def extract_layout_definitions(ir_text):
+    """Extract all layout definitions from TTGIR header (lines starting with #)."""
+    layout_defs = {}
+    lines = ir_text.split('\n')
+    
+    # Skip these prefixes - they're debug info, not layouts
+    skip_prefixes = ['#loc', '#di_']
+    
+    for line in lines:
+        line = line.strip()
+        # Layout definitions look like: #shared = #ttg.swizzled_shared<{...}>
+        # or #mma = #ttg.amd_wmma<{...}>
+        if line.startswith('#') and '=' in line:
+            # Extract the layout name (e.g., #shared, #mma)
+            match = re.match(r'^(#\w+)\s*=\s*(.+)$', line)
+            if match:
+                layout_name = match.group(1)
+                layout_def = match.group(2)
+                
+                # Skip debug/location info
+                if any(layout_name.startswith(prefix) for prefix in skip_prefixes):
+                    continue
+                    
+                layout_defs[layout_name] = layout_def
+    
+    return layout_defs
+
+
 def analyze_local_loads(ir_text):
     """Extract and analyze local_load operations from TTGIR."""
     local_loads = []
     lines = ir_text.split('\n')
     
+    # First extract all layout definitions
+    layout_defs = extract_layout_definitions(ir_text)
+    
     for i, line in enumerate(lines):
         if 'local_load' in line.lower() or 'ttg.local_load' in line:
+            # Find all layout references in this line (e.g., #shared, #shared1, #mma)
+            layout_refs = re.findall(r'#\w+', line)
+            # Filter to only those that have definitions
+            layouts_used = {}
+            for ref in set(layout_refs):
+                if ref in layout_defs:
+                    layouts_used[ref] = layout_defs[ref]
+            
             local_loads.append({
                 'line_num': i + 1,
                 'line': line.strip(),
+                'layouts': layouts_used,
             })
     
-    return local_loads
+    return local_loads, layout_defs
 
 def analyze_ds_load_tr_in_llir(ir_text):
     """Count and extract ds_load_tr instructions from LLVM IR."""
@@ -103,8 +143,22 @@ def analyze_ds_load_tr_in_asm(asm_text):
     
     return results
 
-def compile_python_kernel(py_file, arch):
-    """Compile a Python kernel and return the dump directory."""
+def compile_python_kernel(py_file, arch, kernel_index=None, compile_only=False):
+    """Compile a Python kernel and return the dump directory.
+    
+    Args:
+        py_file: Path to Python file containing Triton kernel
+        arch: Target architecture (e.g., gfx1250)
+        kernel_index: If multiple kernels/configs exist, which one to analyze (0-based).
+                      If None and multiple exist, lists them and prompts user to choose.
+        compile_only: If True, use wrapper to compile without running kernel
+    
+    Returns:
+        (dump_dir, ttgir_text, llir_text, amdgcn_text)
+    """
+    # Convert to absolute path to avoid relative path issues with subprocess cwd
+    py_file_abs = os.path.abspath(py_file)
+    
     dump_dir = tempfile.mkdtemp(prefix='triton_ds_load_tr_')
     
     env = os.environ.copy()
@@ -112,21 +166,54 @@ def compile_python_kernel(py_file, arch):
     env['TRITON_DUMP_DIR'] = dump_dir
     env['TRITON_ALWAYS_COMPILE'] = '1'  # Force recompilation to ensure dump is created
     
-    cmd = ['python3', py_file]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=os.path.dirname(py_file) or '.')
+    if compile_only:
+        # Use the wrapper script to compile without running
+        wrapper_script = Path(__file__).parent / 'compile_only_wrapper.py'
+        if not wrapper_script.exists():
+            print(f"{Colors.RED}Warning: compile_only_wrapper.py not found, falling back to normal execution{Colors.ENDC}")
+            cmd = ['python3', py_file_abs]
+        else:
+            cmd = ['python3', str(wrapper_script), py_file_abs]
+            print(f"{Colors.CYAN}Using compile-only mode (no kernel execution){Colors.ENDC}")
+    else:
+        cmd = ['python3', py_file_abs]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=os.path.dirname(py_file_abs))
     
     if result.returncode != 0:
         print(f"{Colors.RED}Error compiling Python kernel:{Colors.ENDC}")
         print(result.stderr)
         return None, None, None, None
     
-    # Find the kernel dump
-    kernel_dirs = list(Path(dump_dir).iterdir())
+    # Find the kernel dump - handle multiple kernels from autotuning
+    kernel_dirs = sorted(Path(dump_dir).iterdir())
     if not kernel_dirs:
         print(f"{Colors.YELLOW}No kernel dumps found in {dump_dir}{Colors.ENDC}")
         return None, None, None, None
     
-    kernel_dir = kernel_dirs[0]
+    # If there are multiple kernel directories, list them
+    if len(kernel_dirs) > 1:
+        print(f"\n{Colors.YELLOW}Found {len(kernel_dirs)} kernel configurations (likely from autotuning):{Colors.ENDC}")
+        for i, kdir in enumerate(kernel_dirs):
+            # Try to extract config info from filename
+            print(f"  [{i}] {kdir.name}")
+        
+        if kernel_index is not None:
+            if 0 <= kernel_index < len(kernel_dirs):
+                print(f"\n{Colors.CYAN}Using kernel index {kernel_index} (from --kernel-index){Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}Invalid kernel index {kernel_index}. Valid range: 0-{len(kernel_dirs)-1}{Colors.ENDC}")
+                return None, None, None, None
+        else:
+            # Default to first kernel but inform user
+            kernel_index = 0
+            print(f"\n{Colors.CYAN}Analyzing first kernel (index 0). Use --kernel-index N to select a different one.{Colors.ENDC}")
+            print(f"{Colors.CYAN}Use --analyze-all to analyze all kernels.{Colors.ENDC}")
+    else:
+        kernel_index = 0
+    
+    kernel_dir = kernel_dirs[kernel_index]
+    print(f"Selected kernel: {kernel_dir.name}")
     
     ttgir_file = list(kernel_dir.glob('*.ttgir'))
     llir_file = list(kernel_dir.glob('*.llir'))
@@ -151,12 +238,67 @@ def lower_ttgir_to_llvm(ttgir_file, arch):
         return None, stderr
     return stdout, None
 
+
+def analyze_all_kernels(dump_dir, args):
+    """Analyze all kernel configurations from autotuning."""
+    kernel_dirs = sorted(Path(dump_dir).iterdir())
+    
+    print_section(f"ANALYZING ALL {len(kernel_dirs)} KERNEL CONFIGURATIONS", Colors.CYAN)
+    
+    results = []
+    for i, kernel_dir in enumerate(kernel_dirs):
+        ttgir_files = list(kernel_dir.glob('*.ttgir'))
+        llir_files = list(kernel_dir.glob('*.llir'))
+        amdgcn_files = list(kernel_dir.glob('*.amdgcn'))
+        
+        ttgir = ttgir_files[0].read_text() if ttgir_files else None
+        llir = llir_files[0].read_text() if llir_files else None
+        amdgcn = amdgcn_files[0].read_text() if amdgcn_files else None
+        
+        local_loads, _ = analyze_local_loads(ttgir) if ttgir else ([], {})
+        ds_load_llir = analyze_ds_load_tr_in_llir(llir) if llir else {}
+        ds_load_asm = analyze_ds_load_tr_in_asm(amdgcn) if amdgcn else {}
+        
+        total_llir = sum(ds_load_llir.values())
+        total_asm = sum(ds_load_asm.values())
+        
+        results.append({
+            'index': i,
+            'name': kernel_dir.name,
+            'local_loads': len(local_loads),
+            'ds_load_llir': total_llir,
+            'ds_load_asm': total_asm,
+            'details_llir': ds_load_llir,
+            'details_asm': ds_load_asm,
+        })
+    
+    # Print summary table
+    print(f"\n{'Idx':<4} {'Kernel Config':<60} {'LocalLoads':<12} {'LLIR':<8} {'ASM':<8}")
+    print("-" * 92)
+    for r in results:
+        name = r['name'][:58] + '..' if len(r['name']) > 60 else r['name']
+        status = Colors.GREEN + "✓" + Colors.ENDC if r['ds_load_asm'] > 0 else Colors.RED + "✗" + Colors.ENDC
+        print(f"{r['index']:<4} {name:<60} {r['local_loads']:<12} {r['ds_load_llir']:<8} {r['ds_load_asm']:<8} {status}")
+    
+    # Summary
+    with_ds_load = sum(1 for r in results if r['ds_load_asm'] > 0)
+    print(f"\n{Colors.CYAN}Summary: {with_ds_load}/{len(results)} configs use ds_load_tr{Colors.ENDC}")
+    
+    if with_ds_load < len(results):
+        print(f"{Colors.YELLOW}Use --kernel-index N to investigate specific configs without ds_load_tr{Colors.ENDC}")
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze ds_load_tr instruction generation')
     parser.add_argument('input_file', help='Input file (.py, .ttir, .ttgir, or .mlir)')
     parser.add_argument('--arch', default='gfx1250', help='Target architecture (default: gfx1250)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed output')
     parser.add_argument('--keep-dump', action='store_true', help='Keep temporary dump directory')
+    parser.add_argument('--kernel-index', type=int, default=None, 
+                        help='Which kernel config to analyze when autotuning creates multiple (0-based)')
+    parser.add_argument('--analyze-all', action='store_true',
+                        help='Analyze all kernel configs from autotuning (summary mode)')
+    parser.add_argument('--compile-only', '-c', action='store_true',
+                        help='Compile kernel without running it (use for slow FFM environments)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input_file):
@@ -183,7 +325,19 @@ def main():
         print_section("STAGE 0: COMPILING PYTHON KERNEL", Colors.BLUE)
         print(f"Compiling {args.input_file} with TRITON_KERNEL_DUMP=1...")
         
-        dump_dir, ttgir_text, llir_text, amdgcn_text = compile_python_kernel(args.input_file, args.arch)
+        if args.analyze_all:
+            # Analyze all kernels mode - first compile to find how many kernels
+            dump_dir, _, _, _ = compile_python_kernel(args.input_file, args.arch, kernel_index=0,
+                                                       compile_only=args.compile_only)
+            if dump_dir:
+                analyze_all_kernels(dump_dir, args)
+                if not args.keep_dump:
+                    shutil.rmtree(dump_dir, ignore_errors=True)
+                return
+        
+        dump_dir, ttgir_text, llir_text, amdgcn_text = compile_python_kernel(
+            args.input_file, args.arch, kernel_index=args.kernel_index,
+            compile_only=args.compile_only)
         
         if dump_dir is None:
             print(f"{Colors.RED}Failed to compile Python kernel{Colors.ENDC}")
@@ -224,15 +378,14 @@ def main():
     # =========================================================================
     print_section("STAGE 1: TTGIR ANALYSIS (local_load)", Colors.BLUE)
     
+    local_loads = []
     if ttgir_text:
-        local_loads = analyze_local_loads(ttgir_text)
+        local_loads, all_layouts = analyze_local_loads(ttgir_text)
         print(f"Found {Colors.GREEN}{len(local_loads)}{Colors.ENDC} local_load operations:")
         
         for i, ll in enumerate(local_loads, 1):
             line = ll['line']
-            # Truncate long lines
-            if len(line) > 120:
-                line = line[:117] + "..."
+            # Don't truncate - show full line
             print(f"\n  {Colors.YELLOW}[{i}]{Colors.ENDC} {line}")
             
             # Extract key info
@@ -242,10 +395,11 @@ def main():
                     op_idx = match.group(1)
                     print(f"      → Operand: {'A (opIdx=0)' if op_idx == '0' else 'B (opIdx=1)'}")
             
-            if '#shared' in ll['line']:
-                order_match = re.search(r'order = \[(\d), (\d)\]', ll['line'])
-                if order_match:
-                    print(f"      → Shared layout order: [{order_match.group(1)}, {order_match.group(2)}]")
+            # Display all layout definitions used in this local_load
+            if ll.get('layouts'):
+                print(f"      {Colors.CYAN}Layout definitions:{Colors.ENDC}")
+                for layout_name, layout_def in sorted(ll['layouts'].items()):
+                    print(f"        {Colors.GREEN}{layout_name}{Colors.ENDC} = {layout_def}")
     else:
         print(f"{Colors.YELLOW}No TTGIR available{Colors.ENDC}")
 
