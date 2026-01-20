@@ -1,0 +1,55 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "mlir-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LLVM_ENABLE_PROJECTS": "mlir",
+        "LLVM_ENABLE_ASSERTIONS": "ON",
+        "LLVM_USE_LINKER": "lld"
+      }
+    },
+    {
+      "name": "mlir",
+      "displayName": "MLIR - RelWithDebInfo",
+      "description": "Standalone MLIR build for development/testing",
+      "inherits": "mlir-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "mlir-dbg",
+      "displayName": "MLIR - Debug",
+      "description": "Standalone MLIR build with full debug info",
+      "inherits": "mlir-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-g -fno-inline-functions"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "mlir",
+      "configurePreset": "mlir"
+    },
+    {
+      "name": "mlir-dbg",
+      "configurePreset": "mlir-dbg"
+    }
+  ]
+}

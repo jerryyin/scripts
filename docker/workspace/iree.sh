@@ -27,6 +27,12 @@ if [ -f "$HOME/scripts/iree/CMakePresets.json" ]; then
     ln -sf "$HOME/scripts/iree/CMakePresets.json" CMakePresets.json
 fi
 
+# Setup LLVM CMakeUserPresets.json for standalone MLIR builds
+if [ -f "$HOME/scripts/llvm/CMakeUserPresets.json" ]; then
+    echo "   Linking llvm-project CMakeUserPresets.json..."
+    ln -sf "$HOME/scripts/llvm/CMakeUserPresets.json" third_party/llvm-project/llvm/CMakeUserPresets.json
+fi
+
 # Install Python requirements
 if [ -f runtime/bindings/python/iree/runtime/build_requirements.txt ]; then
     echo "   Installing IREE Python build requirements..."
