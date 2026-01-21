@@ -173,10 +173,12 @@ class AttentionConfig:
     causal: bool = False
     block_m: int = 128      # BLOCK_M (tile size)
     block_n: int = 64       # BLOCK_N (tile size)
+    num_stages: int = 1     # Pipeline stages (affects buffering)
     
     def __str__(self):
         return (f"B{self.batch}_H{self.heads}_N{self.seq_len}_D{self.head_dim}_"
-                f"{'causal' if self.causal else 'full'}_BM{self.block_m}_BN{self.block_n}")
+                f"{'causal' if self.causal else 'full'}_BM{self.block_m}_BN{self.block_n}"
+                f"_NS{self.num_stages}")
     
     @property
     def stage(self) -> int:
@@ -285,7 +287,7 @@ def compile_kernel(config: AttentionConfig, save_dir: str) -> dict:
     # Create source and compile
     src = ASTSource(fn=_attn_fwd, signature=signature, constexprs=constexprs)
     backend = make_backend(target)
-    options = backend.parse_options({"num_warps": 4, "num_stages": 1})
+    options = backend.parse_options({"num_warps": 4, "num_stages": config.num_stages})
     
     compiled = compile(src, target=target, options=options.__dict__)
     
@@ -448,7 +450,7 @@ def verify_kernel(config: AttentionConfig, sm_scale: float = 0.5) -> dict:
         BLOCK_N=config.block_n,
         STAGE=config.stage,
         num_warps=4,
-        num_stages=1,
+        num_stages=config.num_stages,
     )
     
     # Compare
@@ -503,6 +505,8 @@ def main():
                         help="BLOCK_M tile size (default: 128)")
     parser.add_argument("--block-n", type=int, default=64,
                         help="BLOCK_N tile size (default: 64)")
+    parser.add_argument("--num-stages", type=int, default=1,
+                        help="Pipeline stages (default: 1)")
     
     # Output
     parser.add_argument("--out-dir", "-o", type=str, default=None,
@@ -539,6 +543,7 @@ def main():
             print(f"Error: --config-id must be 0-{len(configs)-1}")
             return 1
         config = configs[args.config_id]
+        config.num_stages = args.num_stages
     else:
         config = AttentionConfig(
             batch=args.batch,
@@ -548,6 +553,7 @@ def main():
             causal=args.causal,
             block_m=args.block_m,
             block_n=args.block_n,
+            num_stages=args.num_stages,
         )
     
     # Get target info
