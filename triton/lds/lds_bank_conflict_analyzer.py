@@ -505,12 +505,16 @@ Examples:
             print(f"   {padding:2d}   |    {stride:3d}     |   {conflict:2d}-way {status}")
     else:
         config = create_config_with_padding(args.padding, args.row_width, args.element_bytes)
-        analyze_bank_conflicts(
+        max_conflict = analyze_bank_conflicts(
             config, pattern,
             tile_rows=args.tile_rows,
             tile_cols=args.tile_cols,
             verbose=not args.quiet
         )
+        if args.quiet:
+            status = "OK" if max_conflict <= 2 else "BAD"
+            print(f"row={args.row_width} pad={args.padding} stride={config.row_stride_bytes}B "
+                  f"gcd={__import__('math').gcd(config.row_stride_bytes, 256)} → {max_conflict}-way {status}")
 
 
 if __name__ == "__main__":
