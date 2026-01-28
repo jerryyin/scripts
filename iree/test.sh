@@ -5,8 +5,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_DIR="$(cd "$SCRIPT_DIR/../tools" && pwd)"
 
-# Help message
-function usage() {
+# =============================================================================
+# Help
+# =============================================================================
+usage() {
     echo "Usage: $0 -f <input_mlir_file> -d <dtype> -i <shape1> -i <shape2> ... [OPTIONS]"
     echo ""
     echo "Required:"
@@ -16,10 +18,13 @@ function usage() {
     echo ""
     echo "Optional:"
     echo "  -t SPEC         Tuning spec path"
-    echo "  --cpu           Also compile and run on CPU"
+    echo "  --cpu           Also compile and run on CPU, compare CPU vs GPU"
     echo "  --bench         Run benchmark instead of normal execution"
     echo "  --flag FLAGS    Additional compiler flags"
     echo "  --runs N        Run N times to check for non-determinism (GPU only)"
+    echo "  --compare-flags 'FLAGS'  Also compile with these extra flags, compare results"
+    echo "  --threshold N   Comparison threshold (default: 0.01)"
+    echo "  --target CHIP   Target GPU chip (default: gfx942)"
     echo ""
     echo "Examples:"
     echo "  # Basic GPU test"
@@ -34,208 +39,292 @@ function usage() {
     echo "  # With custom flags and benchmarking"
     echo "  $0 -f kernel.mlir -d bf16 -i 1280 -i 64x1280 --bench --flag='--iree-opt-level=3'"
     echo ""
+    echo "  # Compare with additional flags"
+    echo "  $0 -f kernel.mlir -d f32 -i 128x512 -i 512x256 --compare-flags '--iree-llvmgpu-use-direct-load'"
+    echo ""
     exit 1
 }
 
-# Defaults
-dtype=""
-input_mlir_file=""
-tuning_spec=""
-shapes=()
-do_cpu=false
-do_bench=false
-flag=""
-num_runs=1
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
-# Parse command-line arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -f) input_mlir_file="$2"; shift ;;
-        -d) dtype="$2"; shift ;;
-        -t) tuning_spec="$2"; shift ;;
-        -i) shapes+=("$2"); shift ;;
-        --cpu) do_cpu=true ;;
-        --bench) do_bench=true ;;
-        --flag) flag="$2"; shift ;;
-        --runs) num_runs="$2"; shift ;;
-        *) usage ;;
-    esac
+# compile_rocm <input_mlir> <output_vmfb> <target_chip> <tuning_spec> <base_flags> <extra_flags> <do_bench>
+compile_rocm() {
+    local input_mlir="$1"
+    local output_file="$2"
+    local target="$3"
+    local tuning="$4"
+    local base_flags="$5"
+    local extra_flags="$6"
+    local bench="$7"
+
+    local cmd="iree-compile --iree-hal-target-backends=rocm --iree-hip-target=${target} --iree-llvmgpu-set-workgroup-distribution-along=x ${input_mlir} -o ${output_file}"
+
+    [ -n "$tuning" ] && cmd+=" --iree-codegen-tuning-spec-path=${tuning}"
+    [ "$bench" = "true" ] && cmd+=" --iree-flow-export-benchmark-funcs"
+    [ -n "$base_flags" ] && cmd+=" ${base_flags}"
+    [ -n "$extra_flags" ] && cmd+=" ${extra_flags}"
+
+    echo "[CMD] $cmd"
+    eval $cmd
+
+    [ -f "${output_file}" ] || { echo "[ERROR] Compilation failed - ${output_file} not created"; return 1; }
+}
+
+# compile_cpu <input_mlir> <output_vmfb>
+compile_cpu() {
+    local input_mlir="$1"
+    local output_file="$2"
+
+    [ -f "${output_file}" ] && { echo "[INFO] Using existing: ${output_file}"; return 0; }
+
+    local cmd="iree-compile --iree-hal-target-backends=llvm-cpu --iree-llvmcpu-target-cpu=host ${input_mlir} -o ${output_file}"
+    echo "[CMD] $cmd"
+    eval $cmd
+
+    [ -f "${output_file}" ] || { echo "[ERROR] CPU compilation failed"; return 1; }
+}
+
+# run_module <device> <module_vmfb> <output_bin> <input_args> <do_bench>
+run_module() {
+    local device="$1"
+    local module="$2"
+    local output="$3"
+    local inputs="$4"
+    local bench="$5"
+
+    if [ "$bench" = "true" ] && [ "$device" = "hip" ]; then
+        iree-benchmark-module --device=${device} --module="${module}" ${inputs} \
+            --output="@${output}" --benchmark_repetitions=10 --benchmark_min_warmup_time=3.0
+    else
+        iree-run-module --device=${device} --module="${module}" ${inputs} --output="@${output}"
+    fi
+}
+
+# generate_inputs <dtype> <shapes_array> -> prints input_args string
+# Usage: input_args=$(generate_inputs "$dtype" "${shapes[@]}")
+generate_inputs() {
+    local dtype="$1"
     shift
-done
+    local shapes=("$@")
+    local args=""
 
-# Required args
-if [ -z "$input_mlir_file" ] || [ -z "$dtype" ] || [ "${#shapes[@]}" -eq 0 ]; then
-    usage
-fi
-
-# Validate input file exists
-if [ ! -f "$input_mlir_file" ]; then
-    echo "[ERROR] Input MLIR file not found: $input_mlir_file"
-    exit 1
-fi
-
-# Validate num_runs is a positive integer
-if ! [[ "$num_runs" =~ ^[0-9]+$ ]] || [ "$num_runs" -lt 1 ]; then
-    echo "[ERROR] --runs must be a positive integer, got: $num_runs"
-    exit 1
-fi
-
-# Output files
-cpu_output_file="cpu.vmfb"
-gpu_output_file="gpu.vmfb"
-
-# -------------------
-# Compile
-# -------------------
-if $do_cpu; then
-    if [ ! -f "${cpu_output_file}" ]; then
-        echo "[INFO] Compiling for CPU..."
-        iree-compile --iree-hal-target-backends=llvm-cpu \
-            --iree-llvmcpu-target-cpu=host \
-            "${input_mlir_file}" -o "${cpu_output_file}"
-
-        # Error check
-        if [ ! -f "${cpu_output_file}" ]; then
-            echo "[ERROR] CPU compilation failed - ${cpu_output_file} not created"
-            exit 1
-        fi
-    else
-        echo "[INFO] Using existing CPU compilation: ${cpu_output_file}"
-    fi
-fi
-
-echo "[INFO] Compiling for ROCm..."
-rocm_compile_cmd="iree-compile --iree-hal-target-backends=rocm --iree-hip-target=gfx942 --iree-llvmgpu-set-workgroup-distribution-along=x ${input_mlir_file} -o ${gpu_output_file}"
-if [ -n "$tuning_spec" ]; then
-    rocm_compile_cmd+=" --iree-codegen-tuning-spec-path=${tuning_spec}"
-fi
-if [ $do_bench = true ]; then
-    rocm_compile_cmd+=" --iree-flow-export-benchmark-funcs"
-fi
-if [ -n "$flag" ]; then
-    rocm_compile_cmd+=" ${flag}"
-fi
-set -x
-eval $rocm_compile_cmd
-set +x
-
-# Error check
-if [ ! -f "${gpu_output_file}" ]; then
-    echo "[ERROR] ROCm compilation failed - ${gpu_output_file} not created"
-    exit 1
-fi
-
-# -------------------
-# Generate random inputs
-# -------------------
-input_args=""
-for shape in "${shapes[@]}"; do
-    file="${shape}x${dtype}.bin"
-    if [ ! -f "${file}" ]; then
-        echo "[INFO] Generating random input for shape ${shape} and dtype ${dtype}..."
-        python "$TOOLS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
-
-        # Error check
+    for shape in "${shapes[@]}"; do
+        local file="${shape}x${dtype}.bin"
         if [ ! -f "${file}" ]; then
-            echo "[ERROR] Failed to generate input file: ${file}"
-            exit 1
+            echo "[INFO] Generating input: ${file}" >&2
+            python "$TOOLS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
+            [ -f "${file}" ] || { echo "[ERROR] Failed to generate: ${file}" >&2; exit 1; }
+        else
+            echo "[INFO] Using existing: ${file}" >&2
         fi
+        args+=" --input=${shape}x${dtype}=@${file}"
+    done
+    echo "$args"
+}
+
+# compare_outputs <file1> <file2> <label1> <label2> <dtype> <threshold>
+compare_outputs() {
+    local file1="$1"
+    local file2="$2"
+    local label1="$3"
+    local label2="$4"
+    local dtype="$5"
+    local thresh="$6"
+
+    echo "[INFO] Comparing ${label1} vs ${label2}..."
+    if python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh}; then
+        echo "[RESULT] ✓ ${label1} and ${label2} match (threshold=${thresh})"
+        return 0
     else
-        echo "[INFO] Using existing input file: ${file}"
+        echo "[RESULT] ✗ ${label1} and ${label2} differ"
+        return 1
     fi
-    input_args+=" --input=${shape}x${dtype}=@${file}"
-done
+}
 
-# -------------------
-# Run CPU/GPU
-# -------------------
-cpu_output_bin="cpu_output.bin"
-gpu_output_bin="gpu_output.bin"
+# =============================================================================
+# Pipeline Functions
+# =============================================================================
 
-set -x
-if $do_cpu; then
-    echo "[INFO] Running on CPU..."
-    iree-run-module \
-        --device=local-task \
-        --module="${cpu_output_file}" \
-        ${input_args} \
-        --output="@${cpu_output_bin}"
-fi
+# compile <input_mlir> <target> <tuning> <base_flags> <do_bench> <do_cpu> <compare_flags>
+# Outputs: gpu.vmfb, cpu.vmfb (if do_cpu), gpu_with_flags.vmfb (if compare_flags)
+compile() {
+    local input_mlir="$1"
+    local target="$2"
+    local tuning="$3"
+    local base_flags="$4"
+    local do_bench="$5"
+    local do_cpu="$6"
+    local compare_flags="$7"
 
-if $do_bench; then
-    echo "[INFO] Benchmarking on GPU..."
-    iree-benchmark-module \
-        --device=hip \
-        --module="${gpu_output_file}" \
-        ${input_args} \
-        --output="@${gpu_output_bin}" \
-        --benchmark_repetitions=10 \
-        --benchmark_min_warmup_time=3.0
-else
-    echo "[INFO] Running on GPU..."
-    iree-run-module \
-        --device=hip \
-        --module="${gpu_output_file}" \
-        ${input_args} \
-        --output="@${gpu_output_bin}"
-fi
-set +x
-
-# -------------------
-# Multiple runs for non-determinism testing
-# -------------------
-if [ "$num_runs" -gt 1 ]; then
     echo ""
-    echo "[INFO] Running ${num_runs} times to check for non-determinism..."
+    echo "========================================================"
+    echo "[STEP] Compilation"
+    echo "========================================================"
 
-    # Save first run as baseline
-    cp "${gpu_output_bin}" "run1_output.bin"
+    if [ "$do_cpu" = "true" ]; then
+        echo "[INFO] Compiling for CPU..."
+        compile_cpu "$input_mlir" "cpu.vmfb" || exit 1
+    fi
 
-    # Run additional times
+    echo "[INFO] Compiling for GPU..."
+    compile_rocm "$input_mlir" "gpu.vmfb" "$target" "$tuning" "$base_flags" "" "$do_bench" || exit 1
+
+    if [ -n "$compare_flags" ]; then
+        echo ""
+        echo "[INFO] Compiling for GPU with extra flags: ${compare_flags}"
+        compile_rocm "$input_mlir" "gpu_with_flags.vmfb" "$target" "$tuning" "$base_flags" "$compare_flags" "$do_bench" || exit 1
+    fi
+}
+
+# run <input_args> <do_bench> <do_cpu> <has_compare_flags>
+# Outputs: gpu_output.bin, cpu_output.bin (if do_cpu), gpu_with_flags_output.bin (if has_compare_flags)
+run() {
+    local input_args="$1"
+    local do_bench="$2"
+    local do_cpu="$3"
+    local has_compare_flags="$4"
+
+    echo ""
+    echo "========================================================"
+    echo "[STEP] Execution"
+    echo "========================================================"
+
+    if [ "$do_cpu" = "true" ]; then
+        echo "[INFO] Running on CPU..."
+        run_module "local-task" "cpu.vmfb" "cpu_output.bin" "$input_args" "false"
+    fi
+
+    echo "[INFO] Running on GPU..."
+    run_module "hip" "gpu.vmfb" "gpu_output.bin" "$input_args" "$do_bench"
+
+    if [ "$has_compare_flags" = "true" ]; then
+        echo "[INFO] Running on GPU (with extra flags)..."
+        run_module "hip" "gpu_with_flags.vmfb" "gpu_with_flags_output.bin" "$input_args" "$do_bench"
+    fi
+}
+
+# check_determinism <num_runs> <input_args> <dtype>
+check_determinism() {
+    local num_runs="$1"
+    local input_args="$2"
+    local dtype="$3"
+
+    [ "$num_runs" -le 1 ] && return 0
+
+    echo ""
+    echo "========================================================"
+    echo "[STEP] Non-Determinism Check (${num_runs} runs)"
+    echo "========================================================"
+
+    cp "gpu_output.bin" "run1_output.bin"
+
     for i in $(seq 2 $num_runs); do
         echo -n "  Run $i/$num_runs..."
-        iree-run-module \
-            --device=hip \
-            --module="${gpu_output_file}" \
-            ${input_args} \
+        iree-run-module --device=hip --module="gpu.vmfb" ${input_args} \
             --output="@run${i}_output.bin" > /dev/null 2>&1
         echo " done"
     done
 
-    # Compare all runs against baseline
     echo ""
-    echo "[INFO] Comparing all runs against baseline (Run 1)..."
-    echo "========================================================"
-
-    failures=0
+    local failures=0
     for i in $(seq 2 $num_runs); do
-        echo -n "Run $i vs Run 1: "
-        if python "$TOOLS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/compare_output_${i}.txt 2>&1; then
+        echo -n "  Run $i vs Run 1: "
+        if python "$TOOLS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/cmp_${i}.txt 2>&1; then
             echo "✓ IDENTICAL"
         else
             echo "✗ DIFFERENT"
-            cat /tmp/compare_output_${i}.txt
+            cat /tmp/cmp_${i}.txt
             ((failures++))
         fi
-        rm -f /tmp/compare_output_${i}.txt
+        rm -f /tmp/cmp_${i}.txt
     done
 
-    echo "========================================================"
-    if [ $failures -eq 0 ]; then
-        echo "[RESULT] ✓ All ${num_runs} runs produced identical results"
-        echo "[RESULT] No non-determinism detected"
-    else
-        echo "[RESULT] ✗ Non-determinism detected!"
-        echo "[RESULT] $failures out of $((num_runs-1)) runs differed from baseline"
-        echo "[RESULT] Failure rate: $(awk "BEGIN {printf \"%.1f%%\", 100.0*$failures/($num_runs-1)}")"
-    fi
-fi
-
-# -------------------
-# Compare CPU vs GPU
-# -------------------
-if $do_cpu; then
     echo ""
-    echo "[INFO] Comparing CPU and GPU outputs..."
-    python "$TOOLS_DIR/compare.py" "${cpu_output_bin}" "${gpu_output_bin}" --dtype ${dtype}
-fi
+    [ $failures -eq 0 ] && echo "[RESULT] ✓ All ${num_runs} runs identical" || echo "[RESULT] ✗ Non-determinism: $failures/${num_runs} differ"
+}
+
+# compare <do_cpu> <compare_flags> <dtype> <threshold>
+compare() {
+    local do_cpu="$1"
+    local compare_flags="$2"
+    local dtype="$3"
+    local threshold="$4"
+
+    [ "$do_cpu" != "true" ] && [ -z "$compare_flags" ] && return 0
+
+    echo ""
+    echo "========================================================"
+    echo "[STEP] Comparison"
+    echo "========================================================"
+
+    if [ "$do_cpu" = "true" ]; then
+        compare_outputs "cpu_output.bin" "gpu_output.bin" "CPU" "GPU" "$dtype" "$threshold"
+    fi
+
+    if [ -n "$compare_flags" ]; then
+        compare_outputs "gpu_output.bin" "gpu_with_flags_output.bin" "GPU" "GPU+flags" "$dtype" "$threshold"
+        echo ""
+        echo "[INFO] Binary sizes:"
+        ls -lh gpu.vmfb gpu_with_flags.vmfb 2>/dev/null | awk '{print "  " $NF ": " $5}'
+    fi
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+main() {
+    # Defaults
+    local dtype=""
+    local input_mlir=""
+    local tuning_spec=""
+    local shapes=()
+    local do_cpu="false"
+    local do_bench="false"
+    local flag=""
+    local num_runs=1
+    local compare_flags=""
+    local threshold="0.01"
+    local target_chip="gfx942"
+
+    # Parse arguments
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -f) input_mlir="$2"; shift ;;
+            -d) dtype="$2"; shift ;;
+            -t) tuning_spec="$2"; shift ;;
+            -i) shapes+=("$2"); shift ;;
+            --cpu) do_cpu="true" ;;
+            --bench) do_bench="true" ;;
+            --flag) flag="$2"; shift ;;
+            --runs) num_runs="$2"; shift ;;
+            --compare-flags) compare_flags="$2"; shift ;;
+            --threshold) threshold="$2"; shift ;;
+            --target) target_chip="$2"; shift ;;
+            *) usage ;;
+        esac
+        shift
+    done
+
+    # Validate
+    [ -z "$input_mlir" ] || [ -z "$dtype" ] || [ "${#shapes[@]}" -eq 0 ] && usage
+    [ ! -f "$input_mlir" ] && { echo "[ERROR] File not found: $input_mlir"; exit 1; }
+    ! [[ "$num_runs" =~ ^[0-9]+$ ]] || [ "$num_runs" -lt 1 ] && { echo "[ERROR] --runs must be positive integer"; exit 1; }
+
+    # Generate inputs
+    local input_args
+    input_args=$(generate_inputs "$dtype" "${shapes[@]}")
+
+    # Determine if we have compare_flags
+    local has_compare_flags="false"
+    [ -n "$compare_flags" ] && has_compare_flags="true"
+
+    # Execute pipeline
+    compile "$input_mlir" "$target_chip" "$tuning_spec" "$flag" "$do_bench" "$do_cpu" "$compare_flags"
+    run "$input_args" "$do_bench" "$do_cpu" "$has_compare_flags"
+    check_determinism "$num_runs" "$input_args" "$dtype"
+    compare "$do_cpu" "$compare_flags" "$dtype" "$threshold"
+}
+
+main "$@"
