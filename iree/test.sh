@@ -25,6 +25,7 @@ usage() {
     echo "  --compare-flags 'FLAGS'  Also compile with these extra flags, compare results"
     echo "  --threshold N   Comparison threshold (default: 0.01)"
     echo "  --target CHIP   Target GPU chip (default: gfx942)"
+    echo "  -q, --quiet     Minimal output (only errors and final result)"
     echo ""
     echo "Examples:"
     echo "  # Basic GPU test"
@@ -39,10 +40,24 @@ usage() {
     echo "  # With custom flags and benchmarking"
     echo "  $0 -f kernel.mlir -d bf16 -i 1280 -i 64x1280 --bench --flag='--iree-opt-level=3'"
     echo ""
-    echo "  # Compare with additional flags"
-    echo "  $0 -f kernel.mlir -d f32 -i 128x512 -i 512x256 --compare-flags '--iree-llvmgpu-use-direct-load'"
+    echo "  # Compare with additional flags (quiet mode)"
+    echo "  $0 -f kernel.mlir -d f32 -i 128x512 -i 512x256 --compare-flags '--iree-llvmgpu-use-direct-load' -q"
     echo ""
     exit 1
+}
+
+# =============================================================================
+# Logging
+# =============================================================================
+# Global quiet flag (set by main, used by log functions)
+QUIET="false"
+
+log_info() {
+    [ "$QUIET" = "true" ] || echo "$@"
+}
+
+log_always() {
+    echo "$@"
 }
 
 # =============================================================================
@@ -66,10 +81,14 @@ compile_rocm() {
     [ -n "$base_flags" ] && cmd+=" ${base_flags}"
     [ -n "$extra_flags" ] && cmd+=" ${extra_flags}"
 
-    echo "[CMD] $cmd"
-    eval $cmd
+    log_info "[CMD] $cmd"
+    if [ "$QUIET" = "true" ]; then
+        eval $cmd 2>&1 | head -20
+    else
+        eval $cmd
+    fi
 
-    [ -f "${output_file}" ] || { echo "[ERROR] Compilation failed - ${output_file} not created"; return 1; }
+    [ -f "${output_file}" ] || { log_always "[ERROR] Compilation failed - ${output_file} not created"; return 1; }
 }
 
 # compile_cpu <input_mlir> <output_vmfb>
@@ -77,13 +96,17 @@ compile_cpu() {
     local input_mlir="$1"
     local output_file="$2"
 
-    [ -f "${output_file}" ] && { echo "[INFO] Using existing: ${output_file}"; return 0; }
+    [ -f "${output_file}" ] && { log_info "[INFO] Using existing: ${output_file}"; return 0; }
 
     local cmd="iree-compile --iree-hal-target-backends=llvm-cpu --iree-llvmcpu-target-cpu=host ${input_mlir} -o ${output_file}"
-    echo "[CMD] $cmd"
-    eval $cmd
+    log_info "[CMD] $cmd"
+    if [ "$QUIET" = "true" ]; then
+        eval $cmd 2>&1 | head -20
+    else
+        eval $cmd
+    fi
 
-    [ -f "${output_file}" ] || { echo "[ERROR] CPU compilation failed"; return 1; }
+    [ -f "${output_file}" ] || { log_always "[ERROR] CPU compilation failed"; return 1; }
 }
 
 # run_module <device> <module_vmfb> <output_bin> <input_args> <do_bench>
@@ -95,10 +118,19 @@ run_module() {
     local bench="$5"
 
     if [ "$bench" = "true" ] && [ "$device" = "hip" ]; then
-        iree-benchmark-module --device=${device} --module="${module}" ${inputs} \
-            --output="@${output}" --benchmark_repetitions=10 --benchmark_min_warmup_time=3.0
+        if [ "$QUIET" = "true" ]; then
+            iree-benchmark-module --device=${device} --module="${module}" ${inputs} \
+                --output="@${output}" --benchmark_repetitions=10 --benchmark_min_warmup_time=3.0 > /dev/null 2>&1
+        else
+            iree-benchmark-module --device=${device} --module="${module}" ${inputs} \
+                --output="@${output}" --benchmark_repetitions=10 --benchmark_min_warmup_time=3.0
+        fi
     else
-        iree-run-module --device=${device} --module="${module}" ${inputs} --output="@${output}"
+        if [ "$QUIET" = "true" ]; then
+            iree-run-module --device=${device} --module="${module}" ${inputs} --output="@${output}" > /dev/null 2>&1
+        else
+            iree-run-module --device=${device} --module="${module}" ${inputs} --output="@${output}"
+        fi
     fi
 }
 
@@ -113,11 +145,11 @@ generate_inputs() {
     for shape in "${shapes[@]}"; do
         local file="${shape}x${dtype}.bin"
         if [ ! -f "${file}" ]; then
-            echo "[INFO] Generating input: ${file}" >&2
+            log_info "[INFO] Generating input: ${file}" >&2
             python "$TOOLS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
-            [ -f "${file}" ] || { echo "[ERROR] Failed to generate: ${file}" >&2; exit 1; }
+            [ -f "${file}" ] || { log_always "[ERROR] Failed to generate: ${file}" >&2; exit 1; }
         else
-            echo "[INFO] Using existing: ${file}" >&2
+            log_info "[INFO] Using existing: ${file}" >&2
         fi
         args+=" --input=${shape}x${dtype}=@${file}"
     done
@@ -133,12 +165,14 @@ compare_outputs() {
     local dtype="$5"
     local thresh="$6"
 
-    echo "[INFO] Comparing ${label1} vs ${label2}..."
-    if python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh}; then
-        echo "[RESULT] ✓ ${label1} and ${label2} match (threshold=${thresh})"
+    log_info "[INFO] Comparing ${label1} vs ${label2}..."
+    if python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} > /dev/null 2>&1; then
+        log_always "[RESULT] ✓ ${label1} and ${label2} match (threshold=${thresh})"
         return 0
     else
-        echo "[RESULT] ✗ ${label1} and ${label2} differ"
+        log_always "[RESULT] ✗ ${label1} and ${label2} differ"
+        # Show details on failure even in quiet mode
+        python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} 2>&1 || true
         return 1
     fi
 }
@@ -158,22 +192,22 @@ compile() {
     local do_cpu="$6"
     local compare_flags="$7"
 
-    echo ""
-    echo "========================================================"
-    echo "[STEP] Compilation"
-    echo "========================================================"
+    log_info ""
+    log_info "========================================================"
+    log_info "[STEP] Compilation"
+    log_info "========================================================"
 
     if [ "$do_cpu" = "true" ]; then
-        echo "[INFO] Compiling for CPU..."
+        log_info "[INFO] Compiling for CPU..."
         compile_cpu "$input_mlir" "cpu.vmfb" || exit 1
     fi
 
-    echo "[INFO] Compiling for GPU..."
+    log_info "[INFO] Compiling for GPU..."
     compile_rocm "$input_mlir" "gpu.vmfb" "$target" "$tuning" "$base_flags" "" "$do_bench" || exit 1
 
     if [ -n "$compare_flags" ]; then
-        echo ""
-        echo "[INFO] Compiling for GPU with extra flags: ${compare_flags}"
+        log_info ""
+        log_info "[INFO] Compiling for GPU with extra flags: ${compare_flags}"
         compile_rocm "$input_mlir" "gpu_with_flags.vmfb" "$target" "$tuning" "$base_flags" "$compare_flags" "$do_bench" || exit 1
     fi
 }
@@ -186,21 +220,21 @@ run() {
     local do_cpu="$3"
     local has_compare_flags="$4"
 
-    echo ""
-    echo "========================================================"
-    echo "[STEP] Execution"
-    echo "========================================================"
+    log_info ""
+    log_info "========================================================"
+    log_info "[STEP] Execution"
+    log_info "========================================================"
 
     if [ "$do_cpu" = "true" ]; then
-        echo "[INFO] Running on CPU..."
+        log_info "[INFO] Running on CPU..."
         run_module "local-task" "cpu.vmfb" "cpu_output.bin" "$input_args" "false"
     fi
 
-    echo "[INFO] Running on GPU..."
+    log_info "[INFO] Running on GPU..."
     run_module "hip" "gpu.vmfb" "gpu_output.bin" "$input_args" "$do_bench"
 
     if [ "$has_compare_flags" = "true" ]; then
-        echo "[INFO] Running on GPU (with extra flags)..."
+        log_info "[INFO] Running on GPU (with extra flags)..."
         run_module "hip" "gpu_with_flags.vmfb" "gpu_with_flags_output.bin" "$input_args" "$do_bench"
     fi
 }
@@ -213,36 +247,36 @@ check_determinism() {
 
     [ "$num_runs" -le 1 ] && return 0
 
-    echo ""
-    echo "========================================================"
-    echo "[STEP] Non-Determinism Check (${num_runs} runs)"
-    echo "========================================================"
+    log_info ""
+    log_info "========================================================"
+    log_info "[STEP] Non-Determinism Check (${num_runs} runs)"
+    log_info "========================================================"
 
     cp "gpu_output.bin" "run1_output.bin"
 
     for i in $(seq 2 $num_runs); do
-        echo -n "  Run $i/$num_runs..."
+        log_info -n "  Run $i/$num_runs..."
         iree-run-module --device=hip --module="gpu.vmfb" ${input_args} \
             --output="@run${i}_output.bin" > /dev/null 2>&1
-        echo " done"
+        log_info " done"
     done
 
-    echo ""
+    log_info ""
     local failures=0
     for i in $(seq 2 $num_runs); do
-        echo -n "  Run $i vs Run 1: "
+        log_info -n "  Run $i vs Run 1: "
         if python "$TOOLS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/cmp_${i}.txt 2>&1; then
-            echo "✓ IDENTICAL"
+            log_info "✓ IDENTICAL"
         else
-            echo "✗ DIFFERENT"
+            log_always "✗ DIFFERENT"
             cat /tmp/cmp_${i}.txt
             ((failures++))
         fi
         rm -f /tmp/cmp_${i}.txt
     done
 
-    echo ""
-    [ $failures -eq 0 ] && echo "[RESULT] ✓ All ${num_runs} runs identical" || echo "[RESULT] ✗ Non-determinism: $failures/${num_runs} differ"
+    log_info ""
+    [ $failures -eq 0 ] && log_always "[RESULT] ✓ All ${num_runs} runs identical" || log_always "[RESULT] ✗ Non-determinism: $failures/${num_runs} differ"
 }
 
 # compare <do_cpu> <compare_flags> <dtype> <threshold>
@@ -254,10 +288,10 @@ compare() {
 
     [ "$do_cpu" != "true" ] && [ -z "$compare_flags" ] && return 0
 
-    echo ""
-    echo "========================================================"
-    echo "[STEP] Comparison"
-    echo "========================================================"
+    log_info ""
+    log_info "========================================================"
+    log_info "[STEP] Comparison"
+    log_info "========================================================"
 
     if [ "$do_cpu" = "true" ]; then
         compare_outputs "cpu_output.bin" "gpu_output.bin" "CPU" "GPU" "$dtype" "$threshold"
@@ -265,9 +299,11 @@ compare() {
 
     if [ -n "$compare_flags" ]; then
         compare_outputs "gpu_output.bin" "gpu_with_flags_output.bin" "GPU" "GPU+flags" "$dtype" "$threshold"
-        echo ""
-        echo "[INFO] Binary sizes:"
-        ls -lh gpu.vmfb gpu_with_flags.vmfb 2>/dev/null | awk '{print "  " $NF ": " $5}'
+        log_info ""
+        log_info "[INFO] Binary sizes:"
+        if [ "$QUIET" != "true" ]; then
+            ls -lh gpu.vmfb gpu_with_flags.vmfb 2>/dev/null | awk '{print "  " $NF ": " $5}'
+        fi
     fi
 }
 
@@ -302,6 +338,7 @@ main() {
             --compare-flags) compare_flags="$2"; shift ;;
             --threshold) threshold="$2"; shift ;;
             --target) target_chip="$2"; shift ;;
+            -q|--quiet) QUIET="true" ;;
             *) usage ;;
         esac
         shift
@@ -309,8 +346,8 @@ main() {
 
     # Validate
     [ -z "$input_mlir" ] || [ -z "$dtype" ] || [ "${#shapes[@]}" -eq 0 ] && usage
-    [ ! -f "$input_mlir" ] && { echo "[ERROR] File not found: $input_mlir"; exit 1; }
-    ! [[ "$num_runs" =~ ^[0-9]+$ ]] || [ "$num_runs" -lt 1 ] && { echo "[ERROR] --runs must be positive integer"; exit 1; }
+    [ ! -f "$input_mlir" ] && { log_always "[ERROR] File not found: $input_mlir"; exit 1; }
+    ! [[ "$num_runs" =~ ^[0-9]+$ ]] || [ "$num_runs" -lt 1 ] && { log_always "[ERROR] --runs must be positive integer"; exit 1; }
 
     # Generate inputs
     local input_args
