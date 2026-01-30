@@ -111,6 +111,9 @@ def main():
     result = compare_arrays(args.file1, args.file2, args.dtype, args.threshold)
     if result:
         print("All differences are within the threshold.")
+    else:
+        import sys
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
