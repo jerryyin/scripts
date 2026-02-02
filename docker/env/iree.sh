@@ -47,3 +47,4 @@ python -m pip config set global.break-system-packages true
 echo "Installing Python packages for IREE development..."
 python -m pip install pytest numpy pybind11 nanobind
 python -m pip install pandas matplotlib optuna
+python -m pip install pre-commit

@@ -38,3 +38,7 @@ if [ -f runtime/bindings/python/iree/runtime/build_requirements.txt ]; then
     echo "   Installing IREE Python build requirements..."
     python -m pip install -q -r runtime/bindings/python/iree/runtime/build_requirements.txt
 fi
+
+# Setup pre-commit hooks for automatic formatting checks on commit
+echo "   Installing pre-commit hooks..."
+pre-commit install
