@@ -13,10 +13,18 @@
 # Called by:
 #   - Docker: docker-compose.yml at container startup
 #   - Kubernetes: Can be called manually or from setup-pod.sh
+#
+# This script is idempotent - safe to run multiple times.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if initialization was already completed
+check_already_initialized() {
+    # SSH keys configured = already initialized
+    [ -f ~/.ssh/id_rsa ]
+}
 
 # Find the persistent storage root (same logic as credentials.sh)
 find_persistent_root() {
@@ -102,6 +110,13 @@ fix_hostname() {
 
 # Main
 main() {
+    # Early exit if already initialized (idempotent)
+    # Use --force to re-run initialization
+    if [ "${1:-}" != "--force" ] && check_already_initialized; then
+        echo "✓ Container already initialized (use 'priv.sh --force' to re-run)"
+        return 0
+    fi
+
     echo "════════════════════════════════════════════════════════════════"
     echo "  Container Initialization (priv.sh)"
     echo "════════════════════════════════════════════════════════════════"
