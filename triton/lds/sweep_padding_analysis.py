@@ -32,13 +32,21 @@ GFX1250_NUM_BANKS = 64
 GFX1250_BYTES_PER_BANK = 4
 
 DTYPES = {
-    # name: (element_bytes, element_bits, tr_inst_bits or None)
-    "f32":  (4, 32, None),     # No transposed load for f32
-    "fp16": (2, 16, 128),      # ds_load_tr16_b128
-    "bf16": (2, 16, 128),      # ds_load_tr16_b128
-    "fp8":  (1,  8,  64),      # ds_load_tr8_b64
-    "bf8":  (1,  8,  64),      # ds_load_tr8_b64
-    "i8":   (1,  8,  64),      # ds_load_tr8_b64
+    # One representative per bit-width. bf16 behaves identically to fp16,
+    # and bf8/i8 behave identically to fp8 -- same element size and same
+    # transposed instruction.
+    #
+    # name: (element_bytes, element_bits, tr_inst_bits, kDim, kBase)
+    #   kDim:  WMMA v3 instruction K dimension
+    #   kBase: elements per thread per instruction = (nonKDim * kDim) / warpSize
+    #          This is the hardware minimum each thread must hold for one invocation.
+    #
+    # From AccelerateAMDMatmul.cpp:
+    #   kWidth = 8           when kDimTensor >= kDim  (WMMA v3 always 8)
+    #   kWidth = kDimTensor/2 when kDimTensor < kDim   (small-K tile fallback)
+    "f32":  (4, 32, None,   4,  2),  # wmma_f32_16x16x4_f32    kBase=16*4/32=2
+    "fp16": (2, 16, 128,   32, 16),  # wmma_f32_16x16x32_f16   kBase=16*32/32=16
+    "fp8":  (1,  8,  64,   64, 32),  # wmma_f32_16x16x64_fp8   kBase=16*64/32=32
 }
 
 TILE_SHAPES = [
@@ -63,14 +71,47 @@ TILE_SHAPES = [
     (256, 128),
 ]
 
-KWIDTHS = [1, 2, 4, 8, 16]
-
 PADDING_SWEEP = [0, 1, 2, 4, 8, 16, 32]
 
 
 # ============================================================================
 # Helpers
 # ============================================================================
+
+def valid_kwidths(kDim, kBase):
+    """
+    Return the set of kWidth values that can actually occur for a WMMA v3
+    instruction with the given kDim and kBase.
+
+    From AccelerateAMDMatmul.cpp:
+        if kDimTensor < kDim:  kWidth = kDimTensor / 2
+        else:                  kWidth = 8   (always 8 for WMMA v3)
+
+    kDimTensor (the tile's K dimension) must be >= 2 (K=1 is rejected) and
+    is typically a power of 2.
+
+    kBase = (nonKDim * kDim) / warpSize = elements per thread per instruction.
+    This is the hardware-derived minimum: each thread must hold kBase elements
+    to feed one WMMA invocation.
+
+    For the small-K case (kDimTensor < kDim), kWidth = kDimTensor/2.
+    We only include kDimTensor values that make kWidth >= kBase, since
+    kWidth < kBase would mean a thread can't even fill one instruction.
+    The minimum sensible kDimTensor is therefore 2 * kBase.
+
+    Note: for WMMA v3 the normal kWidth=8 can be < kBase (e.g., fp16 has
+    kBase=16 but kWidth=8). This is valid because the register repeat
+    mechanism issues multiple loads to fill the instruction.
+    """
+    result = set()
+    result.add(8)  # normal case: kDimTensor >= kDim
+    # Small-K case: kDimTensor in [2*kBase, 4*kBase, ..., kDim/2]
+    # giving kWidth = kBase, 2*kBase, ...
+    kdt = 2 * kBase
+    while kdt < kDim:
+        result.add(kdt // 2)  # kWidth = kDimTensor / 2
+        kdt *= 2
+    return sorted(result)
 
 def get_max_conflict(row_width, pad, element_bytes, pattern):
     """Return max bank conflict for one (row_width, padding, pattern) config."""
@@ -106,10 +147,24 @@ def relevant_pads(current_pad):
     return sorted(set(p for p in PADDING_SWEEP if p <= max_useful))
 
 
+def conflict_marker(conflict):
+    """Return a visual quality marker for a conflict count."""
+    if conflict <= 1:
+        return "  "
+    if conflict <= 2:
+        return "  "
+    if conflict <= 4:
+        return " !"
+    return " X"
+
+
 def print_sweep_table(pattern, elem_bytes, pads, current_pad, proposed_pad,
                       tile_shapes, min_cols=1, indent=4):
     """
     Print a conflict table: rows = tile col widths, columns = padding values.
+
+    Each cell shows the max bank-conflict degree. The header shows padding
+    overhead (%) for a reference column width (the most common cols value).
 
     Args:
         pattern:      AccessPattern to analyze
@@ -122,27 +177,45 @@ def print_sweep_table(pattern, elem_bytes, pads, current_pad, proposed_pad,
         indent:       number of leading spaces
     """
     prefix = " " * indent
+    col_w = 9  # width per padding column
 
-    # Header
+    # Header line 1: pad values with tags
     hdr = f"{prefix}{'cols':>5s} |"
     for p in pads:
         tag = padding_tag(p, current_pad, proposed_pad)
-        hdr += f"  pad={p:<3d}{tag:4s}"
+        label = f"p={p}{tag}"
+        hdr += f" {label:>{col_w}s}"
     print(hdr)
-    print(f"{prefix}{'-----':>5s}-+" + "-" * (len(pads) * 13))
 
-    # Rows
+    # Header line 2: overhead % for the most common cols value
+    col_counts = {}
+    for _r, c in tile_shapes:
+        if c >= min_cols:
+            col_counts[c] = col_counts.get(c, 0) + 1
+    ref_cols = max(col_counts, key=col_counts.get) if col_counts else 128
+    oh_line = f"{prefix}{'oh%':>5s} |"
+    for p in pads:
+        if p > ref_cols:
+            oh_line += f" {'':>{col_w}s}"
+        else:
+            oh = overhead_pct(p, ref_cols)
+            oh_line += f" {oh:>{col_w - 1}.1f}%"
+    print(oh_line)
+    print(f"{prefix}{'-----':>5s}-+" + "-" * (len(pads) * (col_w + 1)))
+
+    # Data rows
     for _rows, cols in tile_shapes:
         if cols < min_cols:
             continue
         line = f"{prefix}{cols:5d} |"
         for p in pads:
             if p > cols:
-                line += f"  {'N/A':>10s}"
+                line += f" {'N/A':>{col_w}s}"
             else:
                 c = get_max_conflict(cols, p, elem_bytes, pattern)
-                oh = overhead_pct(p, cols)
-                line += f"  {c:2d}-way{oh:4.1f}%"
+                mk = conflict_marker(c)
+                cell = f"{c:2d}-way{mk}"
+                line += f" {cell:>{col_w}s}"
         print(line)
 
 
@@ -168,7 +241,7 @@ def sweep_transposed():
     print("#" * 100)
     print()
 
-    for dtype_name, (elem_bytes, elem_bits, tr_inst_bits) in DTYPES.items():
+    for dtype_name, (elem_bytes, elem_bits, tr_inst_bits, _kDim, _kBase) in DTYPES.items():
         if tr_inst_bits is None:
             print(f"  {dtype_name}: No transposed load instruction. Skipping.")
             print()
@@ -186,7 +259,7 @@ def sweep_transposed():
               f"proposed pad={proposed_pad}")
         print()
 
-        # ds_load_tr* operates on a full 16×16 sub-tile (32 lanes: two
+        # ds_load_tr* operates on a full 16x16 sub-tile (32 lanes: two
         # half-warps of 16 lanes each covering 8 columns). Tiles narrower
         # than 16 columns can't use the transposed instruction.
         print_sweep_table(pattern, elem_bytes, pads, current_pad, proposed_pad,
@@ -215,23 +288,22 @@ def sweep_non_transposed():
     print("#" * 100)
     print()
 
-    for dtype_name, (elem_bytes, elem_bits, _tr_inst_bits) in DTYPES.items():
+    for dtype_name, (elem_bytes, elem_bits, _tr_inst_bits, kDim, kBase) in DTYPES.items():
         current_pad = 128 // elem_bits
-        max_vec = current_pad
+        kwidths = valid_kwidths(kDim, kBase)
 
         print(f"  {dtype_name} ({elem_bits}-bit): non-transposed ds_load_b*")
-        print(f"    current pad={current_pad}")
+        print(f"    current pad={current_pad}, WMMA v3 kDim={kDim}, kBase={kBase}")
+        print(f"    valid kWidths: {kwidths}  (8=normal, others from small kDimTensor)")
         print()
 
-        for kw in KWIDTHS:
-            if kw > max_vec:
-                continue
-
-            proposed_pad = min(kw, max_vec)
+        for kw in kwidths:
+            proposed_pad = min(kw, 128 // elem_bits)
             pattern = wmma16_kcontig_pattern(kWidth=kw)
             pads = relevant_pads(current_pad)
 
-            print(f"    kWidth={kw}, proposed pad={proposed_pad}")
+            tag = " (normal)" if kw == 8 else f" (kDimTensor={kw*2})"
+            print(f"    kWidth={kw}{tag}, proposed pad={proposed_pad}")
 
             print_sweep_table(pattern, elem_bytes, pads, current_pad,
                               proposed_pad, TILE_SHAPES, min_cols=kw * 2,
@@ -262,7 +334,7 @@ def sweep_summary(ref_cols=128):
     print(f"  {'-'*14:<15s} {'-----':>5s} {'---':>3s} {'--------':>8s} {'---------':>9s} "
           f"{'---------':>9s} {'------------':>12s} {'------------':>12s}")
 
-    for dtype_name, (elem_bytes, elem_bits, tr_inst_bits) in DTYPES.items():
+    for dtype_name, (elem_bytes, elem_bits, tr_inst_bits, kDim, kBase) in DTYPES.items():
         current_pad = 128 // elem_bits
 
         # Transposed path
@@ -279,11 +351,8 @@ def sweep_summary(ref_cols=128):
                   f"{overhead_pct(proposed, ref_cols):10.1f}%")
 
         # Non-transposed path
-        for kw in KWIDTHS:
-            max_vec = 128 // elem_bits
-            if kw > max_vec:
-                continue
-            proposed = min(kw, max_vec)
+        for kw in valid_kwidths(kDim, kBase):
+            proposed = min(kw, 128 // elem_bits)
             pattern = wmma16_kcontig_pattern(kWidth=kw)
             cur_c = get_max_conflict(ref_cols, current_pad, elem_bytes, pattern)
             pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)

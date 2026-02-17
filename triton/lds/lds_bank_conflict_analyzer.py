@@ -42,6 +42,7 @@ Or import as module:
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 import argparse
+import sys
 
 
 @dataclass
@@ -540,73 +541,129 @@ def get_pattern(name: str, kwidth: int = 8) -> AccessPattern:
 # Main entry point
 # =============================================================================
 
+def _cap_tile_dims(tile_rows, tile_cols, row_width, pattern):
+    """Cap visualization tile dims to the actual LDS tile covered by the pattern."""
+    # Max rows = number of unique rows any lane touches
+    max_row = max(r for r, _c in pattern.lane_to_position) + 1
+    # Max cols = row_width (data columns, excluding padding)
+    tile_rows = min(tile_rows, max_row)
+    tile_cols = min(tile_cols, row_width)
+    return tile_rows, tile_cols
+
+
 def main():
-    pattern_list = "\n".join(f"    {name:25s} {desc}" for name, (_, desc) in PATTERN_REGISTRY.items())
+    pattern_list = "\n".join(
+        f"    {name:25s} {desc}"
+        for name, (_, desc) in PATTERN_REGISTRY.items()
+    )
 
     parser = argparse.ArgumentParser(
         description="Analyze LDS bank conflicts for AMD GPU shared memory access",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-Available patterns:
+Patterns:
 {pattern_list}
 
+Arguments explained:
+  --pattern       Which LDS access pattern to simulate. Transposed patterns
+                  (ds_load_tr*) model cooperative loads where 32 lanes read a
+                  16x16 element sub-tile. Non-transposed patterns (wmma16/mfma16)
+                  model standard vector loads where each lane reads kWidth
+                  consecutive elements from its own row.
+
+  --kwidth        Number of consecutive elements each lane reads in non-transposed
+                  patterns. Ignored for transposed patterns. Derives from the dot
+                  operand encoding's kWidth (typically 8 for WMMA v3).
+
+  --row-width     Number of data elements per LDS row (= contiguous/inner tile
+                  dimension). This is the tile's column count, NOT including
+                  padding. E.g. for a 16x128 tile with K=128 contiguous, use 128.
+
+  --padding       Padding elements appended after each row in LDS. This is what
+                  getPaddedEncoding() computes (e.g. padAmount=8 for fp16).
+                  Row stride in bytes = (row_width + padding) * element_bytes.
+
+  --element-bytes Bytes per element: 2 for fp16/bf16, 1 for fp8/bf8/i8, 4 for f32.
+
+  --tile-rows     Rows to show in the bank grid visualization (capped to pattern's
+  --tile-cols     actual tile size). Cols are capped to --row-width.
+
 Examples:
-  # Analyze ds_load_tr16_b128 with 8-element padding
-  python3 lds_bank_conflict_analyzer.py --padding 8
-  
-  # Analyze WMMA non-transposed with kWidth=4
-  python3 lds_bank_conflict_analyzer.py --pattern wmma16_kcontig --kwidth 4 --padding 4
-  
-  # Analyze MFMA non-transposed with kWidth=8
-  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig --padding 8
-  
-  # Compare multiple padding values
-  python3 lds_bank_conflict_analyzer.py --compare
+  # Transposed fp16 load, cols=128, pad=8 (typical flash attention)
+  python3 lds_bank_conflict_analyzer.py \\
+    --pattern ds_load_tr16_b128 --row-width 128 --padding 8
+
+  # Non-transposed WMMA fp16, kWidth=4, cols=64, pad=4
+  python3 lds_bank_conflict_analyzer.py \\
+    --pattern wmma16_kcontig --kwidth 4 --row-width 64 --padding 4
+
+  # Non-transposed MFMA fp8, kWidth=8, cols=128, pad=8
+  python3 lds_bank_conflict_analyzer.py \\
+    --pattern mfma16_kcontig --kwidth 8 --row-width 128 --padding 8 --element-bytes 1
+
+  # Quick one-line summary
+  python3 lds_bank_conflict_analyzer.py \\
+    --pattern wmma16_kcontig --kwidth 8 --row-width 128 --padding 8 --quiet
+
+  # Compare pad=0,8,16 side by side
+  python3 lds_bank_conflict_analyzer.py --row-width 128 --compare
         """
     )
-    
+
     parser.add_argument('--pattern', type=str, default='ds_load_tr16_b128',
                         choices=list(PATTERN_REGISTRY.keys()),
                         help='Access pattern to analyze (default: ds_load_tr16_b128)')
     parser.add_argument('--kwidth', type=int, default=8,
                         help='kWidth for non-transposed patterns (default: 8)')
     parser.add_argument('--row-width', type=int, default=128,
-                        help='Elements per row (default: 128)')
+                        help='Data elements per LDS row, excl. padding (default: 128)')
     parser.add_argument('--padding', type=int, default=0,
                         help='Padding elements after each row (default: 0)')
     parser.add_argument('--element-bytes', type=int, default=2,
-                        help='Bytes per element (default: 2 for fp16)')
-    parser.add_argument('--tile-rows', type=int, default=16,
-                        help='Tile rows to visualize (default: 16)')
-    parser.add_argument('--tile-cols', type=int, default=16,
-                        help='Tile columns to visualize (default: 16)')
+                        help='Bytes per element (2=fp16, 1=fp8, 4=f32; default: 2)')
+    parser.add_argument('--tile-rows', type=int, default=None,
+                        help='Rows in bank grid visualization (default: auto from pattern)')
+    parser.add_argument('--tile-cols', type=int, default=None,
+                        help='Cols in bank grid visualization (default: auto from row-width)')
     parser.add_argument('--compare', action='store_true',
                         help='Compare padding strategies (0, 8, 16)')
     parser.add_argument('--quiet', action='store_true',
-                        help='Only print summary')
-    
+                        help='Only print one-line summary')
+
+    # Print help if invoked with no arguments
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
-    
+
     pattern = get_pattern(args.pattern, args.kwidth)
-    
+
+    # Default tile dims from pattern; then cap to actual tile size
+    default_rows = max(r for r, _c in pattern.lane_to_position) + 1
+    default_cols = args.row_width
+    tile_rows = args.tile_rows if args.tile_rows is not None else default_rows
+    tile_cols = args.tile_cols if args.tile_cols is not None else default_cols
+    tile_rows, tile_cols = _cap_tile_dims(tile_rows, tile_cols, args.row_width, pattern)
+
     if args.compare:
         print("=" * 70)
         print("COMPARING PADDING STRATEGIES")
         print("=" * 70)
         print()
-        
+
         results = []
         for padding in [0, 8, 16]:
             config = create_config_with_padding(padding, args.row_width, args.element_bytes)
             max_conflict = analyze_bank_conflicts(
-                config, pattern, 
-                tile_rows=args.tile_rows,
-                tile_cols=args.tile_cols,
+                config, pattern,
+                tile_rows=tile_rows,
+                tile_cols=tile_cols,
                 verbose=not args.quiet
             )
             results.append((padding, config.row_stride_bytes, max_conflict))
             print()
-        
+
         print("=" * 70)
         print("COMPARISON SUMMARY")
         print("=" * 70)
@@ -620,8 +677,8 @@ Examples:
         config = create_config_with_padding(args.padding, args.row_width, args.element_bytes)
         max_conflict = analyze_bank_conflicts(
             config, pattern,
-            tile_rows=args.tile_rows,
-            tile_cols=args.tile_cols,
+            tile_rows=tile_rows,
+            tile_cols=tile_cols,
             verbose=not args.quiet
         )
         if args.quiet:
