@@ -424,6 +424,83 @@ def ds_load_tr16_b128_pattern() -> AccessPattern:
     )
 
 
+def mfma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
+    """
+    Access pattern for MFMA-16x16 dot operand with K-contiguous LDS layout.
+    Non-transposed ds_read_b128: each lane reads kWidth consecutive K elements.
+
+    The layout is symmetric for operand A and B -- the formula only depends
+    on nonKDim and warpSize, not opIdx. We name this by the instruction
+    geometry, not the operand index.
+
+    From mfmaDotToLinearLayout (LinearLayoutConversions.cpp):
+        regs  = identity1D(kWidth, register, K)
+        lanes = identity1D(nonKDim=16, lane, nonK) * identity1D(4, lane, K)
+
+    Lane mapping (6 bits -> 64 lanes):
+        - Bits 0-3 (lane & 0xF): nonK position (0-15)
+        - Bits 4-5 (lane >> 4):  K group (0-3), K_start = group * kWidth
+
+    Each lane reads kWidth elements starting at (nonK=lane&0xF, K=group*kWidth).
+
+    For K=16 tile with kWidth=8: only K-groups 0,1 are active (lanes 0-31).
+    For K=32 tile with kWidth=8: all 4 K-groups active (lanes 0-63).
+
+    LDS layout: row = nonK position, columns = K elements (K contiguous).
+    """
+    lane_to_position = []
+    for lane_id in range(64):
+        n = lane_id & 0xF
+        k_group = (lane_id >> 4) & 0x3
+        k_start = k_group * kWidth
+        lane_to_position.append((n, k_start))
+
+    return AccessPattern(
+        lanes_per_wave=64,
+        elements_per_load=kWidth,
+        lane_to_position=lane_to_position,
+        element_offsets=list(range(kWidth))
+    )
+
+
+def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
+    """
+    Access pattern for WMMA v3 16x16 dot operand with K-contiguous LDS layout.
+    Non-transposed ds_read_b128: each lane reads kWidth consecutive K elements.
+
+    The layout is symmetric for operand A and B -- the formula only depends
+    on nonKDim and warpSize, not opIdx. We name this by the instruction
+    geometry, not the operand index.
+
+    From wmmaDotOperandToLinearLayout (LinearLayoutConversions.cpp):
+        regs  = identity1D(kWidth, register, K)
+        lanes = identity1D(nonKDim=16, lane, nonK) * identity1D(depth=2, lane, K)
+
+    Lane mapping (5 bits -> 32 lanes):
+        - Bits 0-3 (lane & 0xF): nonK position (0-15)
+        - Bit 4    (lane >> 4):  K group (0-1), K_start = group * kWidth
+
+    Each lane reads kWidth elements starting at (nonK=lane&0xF, K=group*kWidth).
+
+    For K=16 with kWidth=8: both K-groups active (lanes 0-31), full coverage.
+
+    LDS layout: row = nonK position, columns = K elements (K contiguous).
+    """
+    lane_to_position = []
+    for lane_id in range(32):
+        n = lane_id & 0xF
+        k_group = (lane_id >> 4) & 0x1
+        k_start = k_group * kWidth
+        lane_to_position.append((n, k_start))
+
+    return AccessPattern(
+        lanes_per_wave=32,
+        elements_per_load=kWidth,
+        lane_to_position=lane_to_position,
+        element_offsets=list(range(kWidth))
+    )
+
+
 def create_config_with_padding(padding_elements: int, 
                                 row_width: int = 128,
                                 element_bytes: int = 2) -> LDSConfig:
@@ -436,26 +513,63 @@ def create_config_with_padding(padding_elements: int,
 
 
 # =============================================================================
+# Pattern registry (maps CLI name -> factory function)
+# =============================================================================
+
+PATTERN_REGISTRY = {
+    "ds_load_tr16_b128": (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
+    "mfma16_kcontig":    (lambda kw=8: mfma16_kcontig_pattern(kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
+    "wmma16_kcontig":    (lambda kw=8: wmma16_kcontig_pattern(kWidth=kw), "WMMA-16x16 non-transposed, 32 lanes (gfx1250)"),
+}
+
+
+def get_pattern(name: str, kwidth: int = 8) -> AccessPattern:
+    """Look up a pattern by name from the registry."""
+    if name not in PATTERN_REGISTRY:
+        available = ", ".join(PATTERN_REGISTRY.keys())
+        raise ValueError(f"Unknown pattern '{name}'. Available: {available}")
+    factory, _ = PATTERN_REGISTRY[name]
+    import inspect
+    sig = inspect.signature(factory)
+    if sig.parameters:
+        return factory(kwidth)
+    return factory()
+
+
+# =============================================================================
 # Main entry point
 # =============================================================================
 
 def main():
+    pattern_list = "\n".join(f"    {name:25s} {desc}" for name, (_, desc) in PATTERN_REGISTRY.items())
+
     parser = argparse.ArgumentParser(
         description="Analyze LDS bank conflicts for AMD GPU shared memory access",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
+Available patterns:
+{pattern_list}
+
 Examples:
   # Analyze ds_load_tr16_b128 with 8-element padding
   python3 lds_bank_conflict_analyzer.py --padding 8
   
-  # Analyze with custom row width
-  python3 lds_bank_conflict_analyzer.py --row-width 64 --padding 8
+  # Analyze WMMA non-transposed with kWidth=4
+  python3 lds_bank_conflict_analyzer.py --pattern wmma16_kcontig --kwidth 4 --padding 4
+  
+  # Analyze MFMA non-transposed with kWidth=8
+  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig --padding 8
   
   # Compare multiple padding values
   python3 lds_bank_conflict_analyzer.py --compare
         """
     )
     
+    parser.add_argument('--pattern', type=str, default='ds_load_tr16_b128',
+                        choices=list(PATTERN_REGISTRY.keys()),
+                        help='Access pattern to analyze (default: ds_load_tr16_b128)')
+    parser.add_argument('--kwidth', type=int, default=8,
+                        help='kWidth for non-transposed patterns (default: 8)')
     parser.add_argument('--row-width', type=int, default=128,
                         help='Elements per row (default: 128)')
     parser.add_argument('--padding', type=int, default=0,
@@ -473,8 +587,7 @@ Examples:
     
     args = parser.parse_args()
     
-    # Use ds_load_tr16_b128 pattern as default
-    pattern = ds_load_tr16_b128_pattern()
+    pattern = get_pattern(args.pattern, args.kwidth)
     
     if args.compare:
         print("=" * 70)
