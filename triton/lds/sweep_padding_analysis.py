@@ -16,6 +16,7 @@ from lds_bank_conflict_analyzer import (
     analyze_bank_conflicts,
     ds_load_tr16_b128_pattern,
     wmma16_kcontig_pattern,
+    wmma16_transposed_scalar_pattern,
 )
 
 
@@ -211,59 +212,142 @@ def sweep_non_transposed():
 
     for dtype_name, (elem_bytes, elem_bits, _tr_inst_bits) in DTYPES.items():
         kw = WMMA_V3_KWIDTH
-        proposed_pad = min(kw, 128 // elem_bits)
-        pattern = wmma16_kcontig_pattern(kWidth=kw)
+        effective_kw = min(kw, 128 // elem_bits)
+        pattern = wmma16_kcontig_pattern(kWidth=effective_kw)
         pads = PADDING_SWEEP
 
         print(f"  {dtype_name} ({elem_bits}-bit): non-transposed ds_load_b*")
-        print(f"    kWidth={kw}, effective load width={proposed_pad}, "
-              f"proposed pad={proposed_pad}")
+        print(f"    kWidth={kw}, effective load width={effective_kw}, "
+              f"proposed pad={effective_kw}")
         print()
 
-        print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
-                          COL_WIDTHS, min_cols=kw * 2, indent=4)
+        print_sweep_table(pattern, elem_bytes, pads, effective_kw,
+                          COL_WIDTHS, min_cols=effective_kw * 2, indent=4)
         print()
 
 
 # ============================================================================
-# Part 3: Summary
+# Part 3: Transposed scalar fallback (f32)
+# ============================================================================
+
+def sweep_transposed_scalar():
+    """
+    Sweep the transposed scalar fallback path.
+
+    Used when loadTransposed=True but TransLocalLoadOpConversion fails.
+    This happens when:
+      - f32: no ds_load_tr32 instruction exists (bitWidth check fails)
+      - fp16/fp8: layout doesn't match transposed instruction requirements
+        (e.g. minInterval < tileSize, divideLeft fails, tile too narrow)
+
+    In all cases, the generic LocalLoadOpConversion is used.
+    largestVectorisation finds vec=1 for the strided K dimension,
+    emitting scalar ds_load_b{elemBits} per element per lane.
+
+    Access pattern (from wmmaDotOperandToLinearLayout):
+        - 32 lanes, depth=2, kWidth=8
+        - Lanes 0-15:  K_row = 0,       col = lane
+        - Lanes 16-31: K_row = kWidth,   col = lane - 16
+        - Each lane issues kWidth scalar loads (one per K element)
+
+    Sub-dword note: for fp16 (2B) and fp8 (1B), multiple elements share
+    a 4-byte LDS dword.  Accesses to the same dword are broadcasts, not
+    conflicts.  The analyzer accounts for this.
+    """
+    print()
+    print("#" * 80)
+    print("# PART 3: TRANSPOSED SCALAR FALLBACK")
+    print("#")
+    print("# Used when loadTransposed=True but TransLocalLoadOpConversion fails:")
+    print("#   f32:  always (no ds_load_tr32 instruction)")
+    print("#   fp16: layout mismatch (minInterval < tileSize, divideLeft, ...)")
+    print("#   fp8:  layout mismatch (same conditions as fp16)")
+    print("#")
+    print("# Falls back to scalar ds_load_b{elemBits}, vec=1.")
+    print("# kWidth=8 scalar loads per thread per tile.")
+    print("#")
+    print("# Sub-dword elements (fp16/fp8): same-dword accesses are LDS")
+    print("# broadcasts, not conflicts.  The analyzer accounts for this.")
+    print("#" * 80)
+    print()
+
+    for dtype_name, (elem_bytes, elem_bits, tr_inst_bits) in DTYPES.items():
+        kw = WMMA_V3_KWIDTH
+        # The padding is set by getPaddedEncodingForDotOp BEFORE the
+        # TransLocalLoadOpConversion runs.  For types with a transposed
+        # instruction, pad = instBitWidth/elemBits.  For f32 (no
+        # transposed instruction), pad = 128/elemBits (fallback).
+        # The scalar fallback reuses whichever padding was already set.
+        if tr_inst_bits is not None:
+            proposed_pad = tr_inst_bits // elem_bits
+        else:
+            proposed_pad = 128 // elem_bits
+
+        pattern = wmma16_transposed_scalar_pattern(kWidth=kw)
+        pads = PADDING_SWEEP
+
+        print(f"  {dtype_name} ({elem_bits}-bit): transposed scalar ds_load_b{elem_bits}")
+        print(f"    kWidth={kw}, 1 elem/load, {kw} loads/thread, proposed pad={proposed_pad}")
+        print(f"    cols = nonK tile dimension (M for opA, N for opB)")
+        if elem_bytes < 4:
+            elems_per_dword = 4 // elem_bytes
+            print(f"    ({elems_per_dword} elems/dword → same-dword = broadcast)")
+        print()
+
+        print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
+                          COL_WIDTHS, min_cols=16, indent=4)
+        print()
+
+
+# ============================================================================
+# Part 4: Summary
 # ============================================================================
 
 def sweep_summary(ref_cols=128):
     """
-    Print a compact summary of proposed padding for both paths.
+    Print a compact summary of proposed padding for all paths.
     """
     print()
     print("#" * 80)
-    print("# PART 3: PROPOSAL SUMMARY (ref cols=128)")
+    print("# PART 4: PROPOSAL SUMMARY (ref cols=128)")
     print("#")
-    print("# Transposed:     padAmount = instBitWidth / elemBits")
-    print("# Non-transposed: padAmount = min(kWidth, 128 / elemBits)")
+    print("# Transposed (tr*):  padAmount = instBitWidth / elemBits")
+    print("# Transposed scalar: padAmount = 128 / elemBits (fallback)")
+    print("# Non-transposed:    padAmount = min(kWidth, 128 / elemBits)")
     print("#" * 80)
     print()
 
-    print(f"  {'Path':<15s} {'dtype':>5s} {'proposed':>9s} "
+    print(f"  {'Path':<18s} {'dtype':>5s} {'proposed':>9s} "
           f"{'conflict':>9s} {'overhead':>9s}")
-    print(f"  {'-'*14:<15s} {'-----':>5s} {'---------':>9s} "
+    print(f"  {'-'*17:<18s} {'-----':>5s} {'---------':>9s} "
           f"{'---------':>9s} {'---------':>9s}")
 
     for dtype_name, (elem_bytes, elem_bits, tr_inst_bits) in DTYPES.items():
-        # Transposed path
+        # Transposed path (ds_load_tr*)
         if tr_inst_bits is not None:
             tr_elems = tr_inst_bits // elem_bits
             proposed = tr_elems
             pattern = ds_load_tr16_b128_pattern()
             pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
-            print(f"  {'transposed':<15s} {dtype_name:>5s} {proposed:9d} "
+            print(f"  {'transposed':<18s} {dtype_name:>5s} {proposed:9d} "
                   f"{pro_c:2d}-way    "
                   f"{overhead_pct(proposed, ref_cols):7.1f}%")
+
+        # Transposed scalar fallback (all dtypes)
+        kw = WMMA_V3_KWIDTH
+        proposed = tr_inst_bits // elem_bits if tr_inst_bits is not None else 128 // elem_bits
+        pattern = wmma16_transposed_scalar_pattern(kWidth=kw)
+        pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
+        print(f"  {'tr-scalar':<18s} {dtype_name:>5s} {proposed:9d} "
+              f"{pro_c:2d}-way    "
+              f"{overhead_pct(proposed, ref_cols):7.1f}%")
 
         # Non-transposed path
         kw = WMMA_V3_KWIDTH
         proposed = min(kw, 128 // elem_bits)
-        pattern = wmma16_kcontig_pattern(kWidth=kw)
+        pattern = wmma16_kcontig_pattern(kWidth=proposed)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
-        print(f"  {'non-transposed':<15s} {dtype_name:>5s} {proposed:9d} "
+        print(f"  {'non-transposed':<18s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "
               f"{overhead_pct(proposed, ref_cols):7.1f}%")
         print()
@@ -282,6 +366,7 @@ def main():
 
     sweep_transposed()
     sweep_non_transposed()
+    sweep_transposed_scalar()
     sweep_summary()
 
 
