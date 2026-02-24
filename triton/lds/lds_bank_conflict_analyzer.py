@@ -234,76 +234,172 @@ def compute_lane_accesses(config: LDSConfig,
     return accesses
 
 
-def find_bank_conflicts(accesses: List[Dict]) -> Tuple[Dict[int, List[int]], int]:
+def find_bank_conflicts(accesses: List[Dict],
+                        bytes_per_bank: int = 4,
+                        num_banks: int = 64) -> Tuple[Dict[int, List[int]], int]:
     """
     Find bank conflicts from lane accesses.
-    
+
+    On AMD LDS, two accesses to the *same* dword (aligned 4-byte word) in the
+    same bank are served as a broadcast -- NOT a conflict.  Only accesses to
+    *different* dwords that map to the same bank produce a conflict.
+
+    For dword-sized or larger elements (f32, vector loads) this distinction
+    doesn't matter: each element occupies its own dword.  For sub-dword
+    elements (fp16 = 2B, fp8 = 1B) multiple elements share a dword, and
+    naive per-bank lane counting overcounts conflicts.
+
     Args:
         accesses: List of lane access info from compute_lane_accesses()
-    
+        bytes_per_bank: Bank granularity in bytes (4 for AMD LDS)
+        num_banks: Number of LDS banks
+
     Returns:
         Tuple of (bank_to_lanes dict, max_conflict_count)
+        bank_to_lanes maps bank -> deduplicated list of lanes that cause a
+        true conflict (one representative per distinct dword).
+        max_conflict_count is the true conflict degree (distinct dwords
+        per bank).
     """
-    bank_to_lanes = {}
-    
+    # bank -> { dword_addr: first_lane_that_accessed_it }
+    bank_to_dword_lane: Dict[int, Dict[int, int]] = {}
+
     for access in accesses:
-        for bank in access['banks']:
-            if bank not in bank_to_lanes:
-                bank_to_lanes[bank] = []
-            bank_to_lanes[bank].append(access['lane'])
-    
+        for byte_addr in access['element_addrs']:
+            dword_addr = byte_addr // bytes_per_bank
+            bank = dword_addr % num_banks
+
+            if bank not in bank_to_dword_lane:
+                bank_to_dword_lane[bank] = {}
+            if dword_addr not in bank_to_dword_lane[bank]:
+                bank_to_dword_lane[bank][dword_addr] = access['lane']
+
+    # Build bank_to_lanes with one representative lane per distinct dword
+    bank_to_lanes: Dict[int, List[int]] = {}
+    for bank, dword_map in bank_to_dword_lane.items():
+        bank_to_lanes[bank] = list(dword_map.values())
+
     max_conflict = max(len(lanes) for lanes in bank_to_lanes.values()) if bank_to_lanes else 0
-    
+
     return bank_to_lanes, max_conflict
 
 
 def generate_bank_grid(config: LDSConfig, 
                        tile_rows: int, 
-                       tile_cols: int) -> List[List[int]]:
+                       tile_cols: int) -> List[List[Tuple[int, bool]]]:
     """
-    Generate a grid showing which bank each element belongs to.
+    Generate a grid showing which bank each element belongs to,
+    including padding columns.
     
     Args:
         config: LDS configuration
         tile_rows: Number of rows in the tile
-        tile_cols: Number of columns in the tile
+        tile_cols: Number of DATA columns in the tile
     
     Returns:
-        2D list of bank indices [row][col]
+        2D list of (bank_index, is_padding) tuples [row][col]
+        where col covers data columns + padding columns.
     """
+    total_cols = tile_cols + config.padding_elements
     grid = []
     for row in range(tile_rows):
         row_banks = []
-        for col in range(tile_cols):
+        for col in range(total_cols):
             byte_addr = row * config.row_stride_bytes + col * config.element_bytes
             bank = (byte_addr // config.bytes_per_bank) % config.num_banks
-            row_banks.append(bank)
+            is_pad = col >= tile_cols
+            row_banks.append((bank, is_pad))
         grid.append(row_banks)
     return grid
 
 
-def print_bank_grid(grid: List[List[int]], max_cols: int = 16):
-    """Print bank grid in readable format."""
+def _compute_covered_cells(pattern: 'AccessPattern') -> set:
+    """Return the set of (row, col) cells touched by the pattern's lanes."""
+    covered = set()
+    for row, col_start in pattern.lane_to_position:
+        for off in pattern.element_offsets:
+            covered.add((row, col_start + off))
+    return covered
+
+
+def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
+                    pattern: Optional['AccessPattern'] = None):
+    """
+    Print bank grid with three visual zones:
+
+    1. **Covered** by the current access pattern → bank number shown normally
+    2. **Data but not covered** (rest of the LDS row) → bank shown dimmed as ·XX
+    3. **Padding** columns → bank shown in parentheses (XX)
+
+    When pattern is None, all data cells are shown normally (no coverage
+    highlighting).
+    """
     num_rows = len(grid)
     num_cols = len(grid[0]) if grid else 0
-    
-    # Header
+    show_cols = min(num_cols, max_cols)
+
+    covered = _compute_covered_cells(pattern) if pattern else None
+
+    cw = 4  # column width for all cells
+
+    # Determine the column boundary of the accessed region
+    cov_max_col = -1
+    if covered is not None:
+        cov_max_col = max(c for _, c in covered)
+
+    data_cols = sum(1 for bank, is_pad in grid[0] if not is_pad) if grid else 0
+
+    # Header: column indices
     print("     ", end="")
-    for col in range(min(num_cols, max_cols)):
-        print(f"{col:3d}", end="")
+    for col in range(show_cols):
+        print(f"{col:>{cw}d}", end="")
     if num_cols > max_cols:
-        print(" ...", end="")
-    print("   ← column")
-    print("     " + "─" * (min(num_cols, max_cols) * 3 + 4))
-    
-    # Grid
+        print("  ..", end="")
+    print("   ← col")
+
+    # Separator line with border markers
+    sep = ""
+    for col in range(show_cols):
+        if col == data_cols:
+            sep += "╫" + "─" * (cw - 1)
+        elif covered is not None and col == cov_max_col + 1 and col < data_cols:
+            sep += "┼" + "─" * (cw - 1)
+        else:
+            sep += "─" * cw
+    print("     " + sep)
+
+    # Grid rows
     for row in range(num_rows):
         print(f"r{row:2d} │", end="")
-        for col in range(min(num_cols, max_cols)):
-            print(f"{grid[row][col]:3d}", end="")
+        for col in range(show_cols):
+            bank, is_pad = grid[row][col]
+            if col == data_cols:
+                print(f"║{bank:3d}", end="")
+            elif covered is not None and col == cov_max_col + 1 and col < data_cols:
+                print(f"|{bank:3d}", end="")
+            else:
+                print(f"{bank:>{cw}d}", end="")
         if num_cols > max_cols:
-            print(" ...", end="")
+            print("  ..", end="")
         print()
+
+    # Legend
+    legend_parts = []
+    if covered is not None:
+        # Compute covered bounding box for the legend
+        cov_rows = sorted(set(r for r, _ in covered))
+        cov_cols = sorted(set(c for _, c in covered))
+        legend_parts.append(
+            f"   XX = accessed by current pattern "
+            f"(rows {cov_rows[0]}-{cov_rows[-1]}, cols {cov_cols[0]}-{cov_cols[-1]})"
+        )
+        legend_parts.append("     | = boundary of accessed region")
+    if grid and any(is_pad for _, is_pad in grid[0]):
+        legend_parts.append("     ║ = boundary of data / padding")
+    if legend_parts:
+        print()
+        for line in legend_parts:
+            print(line)
 
 
 def print_lane_accesses(accesses: List[Dict]):
@@ -364,14 +460,16 @@ def analyze_bank_conflicts(config: LDSConfig,
         print(f"  Load size: {pattern.elements_per_load * config.element_bytes} bytes")
         print()
     
-    # Generate bank grid
+    # Generate bank grid (data cols + padding cols)
     if verbose:
+        pad_label = f" + {config.padding_elements} pad" if config.padding_elements else ""
         print("=" * 70)
-        print(f"BANK MAPPING ({tile_rows}×{tile_cols} tile)")
+        print(f"BANK MAPPING ({tile_rows}×{tile_cols}{pad_label} tile)")
         print("=" * 70)
         print()
         grid = generate_bank_grid(config, tile_rows, tile_cols)
-        print_bank_grid(grid, max_cols=tile_cols)
+        print_bank_grid(grid, max_cols=tile_cols + config.padding_elements,
+                        pattern=pattern)
         print()
     
     # Compute lane accesses
@@ -385,8 +483,9 @@ def analyze_bank_conflicts(config: LDSConfig,
         print_lane_accesses(accesses)
         print()
     
-    # Find conflicts
-    bank_to_lanes, max_conflict = find_bank_conflicts(accesses)
+    # Find conflicts (pass bank geometry for sub-dword broadcast detection)
+    bank_to_lanes, max_conflict = find_bank_conflicts(
+        accesses, bytes_per_bank=config.bytes_per_bank, num_banks=config.num_banks)
     
     if verbose:
         print("=" * 70)
@@ -502,6 +601,51 @@ def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
     )
 
 
+def wmma16_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
+    """
+    Access pattern for WMMA v3 16x16 dot operand with TRANSPOSED LDS layout.
+
+    When K is the slow-varying dimension in LDS (loadTransposed=True) and
+    there is no ds_load_tr* instruction for this element width (e.g. f32),
+    the compiler falls back to scalar ds_load_b32 loads -- one element per
+    lane per load cycle.
+
+    Each thread needs kWidth K elements, issued as kWidth separate scalar
+    loads.  For a single scalar load (register index r), all 32 lanes fire
+    simultaneously.  Since the conflict structure is identical for every r
+    (only the absolute row shifts, not the stride), we model r=0 as
+    representative.
+
+    From wmmaDotOperandToLinearLayout (LinearLayoutConversions.cpp):
+        regs  = identity1D(kWidth, register, K)
+        lanes = identity1D(nonKDim=16, lane, nonK) * identity1D(depth=2, lane, K)
+
+    Lane mapping (5 bits -> 32 lanes):
+        - Bits 0-3 (lane & 0xF): nonK position (0-15)  -> LDS column
+        - Bit 4    (lane >> 4):   K group (0-1)         -> LDS row offset
+
+    LDS layout (transposed): nonK is contiguous (columns), K is strided (rows).
+    For register r=0:
+        - Lanes 0-15:  row = 0,       col = lane
+        - Lanes 16-31: row = kWidth,  col = lane - 16
+
+    Bank conflict occurs when kWidth * row_stride % num_banks == 0.
+    """
+    positions = []
+    for lane_id in range(32):
+        nonk = lane_id & 0xF
+        k_group = (lane_id >> 4) & 0x1
+        row = k_group * kWidth
+        positions.append((row, nonk))
+
+    return AccessPattern(
+        lanes_per_wave=32,
+        elements_per_load=1,
+        lane_to_position=positions,
+        element_offsets=[0],
+    )
+
+
 def create_config_with_padding(padding_elements: int, 
                                 row_width: int = 128,
                                 element_bytes: int = 2) -> LDSConfig:
@@ -518,9 +662,10 @@ def create_config_with_padding(padding_elements: int,
 # =============================================================================
 
 PATTERN_REGISTRY = {
-    "ds_load_tr16_b128": (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
-    "mfma16_kcontig":    (lambda kw=8: mfma16_kcontig_pattern(kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
-    "wmma16_kcontig":    (lambda kw=8: wmma16_kcontig_pattern(kWidth=kw), "WMMA-16x16 non-transposed, 32 lanes (gfx1250)"),
+    "ds_load_tr16_b128":       (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
+    "mfma16_kcontig":          (lambda kw=8: mfma16_kcontig_pattern(kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
+    "wmma16_kcontig":          (lambda kw=8: wmma16_kcontig_pattern(kWidth=kw), "WMMA-16x16 non-transposed, 32 lanes (gfx1250)"),
+    "wmma16_transposed_scalar": (lambda kw=8: wmma16_transposed_scalar_pattern(kWidth=kw), "WMMA-16x16 transposed scalar, 32 lanes (f32 fallback)"),
 }
 
 
