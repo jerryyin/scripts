@@ -26,6 +26,29 @@ CONCEPTS
    - 8 lanes cooperate for transposed load
    - Accesses 4 consecutive banks per lane
 
+4. Storage Layouts (conflict avoidance strategies):
+
+   a) NONE:    byte_addr = row * stride + col * elem_bytes
+               No conflict avoidance.  Baseline for comparison.
+
+   b) PADDING: byte_addr = row * (row_width + pad) * elem_bytes + col * elem_bytes
+               Extra elements widen each row to shift bank alignment.
+               Wastes LDS space proportional to (pad / row_width).
+
+   c) SWIZZLE: XOR-based column remapping (zero wasted LDS space).
+               Parameterised by (vec, perPhase, maxPhase) matching Triton's
+               #ttg.swizzled_shared<{vec, perPhase, maxPhase}> encoding.
+
+               phase = (row // perPhase) % maxPhase
+               vec_col = col // vec
+               swizzled_vec_col = vec_col ^ phase
+               swizzled_col = swizzled_vec_col * vec + (col % vec)
+               byte_addr = row * stride + swizzled_col * elem_bytes
+
+               Different rows XOR their vector-group column index with a
+               different phase, rotating which banks each row hits so that
+               simultaneously-accessed rows land on distinct banks.
+
 =============================================================================
 USAGE
 =============================================================================
@@ -39,34 +62,202 @@ Or import as module:
 =============================================================================
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import List, Tuple, Dict, Optional
 import argparse
 import sys
+
+
+class SwizzleMode(Enum):
+    """LDS storage layout strategy for bank conflict avoidance."""
+    NONE = "none"
+    PADDING = "padding"
+    SWIZZLE = "swizzle"
 
 
 @dataclass
 class LDSConfig:
     """
     Configuration for LDS memory layout.
-    
-    Attributes:
-        num_banks: Number of LDS banks (64 for gfx1250)
-        bytes_per_bank: Bytes per bank (4 for AMD GPUs)
-        row_width_elements: Number of data elements per row (before padding)
-        padding_elements: Number of padding elements after each row
-        element_bytes: Bytes per element (2 for fp16, 4 for fp32)
+
+    Supports three storage strategies controlled by ``mode``:
+
+    - **NONE**: Logical (row, col) maps linearly to byte address.
+    - **PADDING**: Extra elements appended after each row widen the stride.
+    - **SWIZZLE**: XOR-based column remapping (zero wasted space).
+
+    Swizzle parameters (``vec``, ``per_phase``, ``max_phase``) correspond
+    directly to Triton's ``#ttg.swizzled_shared<{vec, perPhase, maxPhase}>``
+    encoding and can be supplied manually or derived automatically via
+    ``from_shared_encoding()`` / ``auto_swizzle()``.
+
+    The canonical address formula (matching Triton's LinearLayoutConversions.cpp)
+    uses vector-group indices.  Let ``num_vec_k = row_width / vec`` be the number
+    of vec-groups per tensor row.
+
+    When the tensor row is narrower than one bank row (``per_phase > 1``),
+    ``per_phase`` consecutive tensor rows are packed side-by-side into each
+    physical LDS row.  The packed vec-group index and the physical LDS row
+    are::
+
+        packed_vec = vec_col + (row % per_phase) * num_vec_k
+        lds_row    = row // per_phase
+
+    The phase and XOR then operate on the packed coordinate::
+
+        phase = (row // per_phase) % max_phase
+        swizzled_vec = packed_vec ^ phase
+        swizzled_col = swizzled_vec * vec + (col % vec)
+        lds_stride   = per_phase * row_width * element_bytes
+        byte_addr    = lds_row * lds_stride + swizzled_col * element_bytes
+
+    When ``per_phase == 1`` (the common case for K >= 64 with fp16) this
+    reduces to the simpler per-row XOR formula.  When ``mode != SWIZZLE``
+    the phase is effectively 0 (identity XOR).
     """
     num_banks: int = 64
     bytes_per_bank: int = 4
     row_width_elements: int = 128
     padding_elements: int = 0
     element_bytes: int = 2
-    
+
+    mode: SwizzleMode = SwizzleMode.NONE
+
+    # Swizzle parameters (only used when mode == SWIZZLE)
+    vec: int = 1
+    per_phase: int = 1
+    max_phase: int = 1
+
     @property
     def row_stride_bytes(self) -> int:
         """Total bytes per row including padding."""
         return (self.row_width_elements + self.padding_elements) * self.element_bytes
+
+    def logical_to_byte_addr(self, row: int, col: int) -> int:
+        """
+        Map a logical (row, col) tensor position to a physical LDS byte address.
+
+        Handles all three modes transparently so callers never need to know
+        which conflict-avoidance strategy is active.
+        """
+        if self.mode == SwizzleMode.SWIZZLE:
+            num_vec_k = self.row_width_elements // self.vec
+            vec_col = col // self.vec
+
+            # Pack per_phase tensor rows into one physical LDS row
+            packed_vec = vec_col + (row % self.per_phase) * num_vec_k
+            lds_row = row // self.per_phase
+
+            phase = (row // self.per_phase) % self.max_phase
+            swizzled_vec = packed_vec ^ phase
+            swizzled_col = swizzled_vec * self.vec + (col % self.vec)
+
+            lds_stride = self.per_phase * self.row_width_elements * self.element_bytes
+            return lds_row * lds_stride + swizzled_col * self.element_bytes
+
+        # NONE and PADDING both use the same linear formula;
+        # PADDING simply has a wider row_stride_bytes.
+        return row * self.row_stride_bytes + col * self.element_bytes
+
+    def describe(self) -> str:
+        """One-line human-readable description of the storage layout."""
+        if self.mode == SwizzleMode.SWIZZLE:
+            return (f"swizzle(vec={self.vec}, perPhase={self.per_phase}, "
+                    f"maxPhase={self.max_phase})")
+        if self.mode == SwizzleMode.PADDING:
+            return f"padding({self.padding_elements} elems, {self.padding_elements * self.element_bytes}B)"
+        return "none"
+
+    # -----------------------------------------------------------------
+    # Factory helpers
+    # -----------------------------------------------------------------
+
+    @classmethod
+    def with_padding(cls, padding_elements: int,
+                     row_width: int = 128,
+                     element_bytes: int = 2,
+                     num_banks: int = 64) -> 'LDSConfig':
+        """Create an LDSConfig with row-padding conflict avoidance."""
+        return cls(
+            row_width_elements=row_width,
+            padding_elements=padding_elements,
+            element_bytes=element_bytes,
+            num_banks=num_banks,
+            mode=SwizzleMode.PADDING if padding_elements > 0 else SwizzleMode.NONE,
+        )
+
+    @classmethod
+    def with_swizzle(cls, vec: int, per_phase: int, max_phase: int,
+                     row_width: int = 128,
+                     element_bytes: int = 2,
+                     num_banks: int = 64) -> 'LDSConfig':
+        """Create an LDSConfig with explicit swizzle parameters.
+
+        Parameters match ``#ttg.swizzled_shared<{vec, perPhase, maxPhase}>``.
+        """
+        return cls(
+            row_width_elements=row_width,
+            element_bytes=element_bytes,
+            num_banks=num_banks,
+            mode=SwizzleMode.SWIZZLE,
+            vec=vec,
+            per_phase=per_phase,
+            max_phase=max_phase,
+        )
+
+    @classmethod
+    def from_shared_encoding(cls, vec: int, per_phase: int, max_phase: int,
+                             row_width: int = 128,
+                             element_bytes: int = 2,
+                             num_banks: int = 64) -> 'LDSConfig':
+        """Alias for ``with_swizzle`` using Triton shared-encoding names."""
+        return cls.with_swizzle(vec, per_phase, max_phase,
+                                row_width, element_bytes, num_banks)
+
+    @classmethod
+    def auto_swizzle(cls, row_width: int, element_bytes: int = 2,
+                     k_width: int = 8, num_banks: int = 32,
+                     bank_bit_width: int = 32,
+                     non_k_dim: int = 16,
+                     arch: str = "wmma") -> 'LDSConfig':
+        """Derive swizzle parameters the same way the Triton compiler does.
+
+        This mirrors ``AMDWmmaEncodingAttr::composeSharedLayoutForOperand``
+        (for arch="wmma") and ``AMDMfmaEncodingAttr::composeSharedLayoutForOperand``
+        (for arch="mfma").
+
+        Args:
+            row_width:      Inner-dimension length (K for K-contiguous layout).
+            element_bytes:  Bytes per element.
+            k_width:        Dot operand kWidth (vec group size).
+            num_banks:      LDS bank count (32 for RDNA, 64 for CDNA3+).
+            bank_bit_width: Bits per bank word (32).
+            non_k_dim:      M/N dimension of the matrix instruction (16 typical).
+            arch:           "wmma" or "mfma" — selects the derivation formula.
+        """
+        elem_bit_width = element_bytes * 8
+
+        # vec = min(kWidth * elemBits, 128) / elemBits  (in elements)
+        vec = min(k_width * elem_bit_width, 128) // elem_bit_width
+
+        inner_dim_length = row_width
+        elems_per_bank_row = (num_banks * bank_bit_width) // elem_bit_width
+
+        per_phase = max(1, elems_per_bank_row // inner_dim_length)
+
+        if arch == "mfma":
+            simd_width = 16
+            max_phase = max(min(simd_width // per_phase,
+                                inner_dim_length // vec), 1)
+        else:
+            # WMMA formula
+            m_dim = non_k_dim
+            max_phase = max(min(m_dim // per_phase,
+                                inner_dim_length // vec), 1)
+
+        return cls.with_swizzle(vec, per_phase, max_phase,
+                                row_width, element_bytes, num_banks)
 
 
 @dataclass 
@@ -194,7 +385,9 @@ def compute_lane_accesses(config: LDSConfig,
     Compute LDS access details for each lane.
     
     Args:
-        config: LDS configuration
+        config: LDS configuration (address mapping is delegated to
+                ``config.logical_to_byte_addr()``, so swizzle/padding/none
+                are handled transparently).
         pattern: Access pattern
     
     Returns:
@@ -206,20 +399,17 @@ def compute_lane_accesses(config: LDSConfig,
     for lane_id in range(pattern.lanes_per_wave):
         row, col_start = pattern.lane_to_position[lane_id]
         
-        # Compute address and banks for each element in the load
         element_addrs = []
         all_banks = set()
         
         for elem_offset in pattern.element_offsets:
             col = col_start + elem_offset
-            byte_addr = row * config.row_stride_bytes + col * config.element_bytes
+            byte_addr = config.logical_to_byte_addr(row, col)
             element_addrs.append(byte_addr)
             bank = (byte_addr // config.bytes_per_bank) % config.num_banks
             all_banks.add(bank)
         
-        # First element address (for display)
         base_addr = element_addrs[0]
-        # Banks accessed (sorted for consistent output)
         banks = sorted(all_banks)
         
         accesses.append({
@@ -288,8 +478,12 @@ def generate_bank_grid(config: LDSConfig,
                        tile_rows: int, 
                        tile_cols: int) -> List[List[Tuple[int, bool]]]:
     """
-    Generate a grid showing which bank each element belongs to,
-    including padding columns.
+    Generate a grid showing which bank each logical element maps to,
+    including padding columns (for PADDING mode).
+
+    The grid always shows *logical* (row, col) positions.  The bank
+    number at each position reflects whichever storage strategy
+    (none / padding / swizzle) the config uses.
     
     Args:
         config: LDS configuration
@@ -305,7 +499,7 @@ def generate_bank_grid(config: LDSConfig,
     for row in range(tile_rows):
         row_banks = []
         for col in range(total_cols):
-            byte_addr = row * config.row_stride_bytes + col * config.element_bytes
+            byte_addr = config.logical_to_byte_addr(row, col)
             bank = (byte_addr // config.bytes_per_bank) % config.num_banks
             is_pad = col >= tile_cols
             row_banks.append((bank, is_pad))
@@ -449,7 +643,7 @@ def analyze_bank_conflicts(config: LDSConfig,
         print()
         print(f"LDS Configuration:")
         print(f"  Row width: {config.row_width_elements} elements")
-        print(f"  Padding: {config.padding_elements} elements ({config.padding_elements * config.element_bytes} bytes)")
+        print(f"  Storage layout: {config.describe()}")
         print(f"  Row stride: {config.row_stride_bytes} bytes")
         print(f"  Element size: {config.element_bytes} bytes")
         print(f"  Banks: {config.num_banks}")
@@ -460,11 +654,10 @@ def analyze_bank_conflicts(config: LDSConfig,
         print(f"  Load size: {pattern.elements_per_load * config.element_bytes} bytes")
         print()
     
-    # Generate bank grid (data cols + padding cols)
     if verbose:
-        pad_label = f" + {config.padding_elements} pad" if config.padding_elements else ""
+        layout_label = f" [{config.describe()}]" if config.mode != SwizzleMode.NONE else ""
         print("=" * 70)
-        print(f"BANK MAPPING ({tile_rows}×{tile_cols}{pad_label} tile)")
+        print(f"BANK MAPPING ({tile_rows}×{tile_cols} tile{layout_label})")
         print("=" * 70)
         print()
         grid = generate_bank_grid(config, tile_rows, tile_cols)
@@ -646,15 +839,11 @@ def wmma16_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
     )
 
 
-def create_config_with_padding(padding_elements: int, 
+def create_config_with_padding(padding_elements: int,
                                 row_width: int = 128,
                                 element_bytes: int = 2) -> LDSConfig:
-    """Create LDS config with specified padding."""
-    return LDSConfig(
-        row_width_elements=row_width,
-        padding_elements=padding_elements,
-        element_bytes=element_bytes
-    )
+    """Create LDS config with specified padding (legacy helper)."""
+    return LDSConfig.with_padding(padding_elements, row_width, element_bytes)
 
 
 # =============================================================================
@@ -696,6 +885,95 @@ def _cap_tile_dims(tile_rows, tile_cols, row_width, pattern):
     return tile_rows, tile_cols
 
 
+def _build_config(args) -> LDSConfig:
+    """Build an LDSConfig from parsed CLI arguments."""
+    if args.layout == 'swizzle':
+        if args.swizzle_vec is not None:
+            return LDSConfig.with_swizzle(
+                vec=args.swizzle_vec,
+                per_phase=args.swizzle_per_phase,
+                max_phase=args.swizzle_max_phase,
+                row_width=args.row_width,
+                element_bytes=args.element_bytes,
+                num_banks=args.num_banks,
+            )
+        arch = "mfma" if "mfma" in args.pattern else "wmma"
+        return LDSConfig.auto_swizzle(
+            row_width=args.row_width,
+            element_bytes=args.element_bytes,
+            k_width=args.kwidth,
+            num_banks=args.num_banks,
+            arch=arch,
+        )
+    return LDSConfig.with_padding(
+        padding_elements=args.padding,
+        row_width=args.row_width,
+        element_bytes=args.element_bytes,
+        num_banks=args.num_banks,
+    )
+
+
+def _run_one(config: LDSConfig, pattern: AccessPattern,
+             tile_rows: int, tile_cols: int, quiet: bool) -> int:
+    """Run a single analysis and return the max conflict count."""
+    max_conflict = analyze_bank_conflicts(
+        config, pattern,
+        tile_rows=tile_rows,
+        tile_cols=tile_cols,
+        verbose=not quiet,
+    )
+    if quiet:
+        import math
+        status = "OK" if max_conflict <= 2 else "BAD"
+        print(f"row={config.row_width_elements} {config.describe()} "
+              f"stride={config.row_stride_bytes}B "
+              f"gcd={math.gcd(config.row_stride_bytes, 256)} "
+              f"→ {max_conflict}-way {status}")
+    return max_conflict
+
+
+def compare_layouts(pattern: AccessPattern, row_width: int,
+                    element_bytes: int, num_banks: int, kwidth: int,
+                    tile_rows: int, tile_cols: int, quiet: bool,
+                    arch: str = "wmma"):
+    """Compare none / padding / swizzle storage layouts side by side."""
+    print("=" * 70)
+    print("COMPARING STORAGE LAYOUTS")
+    print("=" * 70)
+    print()
+
+    configs = [
+        ("none",    LDSConfig.with_padding(0, row_width, element_bytes, num_banks)),
+        ("pad=8",   LDSConfig.with_padding(8, row_width, element_bytes, num_banks)),
+        ("pad=16",  LDSConfig.with_padding(16, row_width, element_bytes, num_banks)),
+        ("swizzle", LDSConfig.auto_swizzle(row_width, element_bytes,
+                                           kwidth, num_banks, arch=arch)),
+    ]
+
+    results = []
+    for label, config in configs:
+        max_conflict = analyze_bank_conflicts(
+            config, pattern,
+            tile_rows=tile_rows,
+            tile_cols=tile_cols,
+            verbose=not quiet,
+        )
+        results.append((label, config, max_conflict))
+        if not quiet:
+            print()
+
+    print("=" * 70)
+    print("COMPARISON SUMMARY")
+    print("=" * 70)
+    print()
+    print(f"{'Layout':>12s} | {'Details':30s} | Stride | Conflict")
+    print(f"{'-'*12:s}-+-{'-'*30:s}-+--------+---------")
+    for label, config, conflict in results:
+        status = "OK" if conflict <= 2 else "BAD"
+        print(f"{label:>12s} | {config.describe():30s} | {config.row_stride_bytes:4d} B "
+              f"| {conflict:2d}-way {status}")
+
+
 def main():
     pattern_list = "\n".join(
         f"    {name:25s} {desc}"
@@ -709,73 +987,60 @@ def main():
 Patterns:
 {pattern_list}
 
-Arguments explained:
-  --pattern       Which LDS access pattern to simulate. Transposed patterns
-                  (ds_load_tr*) model cooperative loads where 32 lanes read a
-                  16x16 element sub-tile. Non-transposed patterns (wmma16/mfma16)
-                  model standard vector loads where each lane reads kWidth
-                  consecutive elements from its own row.
-
-  --kwidth        Number of consecutive elements each lane reads in non-transposed
-                  patterns. Ignored for transposed patterns. Derives from the dot
-                  operand encoding's kWidth (typically 8 for WMMA v3).
-
-  --row-width     Number of data elements per LDS row (= contiguous/inner tile
-                  dimension). This is the tile's column count, NOT including
-                  padding. E.g. for a 16x128 tile with K=128 contiguous, use 128.
-
-  --padding       Padding elements appended after each row in LDS. This is what
-                  getPaddedEncoding() computes (e.g. padAmount=8 for fp16).
-                  Row stride in bytes = (row_width + padding) * element_bytes.
-
-  --element-bytes Bytes per element: 2 for fp16/bf16, 1 for fp8/bf8/i8, 4 for f32.
-
-  --tile-rows     Rows to show in the bank grid visualization (capped to pattern's
-  --tile-cols     actual tile size). Cols are capped to --row-width.
-
 Examples:
-  # Transposed fp16 load, cols=128, pad=8 (typical flash attention)
-  python3 lds_bank_conflict_analyzer.py \\
-    --pattern ds_load_tr16_b128 --row-width 128 --padding 8
+  # Default: fp16, pad=0, ds_load_tr16_b128, row-width=128
+  python3 lds_bank_conflict_analyzer.py --row-width 128
 
-  # Non-transposed WMMA fp16, kWidth=4, cols=64, pad=4
-  python3 lds_bank_conflict_analyzer.py \\
-    --pattern wmma16_kcontig --kwidth 4 --row-width 64 --padding 4
+  # With padding (typical flash attention)
+  python3 lds_bank_conflict_analyzer.py --row-width 128 --padding 8
 
-  # Non-transposed MFMA fp8, kWidth=8, cols=128, pad=8
-  python3 lds_bank_conflict_analyzer.py \\
-    --pattern mfma16_kcontig --kwidth 8 --row-width 128 --padding 8 --element-bytes 1
+  # Auto-derived swizzle layout
+  python3 lds_bank_conflict_analyzer.py --layout swizzle --row-width 128
 
-  # Quick one-line summary
-  python3 lds_bank_conflict_analyzer.py \\
-    --pattern wmma16_kcontig --kwidth 8 --row-width 128 --padding 8 --quiet
+  # Explicit swizzle params from Triton IR
+  python3 lds_bank_conflict_analyzer.py --layout swizzle --row-width 64 \\
+    --swizzle-vec 8 --swizzle-per-phase 1 --swizzle-max-phase 8
 
-  # Compare pad=0,8,16 side by side
-  python3 lds_bank_conflict_analyzer.py --row-width 128 --compare
+  # Compare none vs padding vs swizzle
+  python3 lds_bank_conflict_analyzer.py --row-width 128 --compare --quiet
+
+  # MFMA fp8 with padding
+  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig \\
+    --row-width 128 --padding 8 --element-bytes 1
         """
     )
 
     parser.add_argument('--pattern', type=str, default='ds_load_tr16_b128',
                         choices=list(PATTERN_REGISTRY.keys()),
-                        help='Access pattern to analyze (default: ds_load_tr16_b128)')
+                        help='Access pattern to simulate (default: ds_load_tr16_b128)')
     parser.add_argument('--kwidth', type=int, default=8,
-                        help='kWidth for non-transposed patterns (default: 8)')
+                        help='Elements per lane for non-transposed patterns (default: 8)')
     parser.add_argument('--row-width', type=int, default=128,
                         help='Data elements per LDS row, excl. padding (default: 128)')
+    parser.add_argument('--layout', type=str, default='padding',
+                        choices=['none', 'padding', 'swizzle'],
+                        help='Storage layout: none, padding (default), or swizzle (XOR)')
     parser.add_argument('--padding', type=int, default=0,
-                        help='Padding elements after each row (default: 0)')
+                        help='Padding elements per row (default: 0, used with --layout=padding)')
+    parser.add_argument('--swizzle-vec', type=int, default=None,
+                        help='Swizzle vec; auto-derived from kwidth if omitted')
+    parser.add_argument('--swizzle-per-phase', type=int, default=1,
+                        help='Swizzle perPhase (default: 1)')
+    parser.add_argument('--swizzle-max-phase', type=int, default=1,
+                        help='Swizzle maxPhase (default: 1)')
+    parser.add_argument('--num-banks', type=int, default=64,
+                        help='LDS bank count (default: 64; use 32 for RDNA3)')
     parser.add_argument('--element-bytes', type=int, default=2,
-                        help='Bytes per element (2=fp16, 1=fp8, 4=f32; default: 2)')
+                        help='Bytes per element: 2=fp16, 1=fp8, 4=f32 (default: 2)')
     parser.add_argument('--tile-rows', type=int, default=None,
-                        help='Rows in bank grid visualization (default: auto from pattern)')
+                        help='Rows in bank grid (default: auto from pattern)')
     parser.add_argument('--tile-cols', type=int, default=None,
-                        help='Cols in bank grid visualization (default: auto from row-width)')
+                        help='Cols in bank grid (default: auto from row-width)')
     parser.add_argument('--compare', action='store_true',
-                        help='Compare padding strategies (0, 8, 16)')
+                        help='Compare none / padding / swizzle side by side')
     parser.add_argument('--quiet', action='store_true',
-                        help='Only print one-line summary')
+                        help='One-line summary only')
 
-    # Print help if invoked with no arguments
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -784,7 +1049,6 @@ Examples:
 
     pattern = get_pattern(args.pattern, args.kwidth)
 
-    # Default tile dims from pattern; then cap to actual tile size
     default_rows = max(r for r, _c in pattern.lane_to_position) + 1
     default_cols = args.row_width
     tile_rows = args.tile_rows if args.tile_rows is not None else default_rows
@@ -792,44 +1056,13 @@ Examples:
     tile_rows, tile_cols = _cap_tile_dims(tile_rows, tile_cols, args.row_width, pattern)
 
     if args.compare:
-        print("=" * 70)
-        print("COMPARING PADDING STRATEGIES")
-        print("=" * 70)
-        print()
-
-        results = []
-        for padding in [0, 8, 16]:
-            config = create_config_with_padding(padding, args.row_width, args.element_bytes)
-            max_conflict = analyze_bank_conflicts(
-                config, pattern,
-                tile_rows=tile_rows,
-                tile_cols=tile_cols,
-                verbose=not args.quiet
-            )
-            results.append((padding, config.row_stride_bytes, max_conflict))
-            print()
-
-        print("=" * 70)
-        print("COMPARISON SUMMARY")
-        print("=" * 70)
-        print()
-        print("Padding | Row Stride | Max Conflict")
-        print("--------|------------|-------------")
-        for padding, stride, conflict in results:
-            status = "OK" if conflict <= 2 else "BAD"
-            print(f"   {padding:2d}   |    {stride:3d}     |   {conflict:2d}-way {status}")
+        arch = "mfma" if "mfma" in args.pattern else "wmma"
+        compare_layouts(pattern, args.row_width, args.element_bytes,
+                        args.num_banks, args.kwidth, tile_rows, tile_cols,
+                        args.quiet, arch)
     else:
-        config = create_config_with_padding(args.padding, args.row_width, args.element_bytes)
-        max_conflict = analyze_bank_conflicts(
-            config, pattern,
-            tile_rows=tile_rows,
-            tile_cols=tile_cols,
-            verbose=not args.quiet
-        )
-        if args.quiet:
-            status = "OK" if max_conflict <= 2 else "BAD"
-            print(f"row={args.row_width} pad={args.padding} stride={config.row_stride_bytes}B "
-                  f"gcd={__import__('math').gcd(config.row_stride_bytes, 256)} → {max_conflict}-way {status}")
+        config = _build_config(args)
+        _run_one(config, pattern, tile_rows, tile_cols, args.quiet)
 
 
 if __name__ == "__main__":
