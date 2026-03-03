@@ -104,7 +104,9 @@ if [[ -d "$PKG_DIR/rocm" && ! -d /tmp/rocm-overlay ]]; then
 fi
 
 if [[ -d /tmp/rocm-overlay ]]; then
-    export LD_LIBRARY_PATH="/tmp/rocm-overlay${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    # Replace the package's rocm/ dir with the overlay (which excludes
+    # libamd_smi) so the system version from /opt/rocm/lib is found instead.
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH//$PKG_DIR\/rocm//tmp/rocm-overlay}"
 fi
 
 if [[ -d /opt/rocm/lib ]]; then

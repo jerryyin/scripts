@@ -1,85 +1,80 @@
 # GEMM AM Case Study
 
-End-to-end case study measuring LDS bank conflicts for a descriptor-load GEMM
-kernel on the gfx1250 Architecture Model (AM) simulator, and validating the
-analytical bank-conflict model against the AM counter data.
+Measuring LDS bank conflicts for a descriptor-load GEMM kernel on the gfx1250
+Architecture Model (AM) simulator.
 
 ## Files
 
-| File | What it is | Runs where |
-|------|-----------|------------|
-| `gemm_descriptor_load_kernel.py` | Triton GEMM kernel using `tl.make_tensor_descriptor` (descriptor loads). Supports fp16 and fp8 inputs with fp32 accumulator. | AM/FFM container (needs Triton + ROCm + HIP) |
-| `run_am_benchmark.sh` | Shell wrapper that runs the kernel on the AM or FFM backend, collects perf counters, and detects simulator hangs. | AM/FFM container |
-| `generate_am_report.py` | Parses AM `perf_counters_*_absolute.txt` output and generates a markdown report comparing bank-conflict and execution counters. | Anywhere with Python 3 (reads result files) |
-| `cross_wave_model.py` | Analytical model that predicts `DS_READ_BANK_CONFLICTS_SUM` from the intra-wave conflict degree (from `lds_bank_conflict_analyzer.py`) and the kernel's wave tiling. Validated against AM = 2048. | Anywhere with Python 3 (uses parent `lds_bank_conflict_analyzer.py`) |
+| File | Description |
+|------|-------------|
+| `gemm_descriptor_load_kernel.py` | Triton GEMM kernel using `tl.make_tensor_descriptor` (descriptor loads). Supports fp16/fp8 inputs with fp32 accumulator. Parameterized by tile sizes, warp count, and problem dimensions. |
+| `run_am_bank_conflict.sh` | Turn-key script: runs a single kernel configuration on the AM simulator and prints parsed bank conflict / execution counters. |
+| `run_am_sweep.sh` | Runs `run_am_bank_conflict.sh` across multiple configurations and collects results into a summary table. |
 
 ## Quick start
 
-### 1. Run the kernel on FFM (correctness check)
-
 ```bash
-# Inside an AM/FFM Docker container:
-./run_am_benchmark.sh --dtype fp16 --backend ffm
-./run_am_benchmark.sh --dtype fp8  --backend ffm
+# Single run (default: 8 warps, 128×128×64 tiles, fp16):
+./run_am_bank_conflict.sh
+
+# Custom configuration:
+./run_am_bank_conflict.sh --num-warps 4 --block_m 64 --block_n 64 --block_k 64 \
+                          -M 64 -N 64 -K 1024 --dtype fp16
+
+# Full sweep across all predefined configurations:
+./run_am_sweep.sh
+
+# Dry run (print configs without running AM):
+./run_am_sweep.sh --dry-run
 ```
 
-### 2. Run the kernel on AM (collect bank conflict data)
+## Data flow
 
-```bash
-./run_am_benchmark.sh --dtype fp16 --backend am
-./run_am_benchmark.sh --dtype fp8  --backend am
+The kernel's data path through LDS:
 
-# Or run all four at once:
-./run_am_benchmark.sh --all
+```
+Global Memory ──[tensor_load_to_lds]──► LDS buffer
+                                            │
+                          ds_load_b128 ──► A operand (VGPRs) ──┐
+                                                                ├──► v_wmma_f32_16x16x32_f16
+                      ds_load_tr16_b128 ──► B operand (VGPRs) ──┘
 ```
 
-Results land in `./results/<dtype>_<backend>/` by default. Override with
-`RESULTS_DIR=/your/path ./run_am_benchmark.sh ...`.
+- **`ds_load_b128`**: regular LDS load (16 contiguous bytes per lane). Loads **A operand**.
+- **`ds_load_tr16_b128`**: transposed LDS load (16 bytes per lane, transposed across lanes). Loads **B operand**.
+- **`v_wmma_f32_16x16x32_f16`**: WMMA v3 instruction (16×16 output, K=32 per instruction).
 
-### 3. Generate the report
+Both LDS load types feed the same WMMA instruction.
 
-```bash
-python3 generate_am_report.py                              # reads ./results/
-python3 generate_am_report.py --results-dir /path/to/data  # custom path
+## Key finding: bank conflicts come from ds_load_tr16_b128
+
+A sweep across 6 configurations proves:
+
+```
+GL0_LDS_READ_BANK_CONFLICT = 2 × (number of ds_load_tr16_b128 executions)
 ```
 
-### 4. Run the cross-wave analytical model
+| Config | Warps | b128 (dyn) | tr16 (dyn) | SQ_INSTS_LDS | BANK_CONFLICT | 0×b128 + 2×tr16 |
+|--------|-------|-----------|-----------|-------------|---------------|-----------------|
+| 16×16  | 1     | 64        | 64        | 128         | 128           | **128** ✓       |
+| 16×32  | 1     | 64        | 128       | 192         | 256           | **256** ✓       |
+| 16×64  | 1     | 64        | 256       | 320         | 512           | **512** ✓       |
+| 32×32  | 2     | 256       | 128       | 384         | 256           | **256** ✓       |
+| 64×64  | 4     | 512       | 512       | 1024        | 1024          | **1024** ✓      |
+| 128×128| 8     | 2048      | 1024      | 3072        | 2048          | **2048** ✓      |
 
-```bash
-python3 cross_wave_model.py
-```
+- **`ds_load_b128` contributes 0 bank conflicts.** The 2-cycle execution model (16 threads per cycle) is correct: each 16-lane half-wave accesses all 64 banks exactly once with padding=8, so there are no intra-cycle bank conflicts.
 
-No arguments needed. It imports `lds_bank_conflict_analyzer.py` from the
-parent `lds/` directory and prints the full derivation showing how the
-analyzer's intra-wave N-way conflict maps to the AM counter value.
+- **`ds_load_tr16_b128` contributes exactly 2 bank conflict cycles per execution.** This is inherent to the transposed load instruction's internal access pattern, not caused by the LDS data layout or CTA tiling. It is unavoidable with this instruction.
 
-## Environment variables
+- **No cross-wave effects.** Bank conflicts do not depend on warp count or CTA layout. They are purely per-instruction, consistent with bank conflicts only occurring between lanes within a single wave.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AM_FFM_DIR` | `/am-ffm` | Path to the AM/FFM package |
-| `RESULTS_DIR` | `./results/` | Where benchmark outputs are written |
-| `AM_TIMEOUT_S` | `1800` | Timeout (seconds) for AM runs |
+## Half-wave analysis (why ds_load_b128 has zero conflicts)
 
-## Kernel details
+With padding=8 and row_width=64 (A operand), stride = (64+8)×2 = 144 bytes = 36 dwords.
 
-- **Tile**: BLOCK_M=128, BLOCK_N=128, BLOCK_K=64, num_warps=8
-- **Matrix size**: M=N=128, K=1024 (1 CTA, 16 loop iterations)
-- **Load path**: `tl.make_tensor_descriptor` + `desc.load()` → compiles to
-  `tensor_load_to_lds` (writes A/B tiles into LDS from VRAM)
-- **LDS reads**: `ds_load_b128` (A tile), `ds_load_tr16_b128` (B tile)
-- **Store path**: standard `tl.store` → `global_store_b32`
-  (avoids `tensor_store_from_lds` which crashes AM)
+Each `ds_load_b128` fires in 2 cycles (16 threads/cycle):
+- **Cycle 1 (lanes 0-15)**: 16 lanes × 4 banks = 64 accesses, each bank hit exactly once → **no conflict**
+- **Cycle 2 (lanes 16-31)**: 16 lanes × 4 banks = 64 accesses, each bank hit exactly once → **no conflict**
 
-## Key results (fp16, padding=8)
-
-| Counter | Value |
-|---------|-------|
-| `DS_READ_BANK_CONFLICTS_SUM` | 2048 |
-| `GL0_LDS_READ_BANK_CONFLICT` | 2048 |
-| `GL0_LDS_WRITE_BANK_CONFLICT` | 0 |
-| DS_LOAD_B128 wave-executions | 2048 |
-| DS_LOAD_TR16 wave-executions | 1024 |
-
-The analytical model predicts 2048 exactly. See `../lds_analytical_model.md`
-for the full derivation and the master formula.
+The padding value of 8 elements is specifically chosen so that GCD(stride_dwords, 64) = 4, ensuring 64/4 = 16 distinct starting banks for each half-wave.
