@@ -28,6 +28,11 @@ fi
 DRY_RUN=false
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
 
+# ── Dtypes to sweep ──────────────────────────────────────────────────────────
+# The descriptor-load GEMM kernel supports fp16 and fp8.
+# fp32 has no ds_load_tr instruction and is not supported by this kernel.
+DTYPES=("fp16" "fp8")
+
 # ── Configuration table ──────────────────────────────────────────────────────
 # Each line: WARPS BLOCK_M BLOCK_N BLOCK_K M N K
 CONFIGS=(
@@ -43,8 +48,8 @@ RESULTS_DIR="$SCRIPT_DIR/sweep_results"
 mkdir -p "$RESULTS_DIR"
 SUMMARY="$RESULTS_DIR/summary.txt"
 
-header=$(printf "%-6s %-8s %-8s %-8s %-5s %-5s %-6s | %-12s %-12s %-12s" \
-    "Warps" "BLOCK_M" "BLOCK_N" "BLOCK_K" "M" "N" "K" \
+header=$(printf "%-5s %-6s %-8s %-8s %-8s %-5s %-5s %-6s | %-12s %-12s %-12s" \
+    "dtype" "Warps" "BLOCK_M" "BLOCK_N" "BLOCK_K" "M" "N" "K" \
     "SQ_INSTS_LDS" "BANK_CONFL" "PART_CONFL")
 
 echo "=================================================================="
@@ -52,7 +57,7 @@ echo " AM Bank Conflict Sweep"
 echo "=================================================================="
 echo ""
 echo "$header"
-echo "$(printf -- '-%.0s' {1..95})"
+echo "$(printf -- '-%.0s' {1..105})"
 
 # Also write to summary file
 {
@@ -60,46 +65,54 @@ echo "$(printf -- '-%.0s' {1..95})"
     echo "$(date)"
     echo ""
     echo "$header"
-    echo "$(printf -- '-%.0s' {1..95})"
+    echo "$(printf -- '-%.0s' {1..105})"
 } > "$SUMMARY"
 
+total_runs=$(( ${#DTYPES[@]} * ${#CONFIGS[@]} ))
 run_idx=0
-for cfg in "${CONFIGS[@]}"; do
-    read -r WARPS BM BN BK M N K <<< "$cfg"
-    run_idx=$((run_idx + 1))
+for DTYPE in "${DTYPES[@]}"; do
+    for cfg in "${CONFIGS[@]}"; do
+        read -r WARPS BM BN BK M N K <<< "$cfg"
+        run_idx=$((run_idx + 1))
 
-    if $DRY_RUN; then
-        printf "%-6s %-8s %-8s %-8s %-5s %-5s %-6s | (dry run)\n" \
-            "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K"
-        continue
-    fi
+        if $DRY_RUN; then
+            printf "%-5s %-6s %-8s %-8s %-8s %-5s %-5s %-6s | (dry run)\n" \
+                "$DTYPE" "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K"
+            continue
+        fi
 
-    echo "" >&2
-    echo "── Run $run_idx/${#CONFIGS[@]}: ${WARPS}w ${BM}x${BN}x${BK} ──" >&2
+        echo "" >&2
+        echo "── Run $run_idx/$total_runs: ${DTYPE} ${WARPS}w ${BM}x${BN}x${BK} ──" >&2
 
-    LOG="$RESULTS_DIR/run_${WARPS}w_${BM}x${BN}x${BK}.log"
+        LOG="$RESULTS_DIR/run_${DTYPE}_${WARPS}w_${BM}x${BN}x${BK}.log"
 
-    if "$RUN_SCRIPT" \
-        --num-warps "$WARPS" \
-        --block_m "$BM" --block_n "$BN" --block_k "$BK" \
-        -M "$M" -N "$N" -K "$K" \
-        --dtype fp16 \
-        > "$LOG" 2>&1; then
+        if "$RUN_SCRIPT" \
+            --num-warps "$WARPS" \
+            --block_m "$BM" --block_n "$BN" --block_k "$BK" \
+            -M "$M" -N "$N" -K "$K" \
+            --dtype "$DTYPE" \
+            > "$LOG" 2>&1; then
 
-        sq_lds=$(awk '$1 == "SQ_INSTS_LDS" {print $NF}' "$LOG" | head -1)
-        bank_confl=$(awk '$1 == "GL0_LDS_READ_BANK_CONFLICT" {print $NF}' "$LOG")
-        part_confl=$(awk '$1 == "GL0_PARTITION_READ_CONFLICT" {print $NF}' "$LOG")
+            sq_lds=$(awk '$1 == "SQ_INSTS_LDS" {print $NF}' "$LOG" | head -1)
+            bank_confl=$(awk '$1 == "GL0_LDS_READ_BANK_CONFLICT" {print $NF}' "$LOG")
+            part_confl=$(awk '$1 == "GL0_PARTITION_READ_CONFLICT" {print $NF}' "$LOG")
 
-        line=$(printf "%-6s %-8s %-8s %-8s %-5s %-5s %-6s | %-12s %-12s %-12s" \
-            "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K" \
-            "${sq_lds:-?}" "${bank_confl:-?}" "${part_confl:-?}")
-    else
-        line=$(printf "%-6s %-8s %-8s %-8s %-5s %-5s %-6s | FAILED (see %s)" \
-            "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K" "$LOG")
-    fi
+            line=$(printf "%-5s %-6s %-8s %-8s %-8s %-5s %-5s %-6s | %-12s %-12s %-12s" \
+                "$DTYPE" "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K" \
+                "${sq_lds:-?}" "${bank_confl:-?}" "${part_confl:-?}")
+        else
+            line=$(printf "%-5s %-6s %-8s %-8s %-8s %-5s %-5s %-6s | FAILED (see %s)" \
+                "$DTYPE" "$WARPS" "$BM" "$BN" "$BK" "$M" "$N" "$K" "$LOG")
+        fi
 
-    echo "$line"
-    echo "$line" >> "$SUMMARY"
+        echo "$line"
+        echo "$line" >> "$SUMMARY"
+    done
+
+    # Visual separator between dtypes
+    sep="$(printf -- '-%.0s' {1..105})"
+    echo "$sep"
+    echo "$sep" >> "$SUMMARY"
 done
 
 if ! $DRY_RUN; then
