@@ -272,6 +272,17 @@ class AccessPattern:
                          Derived from linear layout's lane field
         element_offsets: Column offsets for each of the elements_per_load elements
                         Derived from register bits. Default: [0, 1, 2, ..., 7] (consecutive)
+        lanes_per_cycle: How many lanes fire simultaneously in one LDS cycle.
+                        - Transpose loads (ds_load_tr*): 16 lanes form a transpose group,
+                          with all dwords from those 16 lanes checked together.
+                        - Regular loads (ds_load_b*, ds_load_2addr_b64): all 32 lanes
+                          fire simultaneously, one dword per lane per sub-cycle.
+                        Default: None → uses find_bank_conflicts default (16).
+        dwords_per_subcycle: How many dwords per lane are checked in a single sub-cycle.
+                        - Transpose loads: all dwords together (set to total dwords per lane,
+                          or None for the same effect).
+                        - Regular loads: 1 dword per sub-cycle.
+                        Default: None → all dwords checked together (transpose behavior).
                         
     Note on linear layout interpretation:
         - lane bits: Define the STARTING [row, col] for each lane
@@ -286,6 +297,8 @@ class AccessPattern:
     elements_per_load: int = 8
     lane_to_position: List[Tuple[int, int]] = None
     element_offsets: List[int] = None  # Column offset for each element within the load
+    lanes_per_cycle: int = None
+    dwords_per_subcycle: int = None
     
     def __post_init__(self):
         if self.lane_to_position is None:
@@ -297,7 +310,9 @@ class AccessPattern:
     
     @classmethod
     def from_linear_layout(cls, lane_bits: List[Tuple[int, int]], 
-                           register_bits: List[Tuple[int, int]] = None) -> 'AccessPattern':
+                           register_bits: List[Tuple[int, int]] = None,
+                           lanes_per_cycle: int = None,
+                           dwords_per_subcycle: int = None) -> 'AccessPattern':
         """
         Create AccessPattern from Triton linear layout.
         
@@ -310,6 +325,8 @@ class AccessPattern:
                           e.g., [[0,1], [0,2], [0,4]] for 8 consecutive elements
                           Number of elements = 2^len(register_bits)
                           If None, assumes 8 consecutive elements (default for ds_load_tr16_b128).
+            lanes_per_cycle: Override for execution model (see AccessPattern docstring).
+            dwords_per_subcycle: Override for execution model (see AccessPattern docstring).
         
         Returns:
             AccessPattern with lane_to_position and element_offsets computed
@@ -355,7 +372,9 @@ class AccessPattern:
         return cls(lanes_per_wave=lanes_per_wave,
                    elements_per_load=elements_per_load,
                    lane_to_position=lane_to_position,
-                   element_offsets=element_offsets)
+                   element_offsets=element_offsets,
+                   lanes_per_cycle=lanes_per_cycle,
+                   dwords_per_subcycle=dwords_per_subcycle)
 
 
 def compute_banks_accessed(byte_addr: int, 
@@ -426,52 +445,116 @@ def compute_lane_accesses(config: LDSConfig,
 
 def find_bank_conflicts(accesses: List[Dict],
                         bytes_per_bank: int = 4,
-                        num_banks: int = 64) -> Tuple[Dict[int, List[int]], int]:
+                        num_banks: int = 64,
+                        lanes_per_cycle: int = None,
+                        dwords_per_subcycle: int = None) -> Tuple[Dict[int, List[int]], int]:
     """
-    Find bank conflicts from lane accesses.
+    Find bank conflicts from lane accesses, respecting per-cycle execution.
+
+    Bank conflicts only occur between lanes that execute in the **same**
+    cycle AND access the **same** dword sub-cycle.
+
+    Execution model depends on instruction type:
+
+    **Transpose loads** (ds_load_tr*):
+        16 lanes form a transpose group.  All dwords from those 16 lanes are
+        evaluated together (dwords_per_subcycle=None or =total_dwords_per_lane).
+
+    **Regular loads** (ds_load_b*, ds_load_2addr_b64):
+        All 32 lanes fire simultaneously (lanes_per_cycle=32).  Each sub-cycle
+        processes one dword per lane (dwords_per_subcycle=1).  For a 4-dword
+        load, there are 4 sub-cycles of 32 accesses each.
 
     On AMD LDS, two accesses to the *same* dword (aligned 4-byte word) in the
     same bank are served as a broadcast -- NOT a conflict.  Only accesses to
     *different* dwords that map to the same bank produce a conflict.
 
-    For dword-sized or larger elements (f32, vector loads) this distinction
-    doesn't matter: each element occupies its own dword.  For sub-dword
-    elements (fp16 = 2B, fp8 = 1B) multiple elements share a dword, and
-    naive per-bank lane counting overcounts conflicts.
-
     Args:
         accesses: List of lane access info from compute_lane_accesses()
         bytes_per_bank: Bank granularity in bytes (4 for AMD LDS)
         num_banks: Number of LDS banks
+        lanes_per_cycle: Lanes that execute simultaneously (default 16)
+        dwords_per_subcycle: Dwords per lane checked in one sub-cycle.
+                           None means all dwords together (transpose behavior).
+                           1 means each dword position is a separate sub-cycle
+                           (regular load behavior).
 
     Returns:
         Tuple of (bank_to_lanes dict, max_conflict_count)
         bank_to_lanes maps bank -> deduplicated list of lanes that cause a
         true conflict (one representative per distinct dword).
-        max_conflict_count is the true conflict degree (distinct dwords
-        per bank).
+        max_conflict_count is the worst-case conflict degree across all cycles.
     """
-    # bank -> { dword_addr: first_lane_that_accessed_it }
-    bank_to_dword_lane: Dict[int, Dict[int, int]] = {}
+    total_lanes = len(accesses)
+    if lanes_per_cycle is None:
+        lanes_per_cycle = total_lanes
+    num_cycles = max(1, (total_lanes + lanes_per_cycle - 1) // lanes_per_cycle)
 
-    for access in accesses:
-        for byte_addr in access['element_addrs']:
-            dword_addr = byte_addr // bytes_per_bank
-            bank = dword_addr % num_banks
+    overall_bank_to_lanes: Dict[int, List[int]] = {}
+    overall_max = 0
 
-            if bank not in bank_to_dword_lane:
-                bank_to_dword_lane[bank] = {}
-            if dword_addr not in bank_to_dword_lane[bank]:
-                bank_to_dword_lane[bank][dword_addr] = access['lane']
+    for cycle in range(num_cycles):
+        lo = cycle * lanes_per_cycle
+        hi = min(lo + lanes_per_cycle, total_lanes)
+        cycle_accesses = [a for a in accesses if lo <= a['lane'] < hi]
 
-    # Build bank_to_lanes with one representative lane per distinct dword
-    bank_to_lanes: Dict[int, List[int]] = {}
-    for bank, dword_map in bank_to_dword_lane.items():
-        bank_to_lanes[bank] = list(dword_map.values())
+        if dwords_per_subcycle is None:
+            # All dwords from all lanes in this cycle checked together
+            subcycle_groups = [cycle_accesses]
+        else:
+            # Split each lane's element_addrs into dword positions, then group
+            # accesses by sub-cycle index so only same-position dwords compete.
+            #
+            # For each lane: sort unique dwords by offset from base, assign
+            # sub-cycle = rank // dwords_per_subcycle.
+            sc_map: Dict[int, List[Tuple[Dict, List[int]]]] = {}
+            for access in cycle_accesses:
+                dwords_seen = []
+                for ba in access['element_addrs']:
+                    dw = ba // bytes_per_bank
+                    if dw not in dwords_seen:
+                        dwords_seen.append(dw)
+                for rank, dw in enumerate(dwords_seen):
+                    sc_idx = rank // dwords_per_subcycle
+                    if sc_idx not in sc_map:
+                        sc_map[sc_idx] = []
+                    sc_map[sc_idx].append((access['lane'], dw))
 
-    max_conflict = max(len(lanes) for lanes in bank_to_lanes.values()) if bank_to_lanes else 0
+            subcycle_groups = list(sc_map.values()) if sc_map else []
 
-    return bank_to_lanes, max_conflict
+        for group in subcycle_groups:
+            bank_to_dword_lane: Dict[int, Dict[int, int]] = {}
+
+            if dwords_per_subcycle is None:
+                # Original path: iterate all element_addrs
+                for access in group:
+                    for byte_addr in access['element_addrs']:
+                        dword_addr = byte_addr // bytes_per_bank
+                        bank = dword_addr % num_banks
+                        if bank not in bank_to_dword_lane:
+                            bank_to_dword_lane[bank] = {}
+                        if dword_addr not in bank_to_dword_lane[bank]:
+                            bank_to_dword_lane[bank][dword_addr] = access['lane']
+            else:
+                # Per-dword path: group is list of (lane_id, dword_addr)
+                for lane_id, dword_addr in group:
+                    bank = dword_addr % num_banks
+                    if bank not in bank_to_dword_lane:
+                        bank_to_dword_lane[bank] = {}
+                    if dword_addr not in bank_to_dword_lane[bank]:
+                        bank_to_dword_lane[bank][dword_addr] = lane_id
+
+            for bank, dword_map in bank_to_dword_lane.items():
+                lanes = list(dword_map.values())
+                if len(lanes) > 1:
+                    if bank not in overall_bank_to_lanes or \
+                       len(lanes) > len(overall_bank_to_lanes[bank]):
+                        overall_bank_to_lanes[bank] = lanes
+                cycle_max = len(lanes)
+                if cycle_max > overall_max:
+                    overall_max = cycle_max
+
+    return overall_bank_to_lanes, overall_max
 
 
 def generate_bank_grid(config: LDSConfig, 
@@ -534,7 +617,7 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
 
     covered = _compute_covered_cells(pattern) if pattern else None
 
-    cw = 4  # column width for all cells
+    cw = 3  # column width
 
     # Determine the column boundary of the accessed region
     cov_max_col = -1
@@ -568,9 +651,9 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
         for col in range(show_cols):
             bank, is_pad = grid[row][col]
             if col == data_cols:
-                print(f"║{bank:3d}", end="")
+                print(f"║{bank:{cw - 1}d}", end="")
             elif covered is not None and col == cov_max_col + 1 and col < data_cols:
-                print(f"|{bank:3d}", end="")
+                print(f"|{bank:{cw - 1}d}", end="")
             else:
                 print(f"{bank:>{cw}d}", end="")
         if num_cols > max_cols:
@@ -676,9 +759,13 @@ def analyze_bank_conflicts(config: LDSConfig,
         print_lane_accesses(accesses)
         print()
     
-    # Find conflicts (pass bank geometry for sub-dword broadcast detection)
-    bank_to_lanes, max_conflict = find_bank_conflicts(
-        accesses, bytes_per_bank=config.bytes_per_bank, num_banks=config.num_banks)
+    # Find conflicts, using pattern's execution model if specified
+    fc_kwargs = dict(bytes_per_bank=config.bytes_per_bank, num_banks=config.num_banks)
+    if pattern.lanes_per_cycle is not None:
+        fc_kwargs['lanes_per_cycle'] = pattern.lanes_per_cycle
+    if pattern.dwords_per_subcycle is not None:
+        fc_kwargs['dwords_per_subcycle'] = pattern.dwords_per_subcycle
+    bank_to_lanes, max_conflict = find_bank_conflicts(accesses, **fc_kwargs)
     
     if verbose:
         print("=" * 70)
@@ -697,23 +784,135 @@ def analyze_bank_conflicts(config: LDSConfig,
 
 def ds_load_tr16_b128_pattern() -> AccessPattern:
     """
-    Access pattern for ds_load_tr16_b128 with typical WMMA layout.
-    
-    From TTGIR #linear layout:
-        lane = [[1,0], [2,0], [4,0], [8,0], [0,8]]
-        register = [[0,1], [0,2], [0,4], ...]  (first 3 bits for 8 elements)
-    
-    Lane mapping (derived: 5 bits → 32 lanes):
-        - Lanes 0-15: rows 0-15, col 0
-        - Lanes 16-31: rows 0-15, col 8
-    
-    Register mapping (derived: 3 bits → 8 elements):
-        - Each lane loads 8 consecutive column elements
-        - Element offsets: 0, 1, 2, 3, 4, 5, 6, 7
+    LDS access pattern for ds_load_tr16_b128 with WMMA v3 layout (gfx1250).
+
+    IMPORTANT: ds_load_tr16_b128 transposes data across 8-lane shuffle groups
+    (numLanesInShuffleGroup = warpSize/4 = 32/4 = 8).  The WMMA linear layout
+    describes the POST-transpose register contents, but bank conflicts depend
+    on the PRE-transpose LDS addresses.  These differ: within each 8-lane
+    group the "lane-within-group" and "element index" axes are swapped.
+
+    Post-transpose register layout (what WMMA sees):
+        lane = [[1,0], [2,0], [4,0], [8,0], [0,8]]   (K, N)
+        - Lanes 0-15:  rows 0-15, col_group 0   (all 16 N cols, K=0..7)
+        - Lanes 16-31: rows 0-15, col_group 8   (all 16 N cols, K=8..15)
+
+    Pre-transpose LDS access (what actually hits the banks):
+        lane = [[1,0], [2,0], [4,0], [0,8], [8,0]]   (K, N)
+        - Group 0 (lanes 0-7):   rows 0-7,   cols 0-7    (top-left 8×8)
+        - Group 1 (lanes 8-15):  rows 0-7,   cols 8-15   (top-right 8×8)
+        - Group 2 (lanes 16-23): rows 8-15,  cols 0-7    (bottom-left 8×8)
+        - Group 3 (lanes 24-31): rows 8-15,  cols 8-15   (bottom-right 8×8)
+
+    Each lane reads 8 consecutive N elements from one K row.  The 8×8
+    transpose within each group then gives each lane 8 K values at one N.
     """
     return AccessPattern.from_linear_layout(
-        lane_bits=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 8]],
-        register_bits=[[0, 1], [0, 2], [0, 4]]
+        lane_bits=[[1, 0], [2, 0], [4, 0], [0, 8], [8, 0]],
+        register_bits=[[0, 1], [0, 2], [0, 4]],
+        lanes_per_cycle=16,
+    )
+
+
+def ds_load_tr8_b64_pattern() -> AccessPattern:
+    """
+    LDS access pattern for ds_load_tr8_b64 with doubleB8Contiguity (gfx1250).
+
+    For 8-bit data (fp8/i8).  Each lane reads 64 bits (8 × 1-byte elements).
+
+    The doubleB8Contiguity trick changes lane bit 3 from N+8 to K+4,
+    expanding DOWN instead of RIGHT.  This compensates for the interleaved
+    shuffle groups so the post-transpose result matches WMMA's register layout.
+
+    Pre-transpose LDS access (derived from compiler LLVM IR):
+        lane = [[1,0], [2,0], [0,8], [4,0], [8,0]]   (K, N)
+                               ^^^^  ^^^^
+                      bit 2 → N+8    bit 3 → K+4 (doubleB8)
+
+        - Lanes 0-3:   K=0..3,   N=0..7   (bit2=0)
+        - Lanes 4-7:   K=0..3,   N=8..15  (bit2=1)
+        - Lanes 8-11:  K=4..7,   N=0..7   (bit3=1)
+        - Lanes 12-15: K=4..7,   N=8..15  (bit2=1, bit3=1)
+        - Lanes 16-19: K=8..11,  N=0..7   (bit4=1)
+        - Lanes 20-23: K=8..11,  N=8..15
+        - Lanes 24-27: K=12..15, N=0..7
+        - Lanes 28-31: K=12..15, N=8..15
+
+    Two interleaved shuffle groups each get a contiguous 8-row K span:
+      Group A {0,1,2,3, 8,9,10,11}: K=0..3 at N=0..7 + K=4..7 at N=0..7
+      Group B {4,5,6,7, 12,13,14,15}: K=0..3 at N=8..15 + K=4..7 at N=8..15
+
+    See ds_load_tr8_b64_doubleB8Contiguity.md for the full explanation.
+    """
+    return AccessPattern.from_linear_layout(
+        lane_bits=[[1, 0], [2, 0], [0, 8], [4, 0], [8, 0]],
+        register_bits=[[0, 1], [0, 2], [0, 4]],
+        lanes_per_cycle=16,
+    )
+
+
+def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
+    """
+    LDS access pattern for ds_load_2addr_b64 — WMMA v3 non-transposed (gfx1250).
+
+    Used for the A operand when K is contiguous in LDS (loadTransposed=False).
+    Each instruction issues TWO 64-bit (8-byte) loads from non-contiguous
+    addresses, with an 8-byte gap between them.
+
+    Instruction encoding (offsets in units of 8 bytes):
+        ds_load_2addr_b64  offset0:0  offset1:2   →  base+0  and base+16
+        ds_load_2addr_b64  offset0:4  offset1:6   →  base+32 and base+48
+
+    Per-lane base address (from LLVM IR):
+        base = M * stride + K_start
+    where:
+        M       = lane & 0xF                (0-15, row position)
+        K_start = ((lane >> 4) & 1) * kWidth (0 or kWidth=8, interleaved K groups)
+        stride  = (BLOCK_K + pad) * element_bytes
+
+    The two lane halves INTERLEAVE within each 2*kWidth span:
+        Lane 0  (K_start=0):  loads K[0..7]  + K[16..23]
+        Lane 16 (K_start=8):  loads K[8..15] + K[24..31]
+
+    Each lane loads 2*kWidth = 16 elements, but NOT consecutively.
+    The element_offsets are [0..kWidth-1, 2*kWidth..3*kWidth-1], reflecting
+    the 8-byte gap between the two sub-loads within one instruction.
+
+    Execution model:
+        All 32 lanes fire simultaneously (lanes_per_cycle=32).
+        The 4 dwords per lane are processed in 4 separate sub-cycles
+        (dwords_per_subcycle=1), one dword per lane per sub-cycle.
+
+    Bank conflict condition (32 lanes × 1 dword per sub-cycle):
+        Lanes 0-15 access dword at M*stride_d, lanes 16-31 at M*stride_d+2.
+        Conflict when (M1-M2)*stride_d ≡ 2 (mod 64).
+        This has a solution iff gcd(stride_d, 64) divides 2.
+
+    Typical BLOCK_K=64, fp8 (1 byte/elem):
+        pad=8:  stride_d=18, gcd(18,64)=2, 2%2=0 → solution exists → 2-way
+        pad=16: stride_d=20, gcd(20,64)=4, 2%4≠0 → no solution → conflict-free
+
+    Args:
+        kWidth: Elements per sub-load (8 for fp8).
+    """
+    load_width = 2 * kWidth
+
+    lane_to_position = []
+    for lane_id in range(32):
+        m = lane_id & 0xF
+        k_group = (lane_id >> 4) & 0x1
+        k_start = k_group * kWidth
+        lane_to_position.append((m, k_start))
+
+    element_offsets = list(range(kWidth)) + list(range(2 * kWidth, 3 * kWidth))
+
+    return AccessPattern(
+        lanes_per_wave=32,
+        elements_per_load=load_width,
+        lane_to_position=lane_to_position,
+        element_offsets=element_offsets,
+        lanes_per_cycle=32,
+        dwords_per_subcycle=1,
     )
 
 
@@ -745,6 +944,48 @@ def mfma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
     for lane_id in range(64):
         n = lane_id & 0xF
         k_group = (lane_id >> 4) & 0x3
+        k_start = k_group * kWidth
+        lane_to_position.append((n, k_start))
+
+    return AccessPattern(
+        lanes_per_wave=64,
+        elements_per_load=kWidth,
+        lane_to_position=lane_to_position,
+        element_offsets=list(range(kWidth))
+    )
+
+
+def mfma32_kcontig_pattern(kWidth: int = 2) -> AccessPattern:
+    """
+    Access pattern for MFMA-32x32 dot operand with K-contiguous LDS layout.
+    Non-transposed ds_read_b64: each lane reads kWidth consecutive K elements.
+
+    The layout is symmetric for operand A and B -- the formula only depends
+    on nonKDim and warpSize, not opIdx.
+
+    From mfmaDotToLinearLayout (LinearLayoutConversions.cpp):
+        regs  = identity1D(kWidth, register, K)
+        lanes = identity1D(nonKDim=32, lane, nonK) * identity1D(2, lane, K)
+
+    Lane mapping (6 bits -> 64 lanes):
+        - Bits 0-4 (lane & 0x1F): nonK position (0-31)
+        - Bit 5    (lane >> 5):   K group (0-1), K_start = group * kWidth
+
+    Each lane reads kWidth elements starting at (nonK=lane&0x1F, K=group*kWidth).
+
+    Tile coverage: 32 (nonK) × 2*kWidth (K).
+    For f32 MFMA 32x32x2: kWidth=2, tile = 32×4.
+
+    Vectorization: kWidth * 4B = kWidth dwords per lane.
+    For kWidth=2: ds_load_b64 (2×f32 = 64 bits).
+    For kWidth=4: ds_load_b128 (4×f32 = 128 bits, used by TF32 mfma_f32_32x32x4_xf32).
+
+    LDS layout: row = nonK position, columns = K elements (K contiguous).
+    """
+    lane_to_position = []
+    for lane_id in range(64):
+        n = lane_id & 0x1F
+        k_group = (lane_id >> 5) & 0x1
         k_start = k_group * kWidth
         lane_to_position.append((n, k_start))
 
@@ -790,7 +1031,9 @@ def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
         lanes_per_wave=32,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
-        element_offsets=list(range(kWidth))
+        element_offsets=list(range(kWidth)),
+        lanes_per_cycle=32,
+        dwords_per_subcycle=1,
     )
 
 
@@ -836,6 +1079,8 @@ def wmma16_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
         elements_per_load=1,
         lane_to_position=positions,
         element_offsets=[0],
+        lanes_per_cycle=32,
+        dwords_per_subcycle=1,
     )
 
 
@@ -852,7 +1097,10 @@ def create_config_with_padding(padding_elements: int,
 
 PATTERN_REGISTRY = {
     "ds_load_tr16_b128":       (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
+    "ds_load_tr8_b64":         (ds_load_tr8_b64_pattern, "Transposed 8-bit load, 32 lanes (gfx1250)"),
+    "ds_load_2addr_b64":       (lambda kw=8: ds_load_2addr_b64_pattern(kWidth=kw), "Dual-addr 64-bit load, 32 lanes (gfx1250 fp8 A-operand)"),
     "mfma16_kcontig":          (lambda kw=8: mfma16_kcontig_pattern(kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
+    "mfma32_kcontig":          (lambda kw=2: mfma32_kcontig_pattern(kWidth=kw), "MFMA-32x32 non-transposed, 64 lanes (CDNA)"),
     "wmma16_kcontig":          (lambda kw=8: wmma16_kcontig_pattern(kWidth=kw), "WMMA-16x16 non-transposed, 32 lanes (gfx1250)"),
     "wmma16_transposed_scalar": (lambda kw=8: wmma16_transposed_scalar_pattern(kWidth=kw), "WMMA-16x16 transposed scalar, 32 lanes (f32 fallback)"),
 }
