@@ -4,8 +4,9 @@
 # key counters are collected into a summary table.
 #
 # Usage:
-#   ./run_am_sweep.sh              # run all predefined configurations
-#   ./run_am_sweep.sh --dry-run    # print configs without running
+#   ./run_am_sweep.sh                        # run all configs (tdm descriptor loads)
+#   ./run_am_sweep.sh --load-mode async      # run all configs with async copy
+#   ./run_am_sweep.sh --dry-run              # print configs without running
 #
 # The predefined sweep varies warp count and tile size to isolate the source
 # of GL0_LDS_READ_BANK_CONFLICT.  Results show that bank conflicts come
@@ -26,11 +27,18 @@ if [[ ! -x "$RUN_SCRIPT" ]]; then
 fi
 
 DRY_RUN=false
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+LOAD_MODE="tdm"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)    DRY_RUN=true; shift ;;
+        --load-mode)  LOAD_MODE="$2"; shift 2 ;;
+        *)            shift ;;
+    esac
+done
 
 # ── Dtypes to sweep ──────────────────────────────────────────────────────────
-# The descriptor-load GEMM kernel supports fp16 and fp8.
-# fp32 has no ds_load_tr instruction and is not supported by this kernel.
+# Both tdm and async kernels support fp16 and fp8.
 DTYPES=("fp16" "fp8")
 
 # ── Configuration table ──────────────────────────────────────────────────────
@@ -53,7 +61,7 @@ header=$(printf "%-5s %-6s %-8s %-8s %-8s %-5s %-5s %-6s | %-12s %-12s %-12s" \
     "SQ_INSTS_LDS" "BANK_CONFL" "PART_CONFL")
 
 echo "=================================================================="
-echo " AM Bank Conflict Sweep"
+echo " AM Bank Conflict Sweep  (load_mode=$LOAD_MODE)"
 echo "=================================================================="
 echo ""
 echo "$header"
@@ -61,7 +69,7 @@ echo "$(printf -- '-%.0s' {1..105})"
 
 # Also write to summary file
 {
-    echo "AM Bank Conflict Sweep"
+    echo "AM Bank Conflict Sweep  (load_mode=$LOAD_MODE)"
     echo "$(date)"
     echo ""
     echo "$header"
@@ -84,13 +92,14 @@ for DTYPE in "${DTYPES[@]}"; do
         echo "" >&2
         echo "── Run $run_idx/$total_runs: ${DTYPE} ${WARPS}w ${BM}x${BN}x${BK} ──" >&2
 
-        LOG="$RESULTS_DIR/run_${DTYPE}_${WARPS}w_${BM}x${BN}x${BK}.log"
+        LOG="$RESULTS_DIR/run_${LOAD_MODE}_${DTYPE}_${WARPS}w_${BM}x${BN}x${BK}.log"
 
         if "$RUN_SCRIPT" \
             --num-warps "$WARPS" \
             --block_m "$BM" --block_n "$BN" --block_k "$BK" \
             -M "$M" -N "$N" -K "$K" \
             --dtype "$DTYPE" \
+            --load-mode "$LOAD_MODE" \
             > "$LOG" 2>&1; then
 
             sq_lds=$(awk '$1 == "SQ_INSTS_LDS" {print $NF}' "$LOG" | head -1)
