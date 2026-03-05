@@ -21,8 +21,8 @@ from lds_bank_conflict_analyzer import (
     ds_load_tr16_b128_pattern,
     ds_load_tr8_b64_pattern,
     ds_load_2addr_b64_pattern,
-    wmma16_kcontig_pattern,
-    wmma16_transposed_scalar_pattern,
+    wmma_kcontig_pattern,
+    wmma_transposed_scalar_pattern,
     mfma16_kcontig_pattern,
     mfma32_kcontig_pattern,
 )
@@ -236,7 +236,7 @@ def sweep_non_transposed():
             pattern = ds_load_2addr_b64_pattern(kWidth=effective_kw)
             inst_name = "ds_load_2addr_b64"
         else:
-            pattern = wmma16_kcontig_pattern(kWidth=effective_kw)
+            pattern = wmma_kcontig_pattern(kWidth=effective_kw)
             inst_name = "ds_load_b128" if effective_kw * elem_bytes <= 16 else "2x ds_load_b128"
 
         proposed_pad = 128 // elem_bits
@@ -309,7 +309,7 @@ def sweep_transposed_scalar():
         else:
             proposed_pad = 128 // elem_bits
 
-        pattern = wmma16_transposed_scalar_pattern(kWidth=kw)
+        pattern = wmma_transposed_scalar_pattern(kWidth=kw)
         pads = PADDING_SWEEP
 
         print(f"  {dtype_name} ({elem_bits}-bit): transposed scalar ds_load_b{elem_bits}")
@@ -428,7 +428,7 @@ def sweep_summary(ref_cols=128):
         # Transposed scalar fallback (all dtypes)
         kw = WMMA_V3_KWIDTH
         proposed = 2 * tr_inst_bits // elem_bits if tr_inst_bits is not None else 128 // elem_bits
-        pattern = wmma16_transposed_scalar_pattern(kWidth=kw)
+        pattern = wmma_transposed_scalar_pattern(kWidth=kw)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
         print(f"  {'wmma tr-scalar':<22s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "
@@ -441,7 +441,7 @@ def sweep_summary(ref_cols=128):
         if elem_bits == 8:
             pattern = ds_load_2addr_b64_pattern(kWidth=effective_kw)
         else:
-            pattern = wmma16_kcontig_pattern(kWidth=effective_kw)
+            pattern = wmma_kcontig_pattern(kWidth=effective_kw)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
         print(f"  {'wmma non-transposed':<22s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "

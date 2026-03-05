@@ -345,15 +345,15 @@ def test_conflict_analysis_e2e():
         ("K=128 fp16 no-pad 64banks → 16-way",
          LDSConfig(num_banks=64, row_width_elements=128, element_bytes=2,
                    mode=SwizzleMode.NONE),
-         "wmma16_kcontig", 8, 16),
+         "wmma_kcontig", 8, 16),
 
         ("K=128 fp16 pad=8 64banks → 2-way",
          LDSConfig.with_padding(8, 128, 2, 64),
-         "wmma16_kcontig", 8, 2),
+         "wmma_kcontig", 8, 2),
 
         ("K=128 fp16 swizzle(8,1,16) 64banks → 2-way",
          LDSConfig.with_swizzle(8, 1, 16, 128, 2, 64),
-         "wmma16_kcontig", 8, 2),
+         "wmma_kcontig", 8, 2),
 
         ("K=128 fp16 no-pad 64banks ds_load_tr → 16-way",
          LDSConfig(num_banks=64, row_width_elements=128, element_bytes=2,
