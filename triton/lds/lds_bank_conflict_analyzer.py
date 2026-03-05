@@ -14,19 +14,7 @@ CONCEPTS
    - Bank = (byte_address / 4) % 64
    - Bank conflict occurs when multiple lanes access the same bank simultaneously
 
-2. Linear Layout (from Triton TTGIR):
-   - Describes how (register_idx, lane_id, warp_id) maps to tensor [row, col]
-   - Format: lane = [[row_contrib, col_contrib], ...] for each bit of lane ID
-   - Example: lane = [[1,0], [2,0], [4,0], [8,0], [0,8]]
-     - Bits 0-3 contribute to row (1, 2, 4, 8)
-     - Bit 4 contributes to column (8)
-
-3. ds_load_tr16_b128:
-   - Each lane loads 16 bytes (8 fp16 elements)
-   - 8 lanes cooperate for transposed load
-   - Accesses 4 consecutive banks per lane
-
-4. Storage Layouts (conflict avoidance strategies):
+2. Storage Layouts (conflict avoidance strategies):
 
    a) NONE:    byte_addr = row * stride + col * elem_bytes
                No conflict avoidance.  Baseline for comparison.
@@ -916,36 +904,43 @@ def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
     )
 
 
-def mfma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
+def mfma_kcontig_pattern(nonKDim: int = 16, kWidth: int = 8) -> AccessPattern:
     """
-    Access pattern for MFMA-16x16 dot operand with K-contiguous LDS layout.
-    Non-transposed ds_read_b128: each lane reads kWidth consecutive K elements.
+    Access pattern for MFMA dot operand with K-contiguous LDS layout.
 
-    The layout is symmetric for operand A and B -- the formula only depends
-    on nonKDim and warpSize, not opIdx. We name this by the instruction
-    geometry, not the operand index.
+    Unified implementation for all MFMA geometries. The layout is symmetric
+    for operand A and B — the formula only depends on nonKDim and warpSize
+    (always 64 for CDNA), not opIdx.
 
     From mfmaDotToLinearLayout (LinearLayoutConversions.cpp):
         regs  = identity1D(kWidth, register, K)
-        lanes = identity1D(nonKDim=16, lane, nonK) * identity1D(4, lane, K)
+        lanes = identity1D(nonKDim, lane, nonK) * identity1D(64/nonKDim, lane, K)
 
     Lane mapping (6 bits -> 64 lanes):
-        - Bits 0-3 (lane & 0xF): nonK position (0-15)
-        - Bits 4-5 (lane >> 4):  K group (0-3), K_start = group * kWidth
+        - Low bits:  nonK position (0 .. nonKDim-1)
+        - High bits: K group (0 .. 64/nonKDim - 1), K_start = group * kWidth
 
-    Each lane reads kWidth elements starting at (nonK=lane&0xF, K=group*kWidth).
+    Common configurations:
+        nonKDim=16 (MFMA 16x16):
+            4 K groups, default kWidth=8 → ds_read_b128 (fp16/fp8)
+        nonKDim=32 (MFMA 32x32):
+            2 K groups, default kWidth=2 → ds_read_b64  (f32)
+            kWidth=4 → ds_read_b128 (TF32 mfma_f32_32x32x4_xf32)
 
-    For K=16 tile with kWidth=8: only K-groups 0,1 are active (lanes 0-31).
-    For K=32 tile with kWidth=8: all 4 K-groups active (lanes 0-63).
-
-    LDS layout: row = nonK position, columns = K elements (K contiguous).
+    Args:
+        nonKDim: M/N dimension of the MFMA instruction (16 or 32).
+        kWidth:  Elements per lane per load.
     """
+    num_k_groups = 64 // nonKDim
+    nonk_mask = nonKDim - 1
+    k_shift = nonKDim.bit_length() - 1
+    k_mask = num_k_groups - 1
+
     lane_to_position = []
     for lane_id in range(64):
-        n = lane_id & 0xF
-        k_group = (lane_id >> 4) & 0x3
-        k_start = k_group * kWidth
-        lane_to_position.append((n, k_start))
+        n = lane_id & nonk_mask
+        k_group = (lane_id >> k_shift) & k_mask
+        lane_to_position.append((n, k_group * kWidth))
 
     return AccessPattern(
         lanes_per_wave=64,
@@ -953,58 +948,25 @@ def mfma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
         lane_to_position=lane_to_position,
         element_offsets=list(range(kWidth))
     )
+
+
+def mfma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
+    """MFMA-16x16 non-transposed (alias for mfma_kcontig_pattern(nonKDim=16))."""
+    return mfma_kcontig_pattern(nonKDim=16, kWidth=kWidth)
 
 
 def mfma32_kcontig_pattern(kWidth: int = 2) -> AccessPattern:
+    """MFMA-32x32 non-transposed (alias for mfma_kcontig_pattern(nonKDim=32))."""
+    return mfma_kcontig_pattern(nonKDim=32, kWidth=kWidth)
+
+
+def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
     """
-    Access pattern for MFMA-32x32 dot operand with K-contiguous LDS layout.
-    Non-transposed ds_read_b64: each lane reads kWidth consecutive K elements.
-
-    The layout is symmetric for operand A and B -- the formula only depends
-    on nonKDim and warpSize, not opIdx.
-
-    From mfmaDotToLinearLayout (LinearLayoutConversions.cpp):
-        regs  = identity1D(kWidth, register, K)
-        lanes = identity1D(nonKDim=32, lane, nonK) * identity1D(2, lane, K)
-
-    Lane mapping (6 bits -> 64 lanes):
-        - Bits 0-4 (lane & 0x1F): nonK position (0-31)
-        - Bit 5    (lane >> 5):   K group (0-1), K_start = group * kWidth
-
-    Each lane reads kWidth elements starting at (nonK=lane&0x1F, K=group*kWidth).
-
-    Tile coverage: 32 (nonK) × 2*kWidth (K).
-    For f32 MFMA 32x32x2: kWidth=2, tile = 32×4.
-
-    Vectorization: kWidth * 4B = kWidth dwords per lane.
-    For kWidth=2: ds_load_b64 (2×f32 = 64 bits).
-    For kWidth=4: ds_load_b128 (4×f32 = 128 bits, used by TF32 mfma_f32_32x32x4_xf32).
-
-    LDS layout: row = nonK position, columns = K elements (K contiguous).
-    """
-    lane_to_position = []
-    for lane_id in range(64):
-        n = lane_id & 0x1F
-        k_group = (lane_id >> 5) & 0x1
-        k_start = k_group * kWidth
-        lane_to_position.append((n, k_start))
-
-    return AccessPattern(
-        lanes_per_wave=64,
-        elements_per_load=kWidth,
-        lane_to_position=lane_to_position,
-        element_offsets=list(range(kWidth))
-    )
-
-
-def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
-    """
-    Access pattern for WMMA v3 16x16 dot operand with K-contiguous LDS layout.
+    Access pattern for WMMA dot operand with K-contiguous LDS layout.
     Non-transposed ds_read_b128: each lane reads kWidth consecutive K elements.
 
-    The layout is symmetric for operand A and B -- the formula only depends
-    on nonKDim and warpSize, not opIdx. We name this by the instruction
-    geometry, not the operand index.
+    WMMA on gfx1250 is always 16x16 (M/N), so nonKDim is fixed at 16 and
+    warpSize is 32. The layout is symmetric for operand A and B.
 
     From wmmaDotOperandToLinearLayout (LinearLayoutConversions.cpp):
         regs  = identity1D(kWidth, register, K)
@@ -1016,9 +978,7 @@ def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
 
     Each lane reads kWidth elements starting at (nonK=lane&0xF, K=group*kWidth).
 
-    For K=16 with kWidth=8: both K-groups active (lanes 0-31), full coverage.
-
-    LDS layout: row = nonK position, columns = K elements (K contiguous).
+    Supported for fp8/fp16 operands (f32 uses wmma_transposed_scalar instead).
     """
     lane_to_position = []
     for lane_id in range(32):
@@ -1037,9 +997,9 @@ def wmma16_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
     )
 
 
-def wmma16_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
+def wmma_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
     """
-    Access pattern for WMMA v3 16x16 dot operand with TRANSPOSED LDS layout.
+    Access pattern for WMMA dot operand with TRANSPOSED LDS layout.
 
     When K is the slow-varying dimension in LDS (loadTransposed=True) and
     there is no ds_load_tr* instruction for this element width (e.g. f32),
@@ -1096,14 +1056,88 @@ def create_config_with_padding(padding_elements: int,
 # =============================================================================
 
 PATTERN_REGISTRY = {
-    "ds_load_tr16_b128":       (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
-    "ds_load_tr8_b64":         (ds_load_tr8_b64_pattern, "Transposed 8-bit load, 32 lanes (gfx1250)"),
-    "ds_load_2addr_b64":       (lambda kw=8: ds_load_2addr_b64_pattern(kWidth=kw), "Dual-addr 64-bit load, 32 lanes (gfx1250 fp8 A-operand)"),
-    "mfma16_kcontig":          (lambda kw=8: mfma16_kcontig_pattern(kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
-    "mfma32_kcontig":          (lambda kw=2: mfma32_kcontig_pattern(kWidth=kw), "MFMA-32x32 non-transposed, 64 lanes (CDNA)"),
-    "wmma16_kcontig":          (lambda kw=8: wmma16_kcontig_pattern(kWidth=kw), "WMMA-16x16 non-transposed, 32 lanes (gfx1250)"),
-    "wmma16_transposed_scalar": (lambda kw=8: wmma16_transposed_scalar_pattern(kWidth=kw), "WMMA-16x16 transposed scalar, 32 lanes (f32 fallback)"),
+    "ds_load_tr16_b128":        (ds_load_tr16_b128_pattern, "Transposed 16-bit load, 32 lanes (gfx1250)"),
+    "ds_load_tr8_b64":          (ds_load_tr8_b64_pattern, "Transposed 8-bit load, 32 lanes (gfx1250)"),
+    "ds_load_2addr_b64":        (lambda kw=8: ds_load_2addr_b64_pattern(kWidth=kw), "Dual-addr 64-bit load, 32 lanes (gfx1250 fp8 A-operand)"),
+    "mfma16_kcontig":           (lambda kw=8: mfma_kcontig_pattern(nonKDim=16, kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
+    "mfma32_kcontig":           (lambda kw=2: mfma_kcontig_pattern(nonKDim=32, kWidth=kw), "MFMA-32x32 non-transposed, 64 lanes (CDNA)"),
+    "wmma_kcontig":             (lambda kw=8: wmma_kcontig_pattern(kWidth=kw), "WMMA non-transposed, 32 lanes (gfx1250)"),
+    "wmma_transposed_scalar":   (lambda kw=8: wmma_transposed_scalar_pattern(kWidth=kw), "WMMA transposed scalar, 32 lanes (f32 fallback)"),
 }
+
+# =============================================================================
+# Valid pattern ↔ element-size combinations
+# =============================================================================
+#
+# The bank conflict math is fully decoupled from data type — any combination
+# gives a mathematically valid result.  However, each pattern models a specific
+# hardware instruction whose semantics are tied to a particular element width.
+# This table captures which combinations correspond to real hardware so that
+# the CLI can warn (and optionally reject) unrealistic requests.
+
+_ELEM_BYTES_LABEL = {1: "fp8/i8", 2: "fp16/bf16", 4: "f32/tf32"}
+
+VALID_ELEMENT_BYTES = {
+    # Transposed loads — instruction name encodes the element width
+    "ds_load_tr16_b128":        {2},       # "tr16" = 16-bit
+    "ds_load_tr8_b64":          {1},       # "tr8"  = 8-bit
+
+    # Dual-address 64-bit load: 2×64b = 16 bytes, kWidth=8 → 1 byte/elem
+    "ds_load_2addr_b64":        {1},
+
+    # WMMA non-transposed — all operand types (fp8, fp16, f32)
+    # f32 uses wmma_f32_16x16x4_f32 (kWidth=2, kBase=2)
+    "wmma_kcontig":             {1, 2, 4},
+
+    # WMMA transposed scalar fallback — when K is slow-varying and
+    # no ds_load_tr* exists for the element type, compiler emits
+    # scalar ds_load_b32 loads. Applicable to all data types.
+    "wmma_transposed_scalar":   {1, 2, 4},
+
+    # MFMA non-transposed — all operand types
+    "mfma16_kcontig":           {1, 2, 4},
+    "mfma32_kcontig":           {2, 4},
+}
+
+def _patterns_for_element_bytes(eb: int) -> List[str]:
+    """Return pattern names that support the given element_bytes."""
+    return [p for p, valid in VALID_ELEMENT_BYTES.items() if eb in valid]
+
+
+def validate_pattern_element_bytes(pattern_name: str, element_bytes: int,
+                                   *, force: bool = False) -> None:
+    """Check that pattern + element_bytes is a realistic hardware combination.
+
+    Prints an informative error and exits unless ``force`` is set.
+    """
+    valid = VALID_ELEMENT_BYTES.get(pattern_name)
+    if valid is None or element_bytes in valid:
+        return  # OK (or unknown pattern — skip validation)
+
+    dtype_label = _ELEM_BYTES_LABEL.get(element_bytes, f"{element_bytes}B")
+    valid_labels = ", ".join(
+        f"{_ELEM_BYTES_LABEL.get(v, f'{v}B')} (--element-bytes {v})"
+        for v in sorted(valid)
+    )
+    alt_patterns = _patterns_for_element_bytes(element_bytes)
+    alt_labels = ", ".join(alt_patterns) if alt_patterns else "(none)"
+
+    msg = (
+        f"Error: --pattern {pattern_name} is not compatible with "
+        f"--element-bytes {element_bytes} ({dtype_label})\n"
+        f"\n"
+        f"  {pattern_name} supports: {valid_labels}\n"
+        f"  {dtype_label} is supported by: {alt_labels}\n"
+    )
+
+    if force:
+        print(f"Warning: {pattern_name} + {dtype_label} is not a real hardware "
+              f"combination (--force overrides)\n", file=sys.stderr)
+        return
+
+    print(msg, file=sys.stderr)
+    print("Use --force to override for hypothetical analysis.", file=sys.stderr)
+    sys.exit(1)
 
 
 def get_pattern(name: str, kwidth: int = 8) -> AccessPattern:
@@ -1236,25 +1270,17 @@ Patterns:
 {pattern_list}
 
 Examples:
-  # Default: fp16, pad=0, ds_load_tr16_b128, row-width=128
-  python3 lds_bank_conflict_analyzer.py --row-width 128
+  # Default (ds_load_tr16_b128, fp16, no padding, row-width=128)
+  python3 lds_bank_conflict_analyzer.py
 
-  # With padding (typical flash attention)
-  python3 lds_bank_conflict_analyzer.py --row-width 128 --padding 8
+  # Padding layout with all fields
+  python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
+    --row-width 64 --element-bytes 2 --padding 16 --num-banks 64
 
-  # Auto-derived swizzle layout
-  python3 lds_bank_conflict_analyzer.py --layout swizzle --row-width 128
-
-  # Explicit swizzle params from Triton IR
-  python3 lds_bank_conflict_analyzer.py --layout swizzle --row-width 64 \\
-    --swizzle-vec 8 --swizzle-per-phase 1 --swizzle-max-phase 8
-
-  # Compare none vs padding vs swizzle
-  python3 lds_bank_conflict_analyzer.py --row-width 128 --compare --quiet
-
-  # MFMA fp8 with padding
-  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig \\
-    --row-width 128 --padding 8 --element-bytes 1
+  # Swizzle layout with all fields
+  python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig --layout swizzle \\
+    --row-width 64 --element-bytes 2 --swizzle-vec 8 --swizzle-per-phase 1 \\
+    --swizzle-max-phase 8 --num-banks 64
         """
     )
 
@@ -1288,12 +1314,17 @@ Examples:
                         help='Compare none / padding / swizzle side by side')
     parser.add_argument('--quiet', action='store_true',
                         help='One-line summary only')
+    parser.add_argument('--force', action='store_true',
+                        help='Allow unrealistic pattern + element-bytes combinations')
 
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
 
     args = parser.parse_args()
+
+    validate_pattern_element_bytes(args.pattern, args.element_bytes,
+                                   force=args.force)
 
     pattern = get_pattern(args.pattern, args.kwidth)
 

@@ -50,7 +50,7 @@ Comparison of three LDS layout tools relevant to Triton on AMD GPUs.
 | MN-contig flag | partial (preset pattern) | Y (`--mnContig`) | - |
 | `from_linear_layout()` factory | Y (lane_bits + register_bits) | - (hardcoded in TikZ) | - |
 | MFMA-16x16 non-transposed | Y (`mfma16_kcontig`) | Y | Y |
-| WMMA-16x16 non-transposed | Y (`wmma16_kcontig`) | Y | - |
+| WMMA non-transposed | Y (`wmma_kcontig`) | Y | - |
 | Per-cycle thread highlighting | - | Y (which threads fire at cycle 0) | Y |
 | Configurable kWidth | Y | Y | Y |
 
@@ -101,7 +101,7 @@ Listed in priority order based on practical value for debugging Triton LDS issue
 
 2. **ds_write access pattern** — model the write side (`global_load_dwordx4` → `ds_write`) to detect write-path bank conflicts. Currently only read-side is modeled.
 
-3. **MN-contig as a CLI flag** — promote the existing `wmma16_transposed_scalar_pattern` to a proper `--mnContig` / `--mfma-trans-load` workflow matching the gluon tool's three cases (K-contig, MN-contig scalar, MN-contig transposed load).
+3. **MN-contig as a CLI flag** — promote the existing `wmma_transposed_scalar_pattern` to a proper `--mnContig` / `--mfma-trans-load` workflow matching the gluon tool's three cases (K-contig, MN-contig scalar, MN-contig transposed load).
 
 4. **Sub-byte dtype support** — f4 (0.5B) and fp6/bf6 (0.75B) for newer MFMA instructions. Requires changing `element_bytes` from int to float.
 
