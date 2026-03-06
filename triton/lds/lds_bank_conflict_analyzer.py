@@ -437,35 +437,37 @@ def find_bank_conflicts(accesses: List[Dict],
                         lanes_per_cycle: int = None,
                         dwords_per_subcycle: int = None) -> Tuple[Dict[int, List[int]], int]:
     """
-    Find bank conflicts from lane accesses, respecting per-cycle execution.
+    Find bank conflicts from lane accesses, respecting SIMD grouping.
 
-    Bank conflicts only occur between lanes that execute in the **same**
-    cycle AND access the **same** dword sub-cycle.
+    Bank conflicts only occur between lanes in the **same** SIMD group
+    AND the **same** sub-operation.
 
-    Execution model depends on instruction type:
+    The SIMD group size (lanes_per_cycle) is the instruction's nature —
+    how many lanes access LDS banks together.  It is NOT derived from
+    bandwidth.
 
-    **Transpose loads** (ds_load_tr*):
-        16 lanes form a transpose group.  All dwords from those 16 lanes are
-        evaluated together (dwords_per_subcycle=None or =total_dwords_per_lane).
-
-    **Regular loads** (ds_load_b*, ds_load_2addr_b64):
-        All 32 lanes fire simultaneously (lanes_per_cycle=32).  Each sub-cycle
-        processes one dword per lane (dwords_per_subcycle=1).  For a 4-dword
-        load, there are 4 sub-cycles of 32 accesses each.
+    **ds_load_b{32,64,128}**: 16-lane SIMD groups.
+        All dwords per lane are served simultaneously within the group.
+        Wave32 → 2 groups; wave64 → 4 groups.
+    **ds_load_2addr_b64**: 32-lane SIMD group, but each address is a
+        separate sub-operation (dwords_per_subcycle=1).  Dwords from
+        different addresses don't compete for banks.
+    **ds_load_tr***: 16-lane SIMD groups (transpose shuffle boundary).
+        Each lane reads 1 dword.
 
     On AMD LDS, two accesses to the *same* dword (aligned 4-byte word) in the
-    same bank are served as a broadcast -- NOT a conflict.  Only accesses to
+    same bank are served as a broadcast — NOT a conflict.  Only accesses to
     *different* dwords that map to the same bank produce a conflict.
 
     Args:
         accesses: List of lane access info from compute_lane_accesses()
         bytes_per_bank: Bank granularity in bytes (4 for AMD LDS)
         num_banks: Number of LDS banks
-        lanes_per_cycle: Lanes that execute simultaneously (default 16)
-        dwords_per_subcycle: Dwords per lane checked in one sub-cycle.
-                           None means all dwords together (transpose behavior).
-                           1 means each dword position is a separate sub-cycle
-                           (regular load behavior).
+        lanes_per_cycle: Lanes that access LDS as a SIMD group (default: all)
+        dwords_per_subcycle: Dwords per lane checked in one sub-operation.
+                           None means all dwords together (default for single-
+                           address instructions).  1 means each dword is an
+                           independent sub-op (for multi-address instructions).
 
     Returns:
         Tuple of (bank_to_lanes dict, max_conflict_count)
@@ -774,30 +776,24 @@ def ds_load_tr16_b128_pattern() -> AccessPattern:
     """
     LDS access pattern for ds_load_tr16_b128 with WMMA v3 layout (gfx1250).
 
-    IMPORTANT: ds_load_tr16_b128 transposes data across 8-lane shuffle groups
-    (numLanesInShuffleGroup = warpSize/4 = 32/4 = 8).  The WMMA linear layout
-    describes the POST-transpose register contents, but bank conflicts depend
-    on the PRE-transpose LDS addresses.  These differ: within each 8-lane
-    group the "lane-within-group" and "element index" axes are swapped.
-
-    Post-transpose register layout (what WMMA sees):
-        lane = [[1,0], [2,0], [4,0], [8,0], [0,8]]   (K, N)
-        - Lanes 0-15:  rows 0-15, col_group 0   (all 16 N cols, K=0..7)
-        - Lanes 16-31: rows 0-15, col_group 8   (all 16 N cols, K=8..15)
+    Each lane reads 4 bytes (1 dword = 2 fp16 elements) from LDS.
+    16-lane SIMD group (transpose shuffle boundary).  The cross-lane
+    transpose then produces the 128-bit (8 × fp16) result per lane.
 
     Pre-transpose LDS access (what actually hits the banks):
         lane = [[1,0], [2,0], [4,0], [0,8], [8,0]]   (K, N)
-        - Group 0 (lanes 0-7):   rows 0-7,   cols 0-7    (top-left 8×8)
-        - Group 1 (lanes 8-15):  rows 0-7,   cols 8-15   (top-right 8×8)
-        - Group 2 (lanes 16-23): rows 8-15,  cols 0-7    (bottom-left 8×8)
-        - Group 3 (lanes 24-31): rows 8-15,  cols 8-15   (bottom-right 8×8)
+        - Group 0 (lanes 0-7):   rows 0-7,   col_start 0
+        - Group 1 (lanes 8-15):  rows 0-7,   col_start 8
+        - Group 2 (lanes 16-23): rows 8-15,  col_start 0
+        - Group 3 (lanes 24-31): rows 8-15,  col_start 8
 
-    Each lane reads 8 consecutive N elements from one K row.  The 8×8
-    transpose within each group then gives each lane 8 K values at one N.
+    Each lane reads 2 consecutive N elements (= 1 dword) from one K row.
+    The 8-lane shuffle group transposes these into 8 K values per lane.
     """
+    # Each lane reads 1 dword (2 fp16 = 4 bytes) from LDS.
     return AccessPattern.from_linear_layout(
         lane_bits=[[1, 0], [2, 0], [4, 0], [0, 8], [8, 0]],
-        register_bits=[[0, 1], [0, 2], [0, 4]],
+        register_bits=[[0, 1]],
         lanes_per_cycle=16,
     )
 
@@ -814,27 +810,19 @@ def ds_load_tr8_b64_pattern() -> AccessPattern:
 
     Pre-transpose LDS access (derived from compiler LLVM IR):
         lane = [[1,0], [2,0], [0,8], [4,0], [8,0]]   (K, N)
-                               ^^^^  ^^^^
-                      bit 2 → N+8    bit 3 → K+4 (doubleB8)
 
-        - Lanes 0-3:   K=0..3,   N=0..7   (bit2=0)
-        - Lanes 4-7:   K=0..3,   N=8..15  (bit2=1)
-        - Lanes 8-11:  K=4..7,   N=0..7   (bit3=1)
-        - Lanes 12-15: K=4..7,   N=8..15  (bit2=1, bit3=1)
-        - Lanes 16-19: K=8..11,  N=0..7   (bit4=1)
-        - Lanes 20-23: K=8..11,  N=8..15
-        - Lanes 24-27: K=12..15, N=0..7
-        - Lanes 28-31: K=12..15, N=8..15
+        - Lanes 0-3:   K=0..3,   N=0..3   (bit2=0)
+        - Lanes 4-7:   K=0..3,   N=8..11  (bit2=1)
+        - Lanes 8-11:  K=4..7,   N=0..3   (bit3=1)
+        - Lanes 12-15: K=4..7,   N=8..11  (bit2=1, bit3=1)
+        - Lanes 16-31: same pattern with K+8 (bit4=1)
 
-    Two interleaved shuffle groups each get a contiguous 8-row K span:
-      Group A {0,1,2,3, 8,9,10,11}: K=0..3 at N=0..7 + K=4..7 at N=0..7
-      Group B {4,5,6,7, 12,13,14,15}: K=0..3 at N=8..15 + K=4..7 at N=8..15
-
-    See ds_load_tr8_b64_doubleB8Contiguity.md for the full explanation.
+    Each lane reads 4 consecutive N elements (= 1 dword) from one K row.
     """
+    # Each lane reads 1 dword (4 fp8 = 4 bytes) from LDS.
     return AccessPattern.from_linear_layout(
         lane_bits=[[1, 0], [2, 0], [0, 8], [4, 0], [8, 0]],
-        register_bits=[[0, 1], [0, 2], [0, 4]],
+        register_bits=[[0, 1], [0, 2]],
         lanes_per_cycle=16,
     )
 
@@ -867,14 +855,10 @@ def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
     the 8-byte gap between the two sub-loads within one instruction.
 
     Execution model:
-        All 32 lanes fire simultaneously (lanes_per_cycle=32).
-        The 4 dwords per lane are processed in 4 separate sub-cycles
-        (dwords_per_subcycle=1), one dword per lane per sub-cycle.
-
-    Bank conflict condition (32 lanes × 1 dword per sub-cycle):
-        Lanes 0-15 access dword at M*stride_d, lanes 16-31 at M*stride_d+2.
-        Conflict when (M1-M2)*stride_d ≡ 2 (mod 64).
-        This has a solution iff gcd(stride_d, 64) divides 2.
+        32-lane SIMD group (all lanes fire together).
+        Each address is an independent sub-operation (dwords_per_subcycle=1).
+        Each lane's 2 addresses produce 2 dwords each; only dwords from the
+        same address compete for banks.
 
     Typical BLOCK_K=64, fp8 (1 byte/elem):
         pad=8:  stride_d=18, gcd(18,64)=2, 2%2=0 → solution exists → 2-way
@@ -942,11 +926,13 @@ def mfma_kcontig_pattern(nonKDim: int = 16, kWidth: int = 8) -> AccessPattern:
         k_group = (lane_id >> k_shift) & k_mask
         lane_to_position.append((n, k_group * kWidth))
 
+    # 16-lane SIMD group. Wave64 → 4 groups.
     return AccessPattern(
         lanes_per_wave=64,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
-        element_offsets=list(range(kWidth))
+        element_offsets=list(range(kWidth)),
+        lanes_per_cycle=16,
     )
 
 
@@ -987,13 +973,14 @@ def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
         k_start = k_group * kWidth
         lane_to_position.append((n, k_start))
 
+    # 16-lane SIMD group (ds_load_b{64,128} family's nature).
+    # All dwords per lane are served simultaneously within the group.
     return AccessPattern(
         lanes_per_wave=32,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
         element_offsets=list(range(kWidth)),
-        lanes_per_cycle=32,
-        dwords_per_subcycle=1,
+        lanes_per_cycle=16,
     )
 
 
@@ -1034,13 +1021,13 @@ def wmma_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
         row = k_group * kWidth
         positions.append((row, nonk))
 
+    # 16-lane SIMD group (ds_load_b32 family's nature, same as b64/b128).
     return AccessPattern(
         lanes_per_wave=32,
         elements_per_load=1,
         lane_to_position=positions,
         element_offsets=[0],
-        lanes_per_cycle=32,
-        dwords_per_subcycle=1,
+        lanes_per_cycle=16,
     )
 
 
