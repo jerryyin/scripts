@@ -400,9 +400,6 @@ def sweep_summary(ref_cols=128):
     print("#   Transposed (tr*):  padAmount = 2 * instBitWidth / elemBits")
     print("#   Transposed scalar: padAmount = 2 * instBitWidth / elemBits (fallback)")
     print("#   Non-transposed:    padAmount = 128 / elemBits")
-    print("#")
-    print("# MFMA f32 (CDNA):")
-    print("#   Non-transposed:    padAmount = kWidth = min(kWidth, 128 / 32)")
     print("#" * 80)
     print()
 
@@ -448,18 +445,6 @@ def sweep_summary(ref_cols=128):
               f"{overhead_pct(proposed, ref_cols):7.1f}%")
         print()
 
-    # MFMA f32 non-transposed
-    elem_bytes = 4
-    for name, nonKDim, kWidth, kTileSize, pattern_fn in MFMA_F32_GEOMETRIES:
-        pattern = pattern_fn(kWidth=kWidth)
-        proposed = kWidth
-        pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
-        short_name = f"{nonKDim}x{nonKDim}" if nonKDim != 16 else "16x16"
-        print(f"  {'mfma ' + short_name + ' non-tr':<22s} {'f32':>5s} {proposed:9d} "
-              f"{pro_c:2d}-way    "
-              f"{overhead_pct(proposed, ref_cols):7.1f}%")
-    print()
-
 
 # ============================================================================
 # Main
@@ -472,12 +457,10 @@ def main():
     print()
     print("Hardware: 64 banks, 4 bytes/bank")
     print("WMMA (gfx1250):  warp_size=32, nonKDim=16")
-    print("MFMA (CDNA/MI350): warp_size=64, nonKDim=16 or 32")
 
     sweep_transposed()
     sweep_non_transposed()
     sweep_transposed_scalar()
-    sweep_mfma_f32_non_transposed()
     sweep_summary()
 
 
