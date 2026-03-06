@@ -260,10 +260,11 @@ class AccessPattern:
                          Derived from linear layout's lane field
         element_offsets: Column offsets for each of the elements_per_load elements
                         Derived from register bits. Default: [0, 1, 2, ..., 7] (consecutive)
-        simd_group_size: How many lanes access LDS banks as a group — this is the
-                        instruction's nature, not derived from bandwidth.
-                        - ds_load_b{32,64,128}: 16 (the ds_load family's SIMD group)
-                        - ds_load_2addr_b64: 32 (all lanes fire together)
+        lds_group_size: How many lanes LDS services simultaneously per cycle.
+                        LDS processes this many threads' data in one service
+                        cycle; bank conflicts are checked within each group.
+                        - ds_load_b{32,64,128}: 16 (16 threads/cycle for all)
+                        - ds_load_2addr_b64: 32 (all lanes, 1 dword per sub-op)
                         - ds_load_tr*: 16 (transpose shuffle group)
                         Default: None → uses find_bank_conflicts default (all lanes).
         dwords_per_subop: How many dwords per lane are checked in one sub-operation.
@@ -286,7 +287,7 @@ class AccessPattern:
     elements_per_load: int = 8
     lane_to_position: List[Tuple[int, int]] = None
     element_offsets: List[int] = None  # Column offset for each element within the load
-    simd_group_size: int = None
+    lds_group_size: int = None
     dwords_per_subop: int = None
     
     def __post_init__(self):
@@ -300,7 +301,7 @@ class AccessPattern:
     @classmethod
     def from_linear_layout(cls, lane_bits: List[Tuple[int, int]], 
                            register_bits: List[Tuple[int, int]] = None,
-                           simd_group_size: int = None,
+                           lds_group_size: int = None,
                            dwords_per_subop: int = None) -> 'AccessPattern':
         """
         Create AccessPattern from Triton linear layout.
@@ -314,7 +315,7 @@ class AccessPattern:
                           e.g., [[0,1], [0,2], [0,4]] for 8 consecutive elements
                           Number of elements = 2^len(register_bits)
                           If None, assumes 8 consecutive elements (default for ds_load_tr16_b128).
-            simd_group_size: Override for execution model (see AccessPattern docstring).
+            lds_group_size: Override for execution model (see AccessPattern docstring).
             dwords_per_subop: Override for execution model (see AccessPattern docstring).
         
         Returns:
@@ -362,7 +363,7 @@ class AccessPattern:
                    elements_per_load=elements_per_load,
                    lane_to_position=lane_to_position,
                    element_offsets=element_offsets,
-                   simd_group_size=simd_group_size,
+                   lds_group_size=lds_group_size,
                    dwords_per_subop=dwords_per_subop)
 
 
@@ -435,26 +436,26 @@ def compute_lane_accesses(config: LDSConfig,
 def find_bank_conflicts(accesses: List[Dict],
                         bytes_per_bank: int = 4,
                         num_banks: int = 64,
-                        simd_group_size: int = None,
+                        lds_group_size: int = None,
                         dwords_per_subop: int = None) -> Tuple[Dict[int, List[int]], int]:
     """
-    Find bank conflicts from lane accesses, respecting SIMD grouping.
+    Find bank conflicts from lane accesses, respecting LDS service grouping.
 
-    Bank conflicts only occur between lanes in the **same** SIMD group
-    AND the **same** sub-operation.
+    Bank conflicts only occur between lanes in the **same** LDS service
+    group AND the **same** sub-operation.
 
-    Execution model for gfx1250 (wave32):
+    LDS services a fixed number of threads per cycle (lds_group_size).
+    This is distinct from SIMD width (which determines SQ instruction
+    issue speed) and from steady-state throughput (which depends on
+    bandwidth utilization and pipeline contention across SIMDs).
 
-    The SIMD group size is the instruction's nature — how many lanes
-    access LDS banks together.  It is NOT derived from bandwidth.
-
-    **ds_load_b{32,64,128}**: 16-lane SIMD groups.
+    **ds_load_b{32,64,128}**: 16 threads per LDS service cycle.
         All dwords per lane are served simultaneously within the group.
         Wave32 → 2 groups executed sequentially.
-    **ds_load_2addr_b64**: 32-lane SIMD group, but each address is a
-        separate sub-operation (dwords_per_subop=1).  Dwords from
-        different addresses don't compete for banks.
-    **ds_load_tr***: 16-lane SIMD groups (transpose shuffle boundary).
+    **ds_load_2addr_b64**: 32 threads per LDS service cycle, but each
+        address is a separate sub-operation (dwords_per_subop=1).
+        Dwords from different addresses don't compete for banks.
+    **ds_load_tr***: 16 threads per LDS service cycle (transpose group).
         Each lane reads 1 dword.
 
     On AMD LDS, two accesses to the *same* dword (aligned 4-byte word) in the
@@ -465,7 +466,7 @@ def find_bank_conflicts(accesses: List[Dict],
         accesses: List of lane access info from compute_lane_accesses()
         bytes_per_bank: Bank granularity in bytes (4 for AMD LDS)
         num_banks: Number of LDS banks
-        simd_group_size: Lanes that access LDS as a group (default: all lanes)
+        lds_group_size: Threads LDS services simultaneously (default: all)
         dwords_per_subop: Dwords per lane checked in one sub-operation.
                          None means all dwords together (default for single-
                          address instructions).  1 means each dword is an
@@ -478,16 +479,16 @@ def find_bank_conflicts(accesses: List[Dict],
         max_conflict_count is the worst-case conflict degree across all groups.
     """
     total_lanes = len(accesses)
-    if simd_group_size is None:
-        simd_group_size = total_lanes
-    num_groups = max(1, (total_lanes + simd_group_size - 1) // simd_group_size)
+    if lds_group_size is None:
+        lds_group_size = total_lanes
+    num_groups = max(1, (total_lanes + lds_group_size - 1) // lds_group_size)
 
     overall_bank_to_lanes: Dict[int, List[int]] = {}
     overall_max = 0
 
     for grp in range(num_groups):
-        lo = grp * simd_group_size
-        hi = min(lo + simd_group_size, total_lanes)
+        lo = grp * lds_group_size
+        hi = min(lo + lds_group_size, total_lanes)
         group_accesses = [a for a in accesses if lo <= a['lane'] < hi]
 
         if dwords_per_subop is None:
@@ -747,8 +748,8 @@ def analyze_bank_conflicts(config: LDSConfig,
     
     # Find conflicts, using pattern's execution model if specified
     fc_kwargs = dict(bytes_per_bank=config.bytes_per_bank, num_banks=config.num_banks)
-    if pattern.simd_group_size is not None:
-        fc_kwargs['simd_group_size'] = pattern.simd_group_size
+    if pattern.lds_group_size is not None:
+        fc_kwargs['lds_group_size'] = pattern.lds_group_size
     if pattern.dwords_per_subop is not None:
         fc_kwargs['dwords_per_subop'] = pattern.dwords_per_subop
     bank_to_lanes, max_conflict = find_bank_conflicts(accesses, **fc_kwargs)
@@ -773,7 +774,7 @@ def ds_load_tr16_b128_pattern() -> AccessPattern:
     LDS access pattern for ds_load_tr16_b128 with WMMA v3 layout (gfx1250).
 
     Each lane reads 4 bytes (1 dword = 2 fp16 elements) from LDS.
-    16-lane SIMD group (transpose shuffle boundary).  The cross-lane
+    16 threads per LDS service cycle (transpose shuffle boundary).  The cross-lane
     transpose then produces the 128-bit (8 × fp16) result per lane.
 
     Pre-transpose LDS access (what actually hits the banks):
@@ -787,11 +788,11 @@ def ds_load_tr16_b128_pattern() -> AccessPattern:
     The 8-lane shuffle group transposes these into 8 K values per lane.
     """
     # Each lane reads 1 dword (2 fp16 = 4 bytes) from LDS.
-    # 16-lane SIMD group (transpose shuffle boundary).
+    # 16 threads per LDS service cycle.
     return AccessPattern.from_linear_layout(
         lane_bits=[[1, 0], [2, 0], [4, 0], [0, 8], [8, 0]],
         register_bits=[[0, 1]],
-        simd_group_size=16,
+        lds_group_size=16,
     )
 
 
@@ -800,7 +801,7 @@ def ds_load_tr8_b64_pattern() -> AccessPattern:
     LDS access pattern for ds_load_tr8_b64 with doubleB8Contiguity (gfx1250).
 
     For 8-bit data (fp8/i8).  Each lane reads 4 bytes (1 dword = 4 fp8
-    elements) from LDS.  16-lane SIMD group (transpose shuffle boundary).
+    elements) from LDS.  16 threads per LDS service cycle.
     The cross-lane transpose produces the 64-bit (8 × fp8) result per lane.
 
     The doubleB8Contiguity trick changes lane bit 3 from N+8 to K+4,
@@ -819,11 +820,11 @@ def ds_load_tr8_b64_pattern() -> AccessPattern:
     Each lane reads 4 consecutive N elements (= 1 dword) from one K row.
     """
     # Each lane reads 1 dword (4 fp8 = 4 bytes) from LDS.
-    # 16-lane SIMD group (transpose shuffle boundary).
+    # 16 threads per LDS service cycle.
     return AccessPattern.from_linear_layout(
         lane_bits=[[1, 0], [2, 0], [0, 8], [4, 0], [8, 0]],
         register_bits=[[0, 1], [0, 2]],
-        simd_group_size=16,
+        lds_group_size=16,
     )
 
 
@@ -855,7 +856,7 @@ def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
     the 8-byte gap between the two sub-loads within one instruction.
 
     Execution model:
-        32-lane SIMD group (all lanes fire together).
+        All 32 threads serviced together per LDS cycle.
         Each address is an independent sub-operation (dwords_per_subop=1).
         Each lane's 2 addresses produce 2 dwords each; only dwords from the
         same address compete for banks.
@@ -878,7 +879,7 @@ def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
 
     element_offsets = list(range(kWidth)) + list(range(2 * kWidth, 3 * kWidth))
 
-    # 32-lane SIMD group (all lanes fire together).
+    # All 32 threads serviced together per LDS cycle.
     # dwords_per_subop=1: the two addresses are independent sub-operations;
     # dwords from different addresses don't compete for banks.
     return AccessPattern(
@@ -886,7 +887,7 @@ def ds_load_2addr_b64_pattern(kWidth: int = 8) -> AccessPattern:
         elements_per_load=load_width,
         lane_to_position=lane_to_position,
         element_offsets=element_offsets,
-        simd_group_size=32,
+        lds_group_size=32,
         dwords_per_subop=1,
     )
 
@@ -929,13 +930,13 @@ def mfma_kcontig_pattern(nonKDim: int = 16, kWidth: int = 8) -> AccessPattern:
         k_group = (lane_id >> k_shift) & k_mask
         lane_to_position.append((n, k_group * kWidth))
 
-    # 16-lane SIMD group (same as gfx1250). Wave64 → 4 groups.
+    # 16 threads per LDS service cycle. Wave64 → 4 groups.
     return AccessPattern(
         lanes_per_wave=64,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
         element_offsets=list(range(kWidth)),
-        simd_group_size=16,
+        lds_group_size=16,
     )
 
 
@@ -976,14 +977,14 @@ def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
         k_start = k_group * kWidth
         lane_to_position.append((n, k_start))
 
-    # 16-lane SIMD group (ds_load_b{64,128} family's nature).
+    # 16 threads per LDS service cycle.
     # All dwords per lane are served simultaneously within the group.
     return AccessPattern(
         lanes_per_wave=32,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
         element_offsets=list(range(kWidth)),
-        simd_group_size=16,
+        lds_group_size=16,
     )
 
 
@@ -1024,13 +1025,13 @@ def wmma_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
         row = k_group * kWidth
         positions.append((row, nonk))
 
-    # 16-lane SIMD group (ds_load_b32 family's nature, same as b64/b128).
+    # 16 threads per LDS service cycle (same as ds_load_b64/b128).
     return AccessPattern(
         lanes_per_wave=32,
         elements_per_load=1,
         lane_to_position=positions,
         element_offsets=[0],
-        simd_group_size=16,
+        lds_group_size=16,
     )
 
 
