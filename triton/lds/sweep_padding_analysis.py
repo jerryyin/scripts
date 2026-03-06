@@ -394,7 +394,7 @@ def sweep_summary(ref_cols=128):
     """
     print()
     print("#" * 80)
-    print("# PART 5: PROPOSAL SUMMARY (ref cols=128)")
+    print("# PART 4: PROPOSAL SUMMARY (ref cols=128)")
     print("#")
     print("# WMMA (gfx1250):")
     print("#   Transposed (tr*):  padAmount = 2 * instBitWidth / elemBits")
