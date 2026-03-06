@@ -236,8 +236,14 @@ def sweep_non_transposed():
             pattern = ds_load_2addr_b64_pattern(kWidth=effective_kw)
             inst_name = "ds_load_2addr_b64"
         else:
-            pattern = wmma_kcontig_pattern(kWidth=effective_kw)
-            inst_name = "ds_load_b128" if effective_kw * elem_bytes <= 16 else "2x ds_load_b128"
+            pattern = wmma_kcontig_pattern(kWidth=effective_kw, element_bytes=elem_bytes)
+            load_bytes = effective_kw * elem_bytes
+            if load_bytes > 16:
+                inst_name = "2x ds_load_b128"
+            elif load_bytes >= 16:
+                inst_name = "ds_load_b128"
+            else:
+                inst_name = "ds_load_b64"
 
         proposed_pad = 128 // elem_bits
         pads = PADDING_SWEEP
@@ -250,6 +256,24 @@ def sweep_non_transposed():
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=effective_kw * 2, indent=4)
         print()
+
+        # fp8 K-contiguous: when elements are fully contiguous in LDS
+        # (e.g., flash attention V operand), the compiler emits a plain
+        # ds_load_b64 instead of the interleaved ds_load_2addr_b64.
+        # 8 fp8 elems × 1 byte = 8 bytes = 64 bits → ds_load_b64,
+        # lds_group_size=32 (expert-confirmed: all 32 threads at once).
+        if elem_bits == 8:
+            pattern_b64 = wmma_kcontig_pattern(kWidth=effective_kw,
+                                               element_bytes=elem_bytes)
+            print(f"  {dtype_name} ({elem_bits}-bit): non-transposed ds_load_b64 "
+                  f"(K-contiguous, e.g. flash attention V)")
+            print(f"    kWidth={kw}, effective load width={effective_kw}, "
+                  f"lds_group_size=32, proposed pad={proposed_pad}")
+            print()
+
+            print_sweep_table(pattern_b64, elem_bytes, pads, proposed_pad,
+                              COL_WIDTHS, min_cols=effective_kw * 2, indent=4)
+            print()
 
 
 # ============================================================================
@@ -438,11 +462,22 @@ def sweep_summary(ref_cols=128):
         if elem_bits == 8:
             pattern = ds_load_2addr_b64_pattern(kWidth=effective_kw)
         else:
-            pattern = wmma_kcontig_pattern(kWidth=effective_kw)
+            pattern = wmma_kcontig_pattern(kWidth=effective_kw, element_bytes=elem_bytes)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern)
         print(f"  {'wmma non-transposed':<22s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "
               f"{overhead_pct(proposed, ref_cols):7.1f}%")
+
+        # fp8 K-contiguous ds_load_b64 (flash attention V operand path)
+        if elem_bits == 8:
+            pattern_b64 = wmma_kcontig_pattern(kWidth=effective_kw,
+                                               element_bytes=elem_bytes)
+            pro_c_b64 = get_max_conflict(ref_cols, proposed, elem_bytes,
+                                         pattern_b64)
+            print(f"  {'wmma non-tr (b64)':<22s} {dtype_name:>5s} {proposed:9d} "
+                  f"{pro_c_b64:2d}-way    "
+                  f"{overhead_pct(proposed, ref_cols):7.1f}%")
+
         print()
 
 
