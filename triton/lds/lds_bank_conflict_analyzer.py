@@ -263,7 +263,9 @@ class AccessPattern:
         lds_group_size: How many lanes LDS services simultaneously per cycle.
                         LDS processes this many threads' data in one service
                         cycle; bank conflicts are checked within each group.
-                        - ds_load_b{32,64,128}: 16 (16 threads/cycle for all)
+                        - ds_load_b128: 16 (16 threads/cycle)
+                        - ds_load_b64:  32 (all 32 threads at once)
+                        - ds_load_b32:  16 (16 threads/cycle)
                         - ds_load_2addr_b64: 32 (all lanes, 1 dword per sub-op)
                         - ds_load_tr*: 16 (transpose shuffle group)
                         Default: None → uses find_bank_conflicts default (all lanes).
@@ -449,12 +451,14 @@ def find_bank_conflicts(accesses: List[Dict],
     issue speed) and from steady-state throughput (which depends on
     bandwidth utilization and pipeline contention across SIMDs).
 
-    **ds_load_b{32,64,128}**: 16 threads per LDS service cycle.
+    **ds_load_b128**: 16 threads per LDS service cycle.
+        Threads 0-15 at cycle 0, threads 16-31 at cycle 1.
         All dwords per lane are served simultaneously within the group.
-        Wave32 → 2 groups executed sequentially.
-    **ds_load_2addr_b64**: 32 threads per LDS service cycle, but each
-        address is a separate sub-operation (dwords_per_subop=1).
-        Dwords from different addresses don't compete for banks.
+    **ds_load_b64**: 32 threads all served at cycle 0 (one cycle).
+        All dwords per lane are served simultaneously.
+    **ds_load_2addr_b64**: Acts like 2 × ds_load_b64.
+        Cycle 0: 32 threads at addr0. Cycle 1: 32 threads at addr1.
+        (lds_group_size=32, dwords_per_subop=1)
     **ds_load_tr***: 16 threads per LDS service cycle (transpose group).
         Each lane reads 1 dword.
 
@@ -950,10 +954,10 @@ def mfma32_kcontig_pattern(kWidth: int = 2) -> AccessPattern:
     return mfma_kcontig_pattern(nonKDim=32, kWidth=kWidth)
 
 
-def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
+def wmma_kcontig_pattern(kWidth: int = 8, element_bytes: int = 2) -> AccessPattern:
     """
     Access pattern for WMMA dot operand with K-contiguous LDS layout.
-    Non-transposed ds_read_b128: each lane reads kWidth consecutive K elements.
+    Non-transposed ds_load_b*: each lane reads kWidth consecutive K elements.
 
     WMMA on gfx1250 is always 16x16 (M/N), so nonKDim is fixed at 16 and
     warpSize is 32. The layout is symmetric for operand A and B.
@@ -968,8 +972,22 @@ def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
 
     Each lane reads kWidth elements starting at (nonK=lane&0xF, K=group*kWidth).
 
-    Supported for fp8/fp16 operands (f32 uses wmma_transposed_scalar instead).
+    LDS grouping depends on the instruction size (expert-confirmed):
+        ds_load_b128 (load_bytes >= 16): 16 threads grouped per cycle
+        ds_load_b64  (load_bytes == 8):  32 threads all served at once
+
+    Args:
+        kWidth:        Elements per lane per load.
+        element_bytes: Bytes per element (determines LDS instruction used).
     """
+    load_bytes = kWidth * element_bytes
+    if load_bytes >= 16:
+        # ds_load_b128: 16 threads grouped, 0-15 at cycle 0, 16-31 at cycle 1
+        lds_group_size = 16
+    else:
+        # ds_load_b64: all 32 threads served at cycle 0
+        lds_group_size = 32
+
     lane_to_position = []
     for lane_id in range(32):
         n = lane_id & 0xF
@@ -977,14 +995,12 @@ def wmma_kcontig_pattern(kWidth: int = 8) -> AccessPattern:
         k_start = k_group * kWidth
         lane_to_position.append((n, k_start))
 
-    # 16 threads per LDS service cycle.
-    # All dwords per lane are served simultaneously within the group.
     return AccessPattern(
         lanes_per_wave=32,
         elements_per_load=kWidth,
         lane_to_position=lane_to_position,
         element_offsets=list(range(kWidth)),
-        lds_group_size=16,
+        lds_group_size=lds_group_size,
     )
 
 
@@ -1052,7 +1068,7 @@ PATTERN_REGISTRY = {
     "ds_load_2addr_b64":        (lambda kw=8: ds_load_2addr_b64_pattern(kWidth=kw), "Dual-addr 64-bit load, 32 lanes (gfx1250 fp8 A-operand)"),
     "mfma16_kcontig":           (lambda kw=8: mfma_kcontig_pattern(nonKDim=16, kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
     "mfma32_kcontig":           (lambda kw=2: mfma_kcontig_pattern(nonKDim=32, kWidth=kw), "MFMA-32x32 non-transposed, 64 lanes (CDNA)"),
-    "wmma_kcontig":             (lambda kw=8: wmma_kcontig_pattern(kWidth=kw), "WMMA non-transposed, 32 lanes (gfx1250)"),
+    "wmma_kcontig":             (lambda kw=8, eb=2: wmma_kcontig_pattern(kWidth=kw, element_bytes=eb), "WMMA non-transposed, 32 lanes (gfx1250)"),
     "wmma_transposed_scalar":   (lambda kw=8: wmma_transposed_scalar_pattern(kWidth=kw), "WMMA transposed scalar, 32 lanes (f32 fallback)"),
 }
 
@@ -1131,7 +1147,7 @@ def validate_pattern_element_bytes(pattern_name: str, element_bytes: int,
     sys.exit(1)
 
 
-def get_pattern(name: str, kwidth: int = 8) -> AccessPattern:
+def get_pattern(name: str, kwidth: int = 8, element_bytes: int = 2) -> AccessPattern:
     """Look up a pattern by name from the registry."""
     if name not in PATTERN_REGISTRY:
         available = ", ".join(PATTERN_REGISTRY.keys())
@@ -1139,9 +1155,12 @@ def get_pattern(name: str, kwidth: int = 8) -> AccessPattern:
     factory, _ = PATTERN_REGISTRY[name]
     import inspect
     sig = inspect.signature(factory)
-    if sig.parameters:
-        return factory(kwidth)
-    return factory()
+    params = list(sig.parameters.keys())
+    if not params:
+        return factory()
+    if len(params) >= 2:
+        return factory(kwidth, element_bytes)
+    return factory(kwidth)
 
 
 # =============================================================================
@@ -1317,7 +1336,7 @@ Examples:
     validate_pattern_element_bytes(args.pattern, args.element_bytes,
                                    force=args.force)
 
-    pattern = get_pattern(args.pattern, args.kwidth)
+    pattern = get_pattern(args.pattern, args.kwidth, args.element_bytes)
 
     default_rows = max(r for r, _c in pattern.lane_to_position) + 1
     default_cols = args.row_width
