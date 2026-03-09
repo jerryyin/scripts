@@ -109,6 +109,7 @@ class LDSConfig:
     row_width_elements: int = 128
     padding_elements: int = 0
     element_bytes: int = 2
+    pad_interval: int = 0  # 0 = row_width_elements (per-row padding)
 
     mode: SwizzleMode = SwizzleMode.NONE
 
@@ -116,6 +117,11 @@ class LDSConfig:
     vec: int = 1
     per_phase: int = 1
     max_phase: int = 1
+
+    @property
+    def effective_pad_interval(self) -> int:
+        """Padding interval in elements. 0 or unset defaults to row_width."""
+        return self.pad_interval if self.pad_interval > 0 else self.row_width_elements
 
     @property
     def row_stride_bytes(self) -> int:
@@ -144,9 +150,13 @@ class LDSConfig:
             lds_stride = self.per_phase * self.row_width_elements * self.element_bytes
             return lds_row * lds_stride + swizzled_col * self.element_bytes
 
-        # NONE and PADDING both use the same linear formula;
-        # PADDING simply has a wider row_stride_bytes.
-        return row * self.row_stride_bytes + col * self.element_bytes
+        # Flat-index formula: matches Triton's PaddedSharedEncodingAttr
+        # phys = flat + (flat // padInterval) * padAmount
+        flat_idx = row * self.row_width_elements + col
+        if self.padding_elements > 0:
+            pi = self.effective_pad_interval
+            flat_idx += (flat_idx // pi) * self.padding_elements
+        return flat_idx * self.element_bytes
 
     def describe(self) -> str:
         """One-line human-readable description of the storage layout."""
@@ -154,6 +164,11 @@ class LDSConfig:
             return (f"swizzle(vec={self.vec}, perPhase={self.per_phase}, "
                     f"maxPhase={self.max_phase})")
         if self.mode == SwizzleMode.PADDING:
+            pi = self.effective_pad_interval
+            if pi != self.row_width_elements:
+                rows_per_pad = pi // self.row_width_elements if self.row_width_elements > 0 else 0
+                return (f"padding({self.padding_elements} elems, "
+                        f"interval={pi} [every {rows_per_pad} rows])")
             return f"padding({self.padding_elements} elems, {self.padding_elements * self.element_bytes}B)"
         return "none"
 
@@ -165,13 +180,21 @@ class LDSConfig:
     def with_padding(cls, padding_elements: int,
                      row_width: int = 128,
                      element_bytes: int = 2,
-                     num_banks: int = 64) -> 'LDSConfig':
-        """Create an LDSConfig with row-padding conflict avoidance."""
+                     num_banks: int = 64,
+                     pad_interval: int = 0) -> 'LDSConfig':
+        """Create an LDSConfig with padding conflict avoidance.
+
+        Args:
+            pad_interval: Flat-element interval at which padding is inserted.
+                0 (default) = row_width (per-row padding, current behavior).
+                Set to numBanks * bankBytes / elemBytes for bank-wrap padding.
+        """
         return cls(
             row_width_elements=row_width,
             padding_elements=padding_elements,
             element_bytes=element_bytes,
             num_banks=num_banks,
+            pad_interval=pad_interval,
             mode=SwizzleMode.PADDING if padding_elements > 0 else SwizzleMode.NONE,
         )
 
@@ -553,11 +576,15 @@ def generate_bank_grid(config: LDSConfig,
                        tile_cols: int) -> List[List[Tuple[int, bool]]]:
     """
     Generate a grid showing which bank each logical element maps to,
-    including padding columns (for PADDING mode).
+    including padding columns (for PADDING mode with per-row padding).
 
     The grid always shows *logical* (row, col) positions.  The bank
     number at each position reflects whichever storage strategy
     (none / padding / swizzle) the config uses.
+
+    When pad_interval > row_width (multi-row padding), padding columns
+    are not shown per-row since the padding gap is between row groups,
+    not within individual rows.
     
     Args:
         config: LDS configuration
@@ -566,16 +593,17 @@ def generate_bank_grid(config: LDSConfig,
     
     Returns:
         2D list of (bank_index, is_padding) tuples [row][col]
-        where col covers data columns + padding columns.
+        where col covers data columns + padding columns (per-row only).
     """
-    total_cols = tile_cols + config.padding_elements
+    per_row_pad = (config.effective_pad_interval <= config.row_width_elements)
+    total_cols = tile_cols + (config.padding_elements if per_row_pad else 0)
     grid = []
     for row in range(tile_rows):
         row_banks = []
         for col in range(total_cols):
             byte_addr = config.logical_to_byte_addr(row, col)
             bank = (byte_addr // config.bytes_per_bank) % config.num_banks
-            is_pad = col >= tile_cols
+            is_pad = per_row_pad and col >= tile_cols
             row_banks.append((bank, is_pad))
         grid.append(row_banks)
     return grid
@@ -718,7 +746,12 @@ def analyze_bank_conflicts(config: LDSConfig,
         print(f"LDS Configuration:")
         print(f"  Row width: {config.row_width_elements} elements")
         print(f"  Storage layout: {config.describe()}")
-        print(f"  Row stride: {config.row_stride_bytes} bytes")
+        pi = config.effective_pad_interval
+        if pi != config.row_width_elements and config.padding_elements > 0:
+            print(f"  Pad interval: {pi} elements "
+                  f"(every {pi // config.row_width_elements} rows)")
+        else:
+            print(f"  Row stride: {config.row_stride_bytes} bytes")
         print(f"  Element size: {config.element_bytes} bytes")
         print(f"  Banks: {config.num_banks}")
         print()
@@ -735,8 +768,9 @@ def analyze_bank_conflicts(config: LDSConfig,
         print("=" * 70)
         print()
         grid = generate_bank_grid(config, tile_rows, tile_cols)
-        print_bank_grid(grid, max_cols=tile_cols + config.padding_elements,
-                        pattern=pattern)
+        per_row_pad = (config.effective_pad_interval <= config.row_width_elements)
+        grid_cols = tile_cols + (config.padding_elements if per_row_pad else 0)
+        print_bank_grid(grid, max_cols=grid_cols, pattern=pattern)
         print()
     
     # Compute lane accesses
@@ -1202,6 +1236,7 @@ def _build_config(args) -> LDSConfig:
         row_width=args.row_width,
         element_bytes=args.element_bytes,
         num_banks=args.num_banks,
+        pad_interval=args.pad_interval,
     )
 
 
@@ -1287,6 +1322,10 @@ Examples:
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
     --row-width 64 --element-bytes 2 --padding 16 --num-banks 64
 
+  # Bank-wrap padding (Alex's padInterval formula)
+  python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
+    --row-width 16 --element-bytes 2 --padding 8 --pad-interval 128
+
   # Swizzle layout with all fields
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig --layout swizzle \\
     --row-width 64 --element-bytes 2 --swizzle-vec 8 --swizzle-per-phase 1 \\
@@ -1305,7 +1344,11 @@ Examples:
                         choices=['none', 'padding', 'swizzle'],
                         help='Storage layout: none, padding (default), or swizzle (XOR)')
     parser.add_argument('--padding', type=int, default=0,
-                        help='Padding elements per row (default: 0, used with --layout=padding)')
+                        help='Padding elements (default: 0, used with --layout=padding)')
+    parser.add_argument('--pad-interval', type=int, default=0,
+                        help='Flat-element interval for padding insertion. '
+                             '0 (default) = row-width (per-row). '
+                             'Set to numBanks*4/elemBytes for bank-wrap padding.')
     parser.add_argument('--swizzle-vec', type=int, default=None,
                         help='Swizzle vec; auto-derived from kwidth if omitted')
     parser.add_argument('--swizzle-per-phase', type=int, default=1,
