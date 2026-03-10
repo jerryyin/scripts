@@ -120,8 +120,17 @@ class LDSConfig:
 
     @property
     def effective_pad_interval(self) -> int:
-        """Padding interval in elements. 0 or unset defaults to row_width."""
-        return self.pad_interval if self.pad_interval > 0 else self.row_width_elements
+        """Padding interval in elements, guaranteed >= row_width.
+
+        - pad_interval == 0 (default): per-row padding (returns row_width).
+        - pad_interval > 0: returns max(row_width, pad_interval).
+          Callers set pad_interval to the desired bank-wrap boundary
+          (e.g. numBanks * bankBytes / elemBytes) and this property
+          ensures the interval is never narrower than one row.
+        """
+        if self.pad_interval > 0:
+            return max(self.row_width_elements, self.pad_interval)
+        return self.row_width_elements
 
     @property
     def row_stride_bytes(self) -> int:
