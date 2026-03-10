@@ -1331,7 +1331,7 @@ Examples:
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
     --row-width 64 --element-bytes 2 --padding 16 --num-banks 64
 
-  # Bank-wrap padding (Alex's padInterval formula)
+  # Bank-wrap padding (pad every N rows at the bank-wrap boundary)
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
     --row-width 16 --element-bytes 2 --padding 8 --pad-interval 128
 
@@ -1357,7 +1357,9 @@ Examples:
     parser.add_argument('--pad-interval', type=int, default=0,
                         help='Flat-element interval for padding insertion. '
                              '0 (default) = row-width (per-row). '
-                             'Set to numBanks*4/elemBytes for bank-wrap padding.')
+                             'Set to numBanks*4/elemBytes for bank-wrap padding. '
+                             'Clamped to max(row-width, value) so padding never '
+                             'splits a row.')
     parser.add_argument('--swizzle-vec', type=int, default=None,
                         help='Swizzle vec; auto-derived from kwidth if omitted')
     parser.add_argument('--swizzle-per-phase', type=int, default=1,
