@@ -100,7 +100,7 @@ def conflict_marker(conflict):
 
 def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                       col_widths, min_cols=1, indent=4,
-                      pad_interval=0):
+                      use_bank_wrap=False):
     """
     Print a conflict table: rows = column widths, columns = padding values.
 
@@ -108,17 +108,18 @@ def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
     overhead (%) for a reference column width.
 
     Args:
-        pattern:       AccessPattern to analyze
-        elem_bytes:    bytes per element
-        pads:          list of padding values to sweep
-        proposed_pad:  proposed padding value (for labeling)
-        col_widths:    list of column widths to test
-        min_cols:      skip cols < min_cols
-        indent:        number of leading spaces
-        pad_interval:  Flat-element padding interval.  0 = per-row (default).
-                       Positive values are clamped to max(row_width, value)
-                       by LDSConfig.effective_pad_interval.
+        pattern:        AccessPattern to analyze
+        elem_bytes:     bytes per element
+        pads:           list of padding values to sweep
+        proposed_pad:   proposed padding value (for labeling)
+        col_widths:     list of column widths to test
+        min_cols:       skip cols < min_cols
+        indent:         number of leading spaces
+        use_bank_wrap:  If True, set pad_interval to the bank-wrap boundary
+                        (numBanks * bankBytes / elemBytes).  The analyzer's
+                        effective_pad_interval clamps to max(row_width, value).
     """
+    pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
     prefix = " " * indent
     col_w = 9
 
@@ -152,7 +153,7 @@ def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                 line += f" {'N/A':>{col_w}s}"
             else:
                 c = get_max_conflict(cols, p, elem_bytes, pattern,
-                                     pad_interval=pad_interval)
+                                     pad_interval=pi)
                 mk = conflict_marker(c)
                 cell = f"{c:2d}-way{mk}"
                 line += f" {cell:>{col_w}s}"
@@ -195,7 +196,6 @@ def sweep_transposed(use_bank_wrap=False):
         else:
             pattern = ds_load_tr16_b128_pattern()
         pads = PADDING_SWEEP
-        pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
 
         print(f"  {dtype_name} ({elem_bits}-bit): ds_load_tr{elem_bits}_b{tr_inst_bits}")
         print(f"    {tr_elems} elems/lane, proposed pad={proposed_pad}")
@@ -205,7 +205,7 @@ def sweep_transposed(use_bank_wrap=False):
         # than 16 columns can't use the transposed instruction.
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=16, indent=4,
-                          pad_interval=pi)
+                          use_bank_wrap=use_bank_wrap)
         print()
 
 
@@ -256,7 +256,6 @@ def sweep_non_transposed(use_bank_wrap=False):
 
         proposed_pad = 128 // elem_bits
         pads = PADDING_SWEEP
-        pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
 
         print(f"  {dtype_name} ({elem_bits}-bit): non-transposed {inst_name}")
         print(f"    kWidth={kw}, effective load width={effective_kw}, "
@@ -265,7 +264,7 @@ def sweep_non_transposed(use_bank_wrap=False):
 
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=effective_kw * 2, indent=4,
-                          pad_interval=pi)
+                          use_bank_wrap=use_bank_wrap)
         print()
 
         # fp8 K-contiguous: when elements are fully contiguous in LDS
@@ -284,7 +283,7 @@ def sweep_non_transposed(use_bank_wrap=False):
 
             print_sweep_table(pattern_b64, elem_bytes, pads, proposed_pad,
                               COL_WIDTHS, min_cols=effective_kw * 2, indent=4,
-                              pad_interval=pi)
+                              use_bank_wrap=use_bank_wrap)
             print()
 
 
@@ -347,7 +346,6 @@ def sweep_transposed_scalar(use_bank_wrap=False):
 
         pattern = wmma_transposed_scalar_pattern(kWidth=kw)
         pads = PADDING_SWEEP
-        pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
 
         print(f"  {dtype_name} ({elem_bits}-bit): transposed scalar ds_load_b{elem_bits}")
         print(f"    kWidth={kw}, 1 elem/load, {kw} loads/thread, proposed pad={proposed_pad}")
@@ -359,7 +357,7 @@ def sweep_transposed_scalar(use_bank_wrap=False):
 
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=16, indent=4,
-                          pad_interval=pi)
+                          use_bank_wrap=use_bank_wrap)
         print()
 
 
@@ -406,7 +404,6 @@ def sweep_mfma_f32_non_transposed(use_bank_wrap=False):
     print()
 
     elem_bytes = 4
-    pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
     for name, nonKDim, kWidth, kTileSize, pattern_fn in MFMA_F32_GEOMETRIES:
         pattern = pattern_fn(kWidth=kWidth)
         proposed_pad = kWidth   # min(kWidth, 128/32) = kWidth for f32
@@ -420,7 +417,7 @@ def sweep_mfma_f32_non_transposed(use_bank_wrap=False):
         valid_cols = [c for c in MFMA_F32_COL_WIDTHS if c >= kTileSize]
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           valid_cols, min_cols=kTileSize, indent=4,
-                          pad_interval=pi)
+                          use_bank_wrap=use_bank_wrap)
         print()
 
 
