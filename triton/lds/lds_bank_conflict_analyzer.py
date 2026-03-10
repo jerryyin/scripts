@@ -618,6 +618,32 @@ def generate_bank_grid(config: LDSConfig,
     return grid
 
 
+# ANSI 256-color backgrounds for 8 bank groups (banks 0-7, 8-15, ..., 56-63)
+_BANK_GROUP_COLORS = [
+    "\033[48;5;52m",   # dark red
+    "\033[48;5;22m",   # dark green
+    "\033[48;5;17m",   # dark blue
+    "\033[48;5;58m",   # dark yellow
+    "\033[48;5;53m",   # dark magenta
+    "\033[48;5;23m",   # dark cyan
+    "\033[48;5;94m",   # brown
+    "\033[48;5;54m",   # teal
+]
+_ANSI_RESET = "\033[0m"
+
+
+def _bank_color(bank: int, num_banks: int = 64) -> str:
+    """Return ANSI background escape for this bank's color group."""
+    banks_per_group = max(1, num_banks // len(_BANK_GROUP_COLORS))
+    idx = (bank // banks_per_group) % len(_BANK_GROUP_COLORS)
+    return _BANK_GROUP_COLORS[idx]
+
+
+def _use_color() -> bool:
+    """True when stdout is a terminal (skip color for piped/redirected output)."""
+    return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+
 def _compute_covered_cells(pattern: 'AccessPattern') -> set:
     """Return the set of (row, col) cells touched by the pattern's lanes."""
     covered = set()
@@ -674,16 +700,23 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
     print("     " + sep)
 
     # Grid rows
+    color = _use_color()
     for row in range(num_rows):
         print(f"r{row:2d} │", end="")
         for col in range(show_cols):
             bank, is_pad = grid[row][col]
+            bstr = f"{bank:{cw - 1}d}" if cw > 1 else f"{bank}"
+            if color:
+                bstr = f"{_bank_color(bank)}{bstr}{_ANSI_RESET}"
             if col == data_cols:
-                print(f"║{bank:{cw - 1}d}", end="")
+                print(f"║{bstr}", end="")
             elif covered is not None and col == cov_max_col + 1 and col < data_cols:
-                print(f"|{bank:{cw - 1}d}", end="")
+                print(f"|{bstr}", end="")
             else:
-                print(f"{bank:>{cw}d}", end="")
+                if color:
+                    print(f" {bstr}", end="")
+                else:
+                    print(f"{bank:>{cw}d}", end="")
         if num_cols > max_cols:
             print("  ..", end="")
         print()
