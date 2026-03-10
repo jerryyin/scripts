@@ -601,16 +601,21 @@ def generate_bank_grid(config: LDSConfig,
         tile_cols: Number of DATA columns in the tile
     
     Returns:
-        2D list of (bank_index, is_padding) tuples [row][col]
-        where col covers data columns + padding columns (per-row only).
+        2D list of (bank_index, is_padding) tuples [row][col].
+        Rows that have padding inserted after them include extra padding
+        columns (with is_padding=True) beyond the data columns.
     """
-    per_row_pad = (config.effective_pad_interval <= config.row_width_elements)
-    total_cols = tile_cols + (config.padding_elements if per_row_pad else 0)
+    pi = config.effective_pad_interval
+    rw = config.row_width_elements
+
     grid = []
     for row in range(tile_rows):
+        row_has_pad = (config.padding_elements > 0
+                       and ((row + 1) * rw) % pi == 0)
+        ncols = tile_cols + (config.padding_elements if row_has_pad else 0)
         row_banks = []
-        for col in range(total_cols):
-            if per_row_pad and col >= tile_cols:
+        for col in range(ncols):
+            if col >= tile_cols:
                 # Padding gap: physical bytes immediately after the last
                 # data element in this row.  Can't use logical_to_byte_addr
                 # because col >= row_width falls into the next row's data.
@@ -663,44 +668,45 @@ def _compute_covered_cells(pattern: 'AccessPattern') -> set:
 
 
 def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
-                    pattern: Optional['AccessPattern'] = None):
+                    pattern: Optional['AccessPattern'] = None,
+                    config: Optional['LDSConfig'] = None):
     """
     Print bank grid with three visual zones:
 
     1. **Covered** by the current access pattern → bank number shown normally
     2. **Data but not covered** (rest of the LDS row) → bank shown dimmed as ·XX
-    3. **Padding** columns → bank shown in parentheses (XX)
+    3. **Padding** columns → bank shown after ║ separator
 
     When pattern is None, all data cells are shown normally (no coverage
-    highlighting).
+    highlighting).  Rows with padding show the padding banks inline after
+    the ║ separator, regardless of per-row or bank-wrap padding mode.
     """
     num_rows = len(grid)
-    num_cols = len(grid[0]) if grid else 0
-    show_cols = min(num_cols, max_cols)
+    show_cols = min(max_cols, max(len(r) for r in grid)) if grid else 0
 
     covered = _compute_covered_cells(pattern) if pattern else None
 
     cw = 3  # column width
 
-    # Determine the column boundary of the accessed region
     cov_max_col = -1
     if covered is not None:
         cov_max_col = max(c for _, c in covered)
 
     data_cols = sum(1 for bank, is_pad in grid[0] if not is_pad) if grid else 0
+    any_row_has_pad = any(len(r) > data_cols for r in grid)
 
     # Header: column indices
     print("     ", end="")
     for col in range(show_cols):
         print(f"{col:>{cw}d}", end="")
-    if num_cols > max_cols:
+    if show_cols < max(len(r) for r in grid):
         print("  ..", end="")
     print("   ← col")
 
-    # Separator line with border markers
+    # Separator line — show ╫ at data_cols only if any row has padding
     sep = ""
     for col in range(show_cols):
-        if col == data_cols:
+        if any_row_has_pad and col == data_cols:
             sep += "╫" + "─" * (cw - 1)
         elif covered is not None and col == cov_max_col + 1 and col < data_cols:
             sep += "┼" + "─" * (cw - 1)
@@ -711,13 +717,15 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
     # Grid rows
     color = _use_color()
     for row in range(num_rows):
+        row_len = len(grid[row])
+        row_show = min(row_len, show_cols)
         print(f"r{row:2d} │", end="")
-        for col in range(show_cols):
+        for col in range(row_show):
             bank, is_pad = grid[row][col]
             bstr = f"{bank:{cw - 1}d}" if cw > 1 else f"{bank}"
             if color:
                 bstr = f"{_bank_color(bank)}{bstr}{_ANSI_RESET}"
-            if col == data_cols:
+            if col == data_cols and is_pad:
                 print(f"║{bstr}", end="")
             elif covered is not None and col == cov_max_col + 1 and col < data_cols:
                 print(f"|{bstr}", end="")
@@ -726,14 +734,11 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
                     print(f" {bstr}", end="")
                 else:
                     print(f"{bank:>{cw}d}", end="")
-        if num_cols > max_cols:
-            print("  ..", end="")
         print()
 
     # Legend
     legend_parts = []
     if covered is not None:
-        # Compute covered bounding box for the legend
         cov_rows = sorted(set(r for r, _ in covered))
         cov_cols = sorted(set(c for _, c in covered))
         legend_parts.append(
@@ -741,7 +746,7 @@ def print_bank_grid(grid: List[List[Tuple[int, bool]]], max_cols: int = 64,
             f"(rows {cov_rows[0]}-{cov_rows[-1]}, cols {cov_cols[0]}-{cov_cols[-1]})"
         )
         legend_parts.append("     | = boundary of accessed region")
-    if grid and any(is_pad for _, is_pad in grid[0]):
+    if any_row_has_pad:
         legend_parts.append("     ║ = boundary of data / padding")
     if legend_parts:
         print()
@@ -819,9 +824,8 @@ def analyze_bank_conflicts(config: LDSConfig,
         print("=" * 70)
         print()
         grid = generate_bank_grid(config, tile_rows, tile_cols)
-        per_row_pad = (config.effective_pad_interval <= config.row_width_elements)
-        grid_cols = tile_cols + (config.padding_elements if per_row_pad else 0)
-        print_bank_grid(grid, max_cols=grid_cols, pattern=pattern)
+        grid_cols = max(len(r) for r in grid) if grid else tile_cols
+        print_bank_grid(grid, max_cols=grid_cols, pattern=pattern, config=config)
         print()
     
     # Compute lane accesses
