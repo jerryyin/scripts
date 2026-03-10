@@ -610,9 +610,18 @@ def generate_bank_grid(config: LDSConfig,
     for row in range(tile_rows):
         row_banks = []
         for col in range(total_cols):
-            byte_addr = config.logical_to_byte_addr(row, col)
+            if per_row_pad and col >= tile_cols:
+                # Padding gap: physical bytes immediately after the last
+                # data element in this row.  Can't use logical_to_byte_addr
+                # because col >= row_width falls into the next row's data.
+                last_data_byte = config.logical_to_byte_addr(
+                    row, config.row_width_elements - 1)
+                byte_addr = last_data_byte + (1 + col - tile_cols) * config.element_bytes
+                is_pad = True
+            else:
+                byte_addr = config.logical_to_byte_addr(row, col)
+                is_pad = False
             bank = (byte_addr // config.bytes_per_bank) % config.num_banks
-            is_pad = per_row_pad and col >= tile_cols
             row_banks.append((bank, is_pad))
         grid.append(row_banks)
     return grid
