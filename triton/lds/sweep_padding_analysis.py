@@ -41,6 +41,15 @@ DTYPES = {
     # transposed instruction.
     #
     # name: (element_bytes, element_bits, tr_inst_bits)
+    #
+    # kBase reference (from WmmaGroup.cpp WMMA v3 intrinsics):
+    #   f32:  wmma_f32_16x16x4_f32   -> kDim=4,   kBase=2
+    #   fp16: wmma_f32_16x16x32_f16  -> kDim=32,  kBase=16
+    #   fp8:  wmma_f32_16x16x64_fp8  -> kDim=64,  kBase=32
+    #   iu8:  wmma_i32_16x16x64_iu8  -> kDim=64,  kBase=32
+    #
+    # kWidth for WMMA v3: always 8 (AccelerateAMDMatmul.cpp:1628-1629).
+    # kBase only matters if the compiler switches to kWidth = min(8, kBase).
     "f32":  (4, 32, None),  # wmma_f32_16x16x4_f32,   no transposed load
     "fp16": (2, 16, 128),   # wmma_f32_16x16x32_f16,  ds_load_tr16_b128
     "fp8":  (1,  8,  64),   # wmma_f32_16x16x64_fp8,  ds_load_tr8_b64
