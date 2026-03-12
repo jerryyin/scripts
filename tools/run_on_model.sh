@@ -8,6 +8,7 @@
 # Usage:
 #   run_on_model.sh -- python3 kernel.py
 #   run_on_model.sh --backend ffm -- python3 kernel.py --arg val
+#   run_on_model.sh --capture -- ./hip_tdm_1d 3
 #
 #   # Inside docker:
 #   docker exec my-container /path/to/run_on_model.sh -- python3 k.py
@@ -15,10 +16,13 @@
 # Options:
 #   --backend am|ffm    Which simulator backend. Auto-detected if omitted:
 #                        AM if /am-ffm exists, FFM otherwise.
+#   --capture           Capture an AQL packet trace (.cap file) via roccap.
+#                        Forces FFM backend. Output: roc_capture_<binary>.cap
 #   -- COMMAND [ARGS...] Everything after -- is the command to run.
 set -euo pipefail
 
 BACKEND=""
+CAPTURE=0
 
 usage() {
     sed -n '2,/^set /{ /^#/s/^# \?//p }' "$0"
@@ -27,10 +31,11 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --backend) BACKEND="$2"; shift 2 ;;
-        -h|--help) usage ;;
-        --)        shift; break ;;
-        *)         echo "Unknown option: $1" >&2; usage ;;
+        --backend)  BACKEND="$2"; shift 2 ;;
+        --capture)  CAPTURE=1; shift ;;
+        -h|--help)  usage ;;
+        --)         shift; break ;;
+        *)          echo "Unknown option: $1" >&2; usage ;;
     esac
 done
 
@@ -49,6 +54,15 @@ elif [[ -d /ffm ]]; then
 else
     echo "Error: neither /am-ffm nor /ffm found" >&2
     exit 1
+fi
+
+# ---------- capture mode forces FFM ----------
+
+if [[ $CAPTURE -eq 1 && -n "$BACKEND" && "$BACKEND" != "ffm" ]]; then
+    echo "Warning: --capture forces FFM backend (ignoring --backend $BACKEND)" >&2
+fi
+if [[ $CAPTURE -eq 1 ]]; then
+    BACKEND=ffm
 fi
 
 # ---------- auto-detect / validate backend ----------
@@ -114,5 +128,26 @@ if [[ -d /opt/rocm/lib ]]; then
 fi
 
 # ---------- run ----------
+
+if [[ $CAPTURE -eq 1 ]]; then
+    export HSA_KMT_MODEL_GPUVM_BASE=0x200000000
+    export HSA_KMT_MODEL_GPUVM_SIZE=0xF00000000
+
+    ROCCAP=""
+    for candidate in "$PKG_DIR/tools/roccap/bin/roccap" \
+                     "$(command -v roccap 2>/dev/null)"; do
+        if [[ -x "$candidate" ]]; then
+            ROCCAP="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$ROCCAP" ]]; then
+        echo "Error: roccap not found in $PKG_DIR/tools/roccap/bin/ or PATH" >&2
+        exit 1
+    fi
+
+    echo "[run_on_model] capture via $ROCCAP" >&2
+    exec "$ROCCAP" capture --loglevel info "$@"
+fi
 
 exec "$@"
