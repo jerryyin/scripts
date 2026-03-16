@@ -717,9 +717,7 @@ matmul_dispatch_0_matmul_4096x4096x4096_f32: ; @matmul_dispatch_0_matmul_4096x40
 	.set amdgpu.max_num_sgpr, 0
 	.set amdgpu.max_num_named_barrier, 0
 	.text
-	.ident	"AMD clang version 20.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.0.2 25385 0dda3adf56766e0aac0d03173ced3759e1ffecbc)"
 	.section	".note.GNU-stack","",@progbits
-	.addrsig
 	.amdgpu_metadata
 ---
 amdhsa.kernels:
@@ -800,10 +798,6 @@ amdhsa.kernels:
     .group_segment_fixed_size: 49152
     .kernarg_segment_align: 8
     .kernarg_segment_size: 280
-    .language:       OpenCL C
-    .language_version:
-      - 2
-      - 0
     .max_flat_workgroup_size: 256
     .name:           matmul_dispatch_0_matmul_4096x4096x4096_f32
     .private_segment_fixed_size: 0

@@ -5,7 +5,7 @@
 # Proves the bug is in LLVM's asyncmark/wait.asyncmark implementation by:
 #   1. Compiling a 3-stage async-copy GEMM and dumping the .optimized.ll
 #   2. Creating a modified copy with asyncmark intrinsics replaced by s_waitcnt
-#   3. Compiling both through clang to assembly/object/hsaco
+#   3. Compiling both through llc -O3 to assembly/object/hsaco
 #   4. Substituting the modified hsaco into the IREE vmfb
 #   5. Running both against a baseline (no direct-load) with random data
 #
@@ -106,19 +106,19 @@ IREE_RUN=$(find_tool iree-run-module) || err "Cannot find iree-run-module. Set I
 # Derive IREE build root from iree-compile location
 IREE_TOOLS_DIR="$(dirname "$IREE_COMPILE")"
 
-# Find clang from IREE's LLVM build
-CLANG=""
+# Find llc from IREE's LLVM build
+LLC=""
 for candidate in \
-    "${IREE_TOOLS_DIR}/../llvm-project/bin/clang" \
-    "${IREE_TOOLS_DIR}/../../llvm-project/bin/clang" \
-    "/root/iree/build/dbg/llvm-project/bin/clang"; do
+    "${IREE_TOOLS_DIR}/../llvm-project/bin/llc" \
+    "${IREE_TOOLS_DIR}/../../llvm-project/bin/llc" \
+    "/root/iree/build/dbg/llvm-project/bin/llc"; do
     candidate="$(realpath "$candidate" 2>/dev/null || true)"
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-        CLANG="$candidate"
+        LLC="$candidate"
         break
     fi
 done
-[ -n "$CLANG" ] || err "Cannot find clang from IREE's LLVM build"
+[ -n "$LLC" ] || err "Cannot find llc from IREE's LLVM build. Try: ninja -C <build>/llvm-project llc"
 
 # Find linker
 LLD="$(command -v ld.lld 2>/dev/null || true)"
@@ -155,7 +155,7 @@ info "Wait mode:         $([ $CONSERVATIVE -eq 1 ] && echo 'conservative (vmcnt(
 info "Tools:"
 info "  iree-compile:    $IREE_COMPILE"
 info "  iree-run-module: $IREE_RUN"
-info "  clang:           $CLANG"
+info "  llc:             $LLC"
 info "  ld.lld:          $LLD"
 echo ""
 
@@ -308,37 +308,36 @@ info "  → modified.optimized.ll"
 
 # ─── Step 4: Compile both IRs through clang ──────────────────────────────────
 
-log "Step 4: Compile LLVM IR → assembly → object → hsaco"
+log "Step 4: Compile LLVM IR → assembly → object → hsaco (via llc)"
+
+LLC_FLAGS="-mtriple=amdgcn-amd-amdhsa -mcpu=$TARGET -O3 -disable-verify"
 
 info "  Compiling original IR (with asyncmark)..."
-"$CLANG" -target amdgcn-amd-amdhsa -mcpu="$TARGET" -O3 -S \
-    -x ir "$WORKDIR/original.optimized.ll" \
-    -o "$WORKDIR/original_clang.s" 2>&1
-info "    → original_clang.s ($(wc -l < "$WORKDIR/original_clang.s") lines)"
+"$LLC" $LLC_FLAGS -filetype=asm \
+    "$WORKDIR/original.optimized.ll" -o "$WORKDIR/original.s" 2>&1
+info "    → original.s ($(wc -l < "$WORKDIR/original.s") lines)"
 
 info "  Compiling modified IR (with s_waitcnt)..."
-"$CLANG" -target amdgcn-amd-amdhsa -mcpu="$TARGET" -O3 -S \
-    -x ir "$WORKDIR/modified.optimized.ll" \
-    -o "$WORKDIR/modified_clang.s" 2>&1
-info "    → modified_clang.s ($(wc -l < "$WORKDIR/modified_clang.s") lines)"
+"$LLC" $LLC_FLAGS -filetype=asm \
+    "$WORKDIR/modified.optimized.ll" -o "$WORKDIR/modified.s" 2>&1
+info "    → modified.s ($(wc -l < "$WORKDIR/modified.s") lines)"
 
 echo ""
 info "  Sync instructions in original:"
-grep "s_waitcnt.*vmcnt\|; asyncmark\|; wait_asyncmark" "$WORKDIR/original_clang.s" | while read -r line; do
+grep "s_waitcnt.*vmcnt\|; asyncmark\|; wait_asyncmark" "$WORKDIR/original.s" | while read -r line; do
     echo "      $line"
 done || true
 
 echo ""
 info "  Sync instructions in modified:"
-grep "s_waitcnt.*vmcnt" "$WORKDIR/modified_clang.s" | while read -r line; do
+grep "s_waitcnt.*vmcnt" "$WORKDIR/modified.s" | while read -r line; do
     echo "      $line"
 done || true
 
 echo ""
-info "  Linking modified → hsaco..."
-"$CLANG" -target amdgcn-amd-amdhsa -mcpu="$TARGET" -O3 -c \
-    -x ir "$WORKDIR/modified.optimized.ll" \
-    -o "$WORKDIR/modified.o" 2>&1
+info "  Compiling modified → object → hsaco..."
+"$LLC" $LLC_FLAGS -filetype=obj \
+    "$WORKDIR/modified.optimized.ll" -o "$WORKDIR/modified.o" 2>&1
 "$LLD" -shared "$WORKDIR/modified.o" -o "$WORKDIR/modified.hsaco"
 info "    → modified.hsaco ($(stat -c %s "$WORKDIR/modified.hsaco") bytes)"
 
@@ -446,8 +445,8 @@ cat << EOF
   Key files:
     original.optimized.ll  — LLVM IR with asyncmark intrinsics
     modified.optimized.ll  — LLVM IR with asyncmark → s_waitcnt
-    original_clang.s       — Assembly from original IR (with asyncmark)
-    modified_clang.s       — Assembly from modified IR (with s_waitcnt)
+    original.s             — Assembly from original IR (llc -O3)
+    modified.s             — Assembly from modified IR (llc -O3)
     modified.hsaco         — Linked GPU binary (modified)
     baseline.vmfb          — Ground truth vmfb (no direct-load)
     original.vmfb          — Original ${STAGES}-stage vmfb (with asyncmark)
@@ -455,5 +454,5 @@ cat << EOF
     asyncmark_analysis.env — Detected asyncmark pattern
 
   To inspect assembly differences:
-    diff $WORKDIR/original_clang.s $WORKDIR/modified_clang.s
+    diff $WORKDIR/original.s $WORKDIR/modified.s
 EOF

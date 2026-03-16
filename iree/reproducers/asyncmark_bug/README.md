@@ -18,7 +18,7 @@ Starting from the `.optimized.ll` (LLVM IR after target-independent
 optimizations) of a failing 4096x4096x4096 f32 GEMM with 3-stage pipelining:
 
 1. Replace `asyncmark`/`wait.asyncmark` intrinsics with explicit `s_waitcnt`
-2. Compile both original and modified IR through `clang -O3` to assembly
+2. Compile both original and modified IR through `llc -O3` to assembly
 3. Substitute the modified assembly into the runtime binary
 4. Compare numerical results against a known-good baseline
 
@@ -52,7 +52,7 @@ Same LLVM IR, same `clang -O3`, same runtime — only the wait mechanism differs
 
 ### Assembly Comparison
 
-The original assembly (828 lines) and fixed assembly (766 lines) show
+The original assembly (822 lines) and fixed assembly (817 lines) show
 structurally different code: different register allocation, different
 instruction ordering, different loop structure. This is visible in the
 provided files:
@@ -90,10 +90,10 @@ asyncmark_bug/
 ├── README.md              This file
 ├── original/              BROKEN — uses asyncmark intrinsics
 │   ├── optimized.ll       LLVM IR after target-independent opts (input to ISel)
-│   └── assembly.s         Assembly from clang -target amdgcn-amd-amdhsa -mcpu=gfx950 -O3
+│   └── assembly.s         Assembly from llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx950 -O3
 └── fixed/                 CORRECT — asyncmark replaced with explicit s_waitcnt
     ├── optimized.ll       Modified LLVM IR (same as original, only waits changed)
-    └── assembly.s         Assembly from clang -target amdgcn-amd-amdhsa -mcpu=gfx950 -O3
+    └── assembly.s         Assembly from llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx950 -O3
 ```
 
 ## Bug Analysis
