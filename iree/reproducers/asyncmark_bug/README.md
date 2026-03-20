@@ -6,9 +6,21 @@ using async DMA-to-LDS (`buffer_load_to_lds`) on gfx950.
 
 ## Quick Start
 
+**Full reproducer** (compiles from MLIR, generates IR, builds everything):
 ```bash
 ./reproduce.sh
 ```
+
+**From pre-built assembly** (uses checked-in `original/assembly.s` and `fixed/assembly.s`):
+```bash
+# Edit the tool paths at the top of the script first:
+#   IREE_BUILD, LLVM_MC, LLD, IREE_COMPILE, IREE_RUN
+./reproduce_from_asm.sh
+```
+
+This assembles both `.s` files to HSACOs, substitutes each into an
+otherwise-identical IREE vmfb, and compares results against a baseline.
+Same compilation, same dispatch — only the `.hsaco` differs.
 
 ## Evidence
 
@@ -85,7 +97,8 @@ s_waitcnt vmcnt(0)
 
 ```
 asyncmark_bug/
-├── reproduce.sh           Self-contained reproducer (runs the full experiment)
+├── reproduce.sh           Full reproducer (compiles from MLIR, generates IR)
+├── reproduce_from_asm.sh  Minimal reproducer from pre-built assembly
 ├── test_mm.mlir           4096x4096x4096 f32 GEMM input
 ├── README.md              This file
 ├── original/              BROKEN — uses asyncmark intrinsics
