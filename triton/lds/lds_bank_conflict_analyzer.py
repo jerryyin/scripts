@@ -2,16 +2,17 @@
 """
 LDS Bank Conflict Analyzer for AMD GPUs
 
-This script analyzes bank conflicts for shared memory (LDS) access patterns,
-particularly useful for understanding ds_load_tr* instructions and WMMA operand loads.
+This script analyzes bank conflicts for shared memory (LDS) access patterns
+for MFMA (MI350/CDNA3, swizzle) and WMMA (MI450/gfx1250, padding) operand loads.
 
 =============================================================================
 CONCEPTS
 =============================================================================
 
 1. LDS Banks:
-   - AMD gfx1250 has 64 banks, each 4 bytes wide
-   - Bank = (byte_address / 4) % 64
+   - MI350 (gfx942, CDNA3): 32 banks, each 4 bytes wide, MFMA, swizzle
+   - MI450 (gfx1250):       64 banks, each 4 bytes wide, WMMA,  padding
+   - Bank = (byte_address / 4) % num_banks
    - Bank conflict occurs when multiple lanes access the same bank simultaneously
 
 2. Storage Layouts (conflict avoidance strategies):
@@ -73,7 +74,9 @@ class LDSConfig:
 
     - **NONE**: Logical (row, col) maps linearly to byte address.
     - **PADDING**: Extra elements appended after each row widen the stride.
+      Natural pairing: MI450/gfx1250 (64 banks, WMMA).
     - **SWIZZLE**: XOR-based column remapping (zero wasted space).
+      Natural pairing: MI350/gfx942 (32 banks, MFMA).
 
     Swizzle parameters (``vec``, ``per_phase``, ``max_phase``) correspond
     directly to Triton's ``#ttg.swizzled_shared<{vec, perPhase, maxPhase}>``
@@ -211,10 +214,11 @@ class LDSConfig:
     def with_swizzle(cls, vec: int, per_phase: int, max_phase: int,
                      row_width: int = 128,
                      element_bytes: int = 2,
-                     num_banks: int = 64) -> 'LDSConfig':
+                     num_banks: int = 32) -> 'LDSConfig':
         """Create an LDSConfig with explicit swizzle parameters.
 
         Parameters match ``#ttg.swizzled_shared<{vec, perPhase, maxPhase}>``.
+        Defaults to 32 banks (MI350/CDNA3).
         """
         return cls(
             row_width_elements=row_width,
@@ -230,8 +234,10 @@ class LDSConfig:
     def from_shared_encoding(cls, vec: int, per_phase: int, max_phase: int,
                              row_width: int = 128,
                              element_bytes: int = 2,
-                             num_banks: int = 64) -> 'LDSConfig':
-        """Alias for ``with_swizzle`` using Triton shared-encoding names."""
+                             num_banks: int = 32) -> 'LDSConfig':
+        """Alias for ``with_swizzle`` using Triton shared-encoding names.
+        Defaults to 32 banks (MI350/CDNA3).
+        """
         return cls.with_swizzle(vec, per_phase, max_phase,
                                 row_width, element_bytes, num_banks)
 
@@ -1043,6 +1049,67 @@ def mfma32_kcontig_pattern(kWidth: int = 2) -> AccessPattern:
     return mfma_kcontig_pattern(nonKDim=32, kWidth=kWidth)
 
 
+def mfma_transposed_scalar_pattern(nonKDim: int = 16, kWidth: int = 8) -> AccessPattern:
+    """
+    Access pattern for MFMA dot operand with TRANSPOSED LDS layout.
+
+    When K is the slow-varying dimension in LDS and there is no ds_load_tr*
+    instruction (MI350/CDNA has none), the compiler falls back to scalar
+    ds_load_b32 loads — one element per lane per load cycle.
+
+    Each thread needs kWidth K elements, issued as kWidth separate scalar
+    loads.  The lane mapping is the same as K-contiguous, but with rows
+    and columns swapped (nonK is now contiguous = columns, K is strided = rows).
+
+    Lane mapping (6 bits -> 64 lanes):
+        - Low bits:  nonK position (0 .. nonKDim-1) → LDS column
+        - High bits: K group (0 .. 64/nonKDim - 1)  → LDS row = group * kWidth
+
+    For register r=0 (representative scalar load):
+        nonKDim=16: 4 K groups
+            Lanes  0-15: row = 0,          col = lane
+            Lanes 16-31: row = kWidth,     col = lane - 16
+            Lanes 32-47: row = 2*kWidth,   col = lane - 32
+            Lanes 48-63: row = 3*kWidth,   col = lane - 48
+        nonKDim=32: 2 K groups
+            Lanes  0-31: row = 0,          col = lane
+            Lanes 32-63: row = kWidth,     col = lane - 32
+
+    Args:
+        nonKDim: M/N dimension of the MFMA instruction (16 or 32).
+        kWidth:  K elements per thread (number of scalar loads per thread).
+    """
+    num_k_groups = 64 // nonKDim
+    nonk_mask = nonKDim - 1
+    k_shift = nonKDim.bit_length() - 1
+    k_mask = num_k_groups - 1
+
+    positions = []
+    for lane_id in range(64):
+        nonk = lane_id & nonk_mask
+        k_group = (lane_id >> k_shift) & k_mask
+        row = k_group * kWidth
+        positions.append((row, nonk))
+
+    return AccessPattern(
+        lanes_per_wave=64,
+        elements_per_load=1,
+        lane_to_position=positions,
+        element_offsets=[0],
+        lds_group_size=16,
+    )
+
+
+def mfma16_transposed_scalar_pattern(kWidth: int = 8) -> AccessPattern:
+    """MFMA-16x16 transposed scalar (alias)."""
+    return mfma_transposed_scalar_pattern(nonKDim=16, kWidth=kWidth)
+
+
+def mfma32_transposed_scalar_pattern(kWidth: int = 2) -> AccessPattern:
+    """MFMA-32x32 transposed scalar (alias)."""
+    return mfma_transposed_scalar_pattern(nonKDim=32, kWidth=kWidth)
+
+
 def wmma_kcontig_pattern(kWidth: int = 8, element_bytes: int = 2) -> AccessPattern:
     """
     Access pattern for WMMA dot operand with K-contiguous LDS layout.
@@ -1157,6 +1224,8 @@ PATTERN_REGISTRY = {
     "ds_load_2addr_b64":        (lambda kw=8: ds_load_2addr_b64_pattern(kWidth=kw), "Dual-addr 64-bit load, 32 lanes (gfx1250 fp8 A-operand)"),
     "mfma16_kcontig":           (lambda kw=8: mfma_kcontig_pattern(nonKDim=16, kWidth=kw), "MFMA-16x16 non-transposed, 64 lanes (CDNA)"),
     "mfma32_kcontig":           (lambda kw=2: mfma_kcontig_pattern(nonKDim=32, kWidth=kw), "MFMA-32x32 non-transposed, 64 lanes (CDNA)"),
+    "mfma16_transposed_scalar": (lambda kw=8: mfma_transposed_scalar_pattern(nonKDim=16, kWidth=kw), "MFMA-16x16 transposed scalar, 64 lanes (CDNA)"),
+    "mfma32_transposed_scalar": (lambda kw=2: mfma_transposed_scalar_pattern(nonKDim=32, kWidth=kw), "MFMA-32x32 transposed scalar, 64 lanes (CDNA)"),
     "wmma_kcontig":             (lambda kw=8, eb=2: wmma_kcontig_pattern(kWidth=kw, element_bytes=eb), "WMMA non-transposed, 32 lanes (gfx1250)"),
     "wmma_transposed_scalar":   (lambda kw=8: wmma_transposed_scalar_pattern(kWidth=kw), "WMMA transposed scalar, 32 lanes (f32 fallback)"),
 }
@@ -1193,6 +1262,10 @@ VALID_ELEMENT_BYTES = {
     # MFMA non-transposed — all operand types
     "mfma16_kcontig":           {1, 2, 4},
     "mfma32_kcontig":           {2, 4},
+
+    # MFMA transposed scalar — all operand types
+    "mfma16_transposed_scalar": {1, 2, 4},
+    "mfma32_transposed_scalar": {2, 4},
 }
 
 def _patterns_for_element_bytes(eb: int) -> List[str]:
@@ -1306,10 +1379,11 @@ def _run_one(config: LDSConfig, pattern: AccessPattern,
     )
     if quiet:
         import math
+        bank_row_bytes = config.num_banks * config.bytes_per_bank
         status = "OK" if max_conflict <= 2 else "BAD"
         print(f"row={config.row_width_elements} {config.describe()} "
               f"stride={config.row_stride_bytes}B "
-              f"gcd={math.gcd(config.row_stride_bytes, 256)} "
+              f"gcd={math.gcd(config.row_stride_bytes, bank_row_bytes)} "
               f"→ {max_conflict}-way {status}")
     return max_conflict
 
@@ -1320,7 +1394,7 @@ def compare_layouts(pattern: AccessPattern, row_width: int,
                     arch: str = "wmma"):
     """Compare none / padding / swizzle storage layouts side by side."""
     print("=" * 70)
-    print("COMPARING STORAGE LAYOUTS")
+    print(f"COMPARING STORAGE LAYOUTS ({num_banks} banks, {arch})")
     print("=" * 70)
     print()
 
@@ -1370,21 +1444,29 @@ Patterns:
 {pattern_list}
 
 Examples:
-  # Default (ds_load_tr16_b128, fp16, no padding, row-width=128)
-  python3 lds_bank_conflict_analyzer.py
-
-  # Padding layout with all fields
+  # MI450 padding (default layout, auto 64 banks)
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
-    --row-width 64 --element-bytes 2 --padding 16 --num-banks 64
+    --row-width 64 --element-bytes 2 --padding 16
+
+  # MI350 swizzle (auto 32 banks, auto-derives vec/perPhase/maxPhase)
+  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig \\
+    --layout swizzle --row-width 64 --element-bytes 2
 
   # Bank-wrap padding (pad every N rows at the bank-wrap boundary)
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig \\
     --row-width 16 --element-bytes 2 --padding 8 --pad-interval 128
 
-  # Swizzle layout with all fields
+  # Experiment: swizzle on MI450 (override bank count)
   python3 lds_bank_conflict_analyzer.py --pattern wmma_kcontig --layout swizzle \\
-    --row-width 64 --element-bytes 2 --swizzle-vec 8 --swizzle-per-phase 1 \\
-    --swizzle-max-phase 8 --num-banks 64
+    --row-width 64 --element-bytes 2 --num-banks 64
+
+  # Experiment: padding on MI350 (override bank count)
+  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig \\
+    --row-width 64 --element-bytes 2 --padding 8 --num-banks 32
+
+  # Compare all layouts side by side
+  python3 lds_bank_conflict_analyzer.py --pattern mfma16_kcontig \\
+    --layout swizzle --row-width 64 --element-bytes 2 --compare
         """
     )
 
@@ -1397,7 +1479,9 @@ Examples:
                         help='Data elements per LDS row, excl. padding (default: 128)')
     parser.add_argument('--layout', type=str, default='padding',
                         choices=['none', 'padding', 'swizzle'],
-                        help='Storage layout: none, padding (default), or swizzle (XOR)')
+                        help='Storage layout: padding (default, 64 banks/MI450), '
+                             'swizzle (32 banks/MI350), or none. '
+                             'Bank count auto-selected but --num-banks overrides.')
     parser.add_argument('--padding', type=int, default=0,
                         help='Padding elements (default: 0, used with --layout=padding)')
     parser.add_argument('--pad-interval', type=int, default=0,
@@ -1412,8 +1496,9 @@ Examples:
                         help='Swizzle perPhase (default: 1)')
     parser.add_argument('--swizzle-max-phase', type=int, default=1,
                         help='Swizzle maxPhase (default: 1)')
-    parser.add_argument('--num-banks', type=int, default=64,
-                        help='LDS bank count (default: 64; use 32 for RDNA3)')
+    parser.add_argument('--num-banks', type=int, default=None,
+                        help='LDS bank count. Default: 32 for swizzle (MI350), '
+                             '64 for padding (MI450). Override to experiment.')
     parser.add_argument('--element-bytes', type=int, default=2,
                         help='Bytes per element: 2=fp16, 1=fp8, 4=f32 (default: 2)')
     parser.add_argument('--tile-rows', type=int, default=None,
@@ -1432,6 +1517,10 @@ Examples:
         sys.exit(0)
 
     args = parser.parse_args()
+
+    # Resolve num_banks from layout when not explicitly set
+    if args.num_banks is None:
+        args.num_banks = 32 if args.layout == 'swizzle' else 64
 
     validate_pattern_element_bytes(args.pattern, args.element_bytes,
                                    force=args.force)
