@@ -6,8 +6,8 @@ For each (dtype, col_width) combination, reports bank conflicts for a range
 of padding values, separately for each load path.
 
 Covers:
-  - gfx1250 WMMA paths (transposed, non-transposed, transposed-scalar)
-  - CDNA MFMA f32 non-transposed paths (16x16x4 and 32x32x2 geometries)
+  - MI450/gfx1250 WMMA paths (64 banks, transposed / non-transposed / scalar)
+  - MI350/CDNA3 MFMA paths (32 banks, f32/bf16/fp8, non-transposed + transposed scalar)
 """
 
 import os
@@ -25,6 +25,8 @@ from lds_bank_conflict_analyzer import (
     wmma_transposed_scalar_pattern,
     mfma16_kcontig_pattern,
     mfma32_kcontig_pattern,
+    mfma16_transposed_scalar_pattern,
+    mfma32_transposed_scalar_pattern,
 )
 
 
@@ -32,8 +34,9 @@ from lds_bank_conflict_analyzer import (
 # Hardware and sweep configuration
 # ============================================================================
 
-GFX1250_NUM_BANKS = 64
-GFX1250_BYTES_PER_BANK = 4
+MI450_NUM_BANKS = 64   # gfx1250 WMMA — padding layout
+MI350_NUM_BANKS = 32   # gfx942  MFMA — swizzle layout
+BYTES_PER_BANK = 4     # same on both architectures
 
 DTYPES = {
     # One representative per bit-width. bf16 behaves identically to fp16,
@@ -80,11 +83,11 @@ WMMA_V3_KWIDTH = 8
 # ============================================================================
 
 def get_max_conflict(row_width, pad, element_bytes, pattern,
-                     pad_interval=0):
+                     pad_interval=0, num_banks=MI450_NUM_BANKS):
     """Return max bank conflict for one (row_width, padding, pattern) config."""
     config = LDSConfig(
-        num_banks=GFX1250_NUM_BANKS,
-        bytes_per_bank=GFX1250_BYTES_PER_BANK,
+        num_banks=num_banks,
+        bytes_per_bank=BYTES_PER_BANK,
         row_width_elements=row_width,
         padding_elements=pad,
         element_bytes=element_bytes,
@@ -109,7 +112,7 @@ def conflict_marker(conflict):
 
 def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                       col_widths, min_cols=1, indent=4,
-                      use_bank_wrap=False):
+                      use_bank_wrap=False, num_banks=MI450_NUM_BANKS):
     """
     Print a conflict table: rows = column widths, columns = padding values.
 
@@ -127,8 +130,9 @@ def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
         use_bank_wrap:  If True, set pad_interval to the bank-wrap boundary
                         (numBanks * bankBytes / elemBytes).  The analyzer's
                         effective_pad_interval clamps to max(row_width, value).
+        num_banks:      LDS bank count (64 for MI450, 32 for MI350).
     """
-    pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
+    pi = bank_wrap_interval(elem_bytes, num_banks) if use_bank_wrap else 0
     prefix = " " * indent
     col_w = 9
 
@@ -162,7 +166,7 @@ def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                 line += f" {'N/A':>{col_w}s}"
             else:
                 c = get_max_conflict(cols, p, elem_bytes, pattern,
-                                     pad_interval=pi)
+                                     pad_interval=pi, num_banks=num_banks)
                 mk = conflict_marker(c)
                 cell = f"{c:2d}-way{mk}"
                 line += f" {cell:>{col_w}s}"
@@ -173,7 +177,7 @@ def print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
 # Part 1: Transposed load path sweep
 # ============================================================================
 
-def sweep_transposed(use_bank_wrap=False):
+def sweep_transposed(use_bank_wrap=False, num_banks=MI450_NUM_BANKS):
     """
     Sweep the transposed load path (ds_load_tr*).
 
@@ -214,7 +218,7 @@ def sweep_transposed(use_bank_wrap=False):
         # than 16 columns can't use the transposed instruction.
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=16, indent=4,
-                          use_bank_wrap=use_bank_wrap)
+                          use_bank_wrap=use_bank_wrap, num_banks=num_banks)
         print()
 
 
@@ -222,7 +226,7 @@ def sweep_transposed(use_bank_wrap=False):
 # Part 2: Non-transposed load path sweep
 # ============================================================================
 
-def sweep_non_transposed(use_bank_wrap=False):
+def sweep_non_transposed(use_bank_wrap=False, num_banks=MI450_NUM_BANKS):
     """
     Sweep the non-transposed load path (ds_load_b* / ds_load_2addr_b64).
 
@@ -273,7 +277,7 @@ def sweep_non_transposed(use_bank_wrap=False):
 
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=effective_kw * 2, indent=4,
-                          use_bank_wrap=use_bank_wrap)
+                          use_bank_wrap=use_bank_wrap, num_banks=num_banks)
         print()
 
         # fp8 K-contiguous: when elements are fully contiguous in LDS
@@ -292,7 +296,7 @@ def sweep_non_transposed(use_bank_wrap=False):
 
             print_sweep_table(pattern_b64, elem_bytes, pads, proposed_pad,
                               COL_WIDTHS, min_cols=effective_kw * 2, indent=4,
-                              use_bank_wrap=use_bank_wrap)
+                              use_bank_wrap=use_bank_wrap, num_banks=num_banks)
             print()
 
 
@@ -300,7 +304,7 @@ def sweep_non_transposed(use_bank_wrap=False):
 # Part 3: Transposed scalar fallback (f32)
 # ============================================================================
 
-def sweep_transposed_scalar(use_bank_wrap=False):
+def sweep_transposed_scalar(use_bank_wrap=False, num_banks=MI450_NUM_BANKS):
     """
     Sweep the transposed scalar fallback path.
 
@@ -366,91 +370,144 @@ def sweep_transposed_scalar(use_bank_wrap=False):
 
         print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
                           COL_WIDTHS, min_cols=16, indent=4,
-                          use_bank_wrap=use_bank_wrap)
+                          use_bank_wrap=use_bank_wrap, num_banks=num_banks)
         print()
 
 
 # ============================================================================
-# Part 4: MFMA f32 non-transposed (CDNA / MI350)
+# Part 4: MFMA non-transposed + transposed (CDNA / MI350)
 # ============================================================================
 
-# f32 MFMA geometries: (name, nonKDim, kWidth, kTileSize, pattern_fn)
-MFMA_F32_GEOMETRIES = [
-    ("mfma_f32_16x16x4f32", 16, 4, 16, mfma16_kcontig_pattern),
-    ("mfma_f32_32x32x2f32", 32, 2,  4, mfma32_kcontig_pattern),
-]
+# (instr_name, nonKDim, kWidth, kDim)
+# kDim = minimum BLOCK_K (the instruction's K dimension)
+MFMA_GEOMETRIES = {
+    "f32": [
+        ("mfma_f32_16x16x4_f32",   16, 4,   4),
+        ("mfma_f32_32x32x2_f32",   32, 2,   2),
+    ],
+    "bf16": [
+        ("mfma_f32_16x16x32_f16",  16, 8,  32),
+        ("mfma_f32_32x32x16_f16",  32, 4,  16),
+    ],
+    "fp8": [
+        ("mfma_f32_16x16x64_fp8",  16, 8,  64),
+        ("mfma_f32_32x32x32_fp8",  32, 8,  32),
+    ],
+}
 
-# BLOCK_K values relevant for f32 MFMA (must be >= kTileSize)
-MFMA_F32_COL_WIDTHS = [4, 8, 16, 32, 64, 128]
+MFMA_DTYPES = {
+    "f32":  (4, 32),
+    "bf16": (2, 16),
+    "fp8":  (1,  8),
+}
+
+MFMA_COL_WIDTHS = [8, 16, 32, 64, 128, 256]
 
 
-def sweep_mfma_f32_non_transposed(use_bank_wrap=False):
+def sweep_mfma_non_transposed(use_bank_wrap=False, num_banks=MI350_NUM_BANKS):
     """
-    Sweep the non-transposed load path for f32 MFMA dot operands.
+    Sweep the non-transposed (K-contiguous) load path for MFMA dot operands.
 
-    f32 MFMA uses standard ds_load_b* (not transposed), with vectorization
-    width = kWidth (kWidth * 4 bytes <= 128 bits for both geometries).
-
-    From mfmaDotToLinearLayout (LinearLayoutConversions.cpp):
-        regs  = identity1D(kWidth, register, K)
-        lanes = identity1D(nonKDim, lane, nonK)
-              * identity1D(warpSize/nonKDim, lane, K)
-
-    warpSize = 64, lanes_per_cycle = 16.
-
-    Optimal padding: pad = kWidth (i.e. min(kWidth, 128/32) = kWidth).
-    This ensures gcd(stride_dwords, 64) = kWidth, making 16 lanes × kWidth
-    dwords/lane fit into 64 banks without collision.
+    Each lane reads kWidth consecutive K elements via ds_load_b*.
+    Covers f32, bf16, and fp8 for both 16x16 and 32x32 geometries.
+    Defaults to MI350 (32 banks).
     """
     print()
     print("#" * 80)
-    print("# PART 4: MFMA f32 NON-TRANSPOSED (CDNA / MI350)")
+    print(f"# PART 4A: MFMA NON-TRANSPOSED / K-CONTIGUOUS (CDNA / MI350, {num_banks} banks)")
     print("#")
-    print("# warpSize=64, lanes_per_cycle=16, element=f32 (4 bytes = 1 dword).")
-    print("# Vectorized load width = kWidth dwords per lane.")
-    print("# padAmount = min(kWidth, 128/32) = kWidth.")
+    print("# warpSize=64, lanes_per_cycle=16.")
+    print("# Each lane reads kWidth consecutive K elements via ds_load_b*.")
     print("#" * 80)
     print()
 
-    elem_bytes = 4
-    for name, nonKDim, kWidth, kTileSize, pattern_fn in MFMA_F32_GEOMETRIES:
-        pattern = pattern_fn(kWidth=kWidth)
-        proposed_pad = kWidth   # min(kWidth, 128/32) = kWidth for f32
-        pads = PADDING_SWEEP
+    for dtype_name, (elem_bytes, elem_bits) in MFMA_DTYPES.items():
+        for instr_name, nonKDim, kWidth, kDim in MFMA_GEOMETRIES[dtype_name]:
+            pattern = mfma16_kcontig_pattern(kWidth=kWidth) if nonKDim == 16 \
+                else mfma32_kcontig_pattern(kWidth=kWidth)
+            proposed_pad = min(kWidth, 128 // elem_bits)
+            load_bits = kWidth * elem_bits
+            pads = PADDING_SWEEP
 
-        print(f"  {name}: non-transposed ds_load_b{kWidth * 32}")
-        print(f"    nonKDim={nonKDim}, kWidth={kWidth}, kTileSize={kTileSize}")
-        print(f"    {kWidth} dwords/lane/load, proposed pad={proposed_pad}")
-        print()
+            print(f"  {dtype_name} {instr_name}: non-transposed ds_load_b{load_bits}")
+            print(f"    nonKDim={nonKDim}, kWidth={kWidth}, kDim={kDim}, "
+                  f"proposed pad={proposed_pad}")
+            print()
 
-        valid_cols = [c for c in MFMA_F32_COL_WIDTHS if c >= kTileSize]
-        print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
-                          valid_cols, min_cols=kTileSize, indent=4,
-                          use_bank_wrap=use_bank_wrap)
-        print()
+            valid_cols = [c for c in MFMA_COL_WIDTHS if c >= kDim]
+            print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
+                              valid_cols, min_cols=kDim, indent=4,
+                              use_bank_wrap=use_bank_wrap, num_banks=num_banks)
+            print()
+
+
+def sweep_mfma_transposed_scalar(use_bank_wrap=False, num_banks=MI350_NUM_BANKS):
+    """
+    Sweep the transposed scalar fallback path for MFMA dot operands.
+
+    MI350/CDNA has no ds_load_tr* instruction — when loadTransposed=True,
+    the compiler falls back to scalar ds_load_b32 loads (one element per
+    lane per cycle, kWidth loads per thread total).
+
+    The lane mapping is the same as K-contiguous but with rows/cols swapped:
+    nonK is now contiguous (columns), K is strided (rows).
+    The row_width here is the nonK tile dimension (M for opA, N for opB).
+    """
+    print()
+    print("#" * 80)
+    print(f"# PART 4B: MFMA TRANSPOSED SCALAR (CDNA / MI350, {num_banks} banks)")
+    print("#")
+    print("# No ds_load_tr* on MI350 — scalar ds_load_b32 fallback.")
+    print("# nonK is contiguous (columns), K is strided (rows).")
+    print("# cols = nonK tile dimension (M for opA, N for opB).")
+    print("#" * 80)
+    print()
+
+    for dtype_name, (elem_bytes, elem_bits) in MFMA_DTYPES.items():
+        for instr_name, nonKDim, kWidth, kDim in MFMA_GEOMETRIES[dtype_name]:
+            pattern = mfma16_transposed_scalar_pattern(kWidth=kWidth) if nonKDim == 16 \
+                else mfma32_transposed_scalar_pattern(kWidth=kWidth)
+            proposed_pad = min(kWidth, 128 // elem_bits)
+            pads = PADDING_SWEEP
+
+            print(f"  {dtype_name} {instr_name}: transposed scalar ds_load_b{elem_bits}")
+            print(f"    nonKDim={nonKDim}, kWidth={kWidth}, kDim={kDim}, 1 elem/load, "
+                  f"{kWidth} loads/thread, proposed pad={proposed_pad}")
+            if elem_bytes < 4:
+                elems_per_dword = 4 // elem_bytes
+                print(f"    ({elems_per_dword} elems/dword → same-dword = broadcast)")
+            print()
+
+            print_sweep_table(pattern, elem_bytes, pads, proposed_pad,
+                              MFMA_COL_WIDTHS, min_cols=nonKDim, indent=4,
+                              use_bank_wrap=use_bank_wrap, num_banks=num_banks)
+            print()
 
 
 # ============================================================================
 # Part 5: Summary
 # ============================================================================
 
-def bank_wrap_interval(elem_bytes):
+def bank_wrap_interval(elem_bytes, num_banks=MI450_NUM_BANKS):
     """Bank-wrap interval: numBanks * bankBytes / elemBytes."""
-    return GFX1250_NUM_BANKS * GFX1250_BYTES_PER_BANK // elem_bytes
+    return num_banks * BYTES_PER_BANK // elem_bytes
 
 
-def sweep_summary(ref_cols=128, use_bank_wrap=False):
+def sweep_summary(ref_cols=128, use_bank_wrap=False,
+                  wmma_banks=MI450_NUM_BANKS, mfma_banks=MI350_NUM_BANKS):
     """
     Print a compact summary of proposed padding for all paths.
     """
     print()
     print("#" * 80)
-    print("# PART 5: PROPOSAL SUMMARY (ref cols=128)")
+    print(f"# PART 5: PROPOSAL SUMMARY (ref cols={ref_cols})")
     print("#")
-    print("# WMMA (gfx1250):")
+    print(f"# WMMA (MI450, {wmma_banks} banks):")
     print("#   Transposed (tr*):  padAmount = 2 * instBitWidth / elemBits")
     print("#   Transposed scalar: padAmount = 2 * instBitWidth / elemBits (fallback)")
     print("#   Non-transposed:    padAmount = 128 / elemBits")
+    print(f"# MFMA (MI350, {mfma_banks} banks):")
+    print("#   Non-transposed:    padAmount = kWidth")
     print("#" * 80)
     print()
 
@@ -460,7 +517,7 @@ def sweep_summary(ref_cols=128, use_bank_wrap=False):
           f"{'---------':>9s} {'---------':>9s}")
 
     for dtype_name, (elem_bytes, elem_bits, tr_inst_bits) in DTYPES.items():
-        pi = bank_wrap_interval(elem_bytes) if use_bank_wrap else 0
+        pi = bank_wrap_interval(elem_bytes, wmma_banks) if use_bank_wrap else 0
 
         # Transposed path (ds_load_tr*)
         if tr_inst_bits is not None:
@@ -471,7 +528,7 @@ def sweep_summary(ref_cols=128, use_bank_wrap=False):
             else:
                 pattern = ds_load_tr16_b128_pattern()
             pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern,
-                                     pad_interval=pi)
+                                     pad_interval=pi, num_banks=wmma_banks)
             print(f"  {'wmma transposed':<22s} {dtype_name:>5s} {proposed:9d} "
                   f"{pro_c:2d}-way    "
                   f"{overhead_pct(proposed, ref_cols):7.1f}%")
@@ -481,7 +538,7 @@ def sweep_summary(ref_cols=128, use_bank_wrap=False):
         proposed = 2 * tr_inst_bits // elem_bits if tr_inst_bits is not None else 128 // elem_bits
         pattern = wmma_transposed_scalar_pattern(kWidth=kw)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern,
-                                 pad_interval=pi)
+                                 pad_interval=pi, num_banks=wmma_banks)
         print(f"  {'wmma tr-scalar':<22s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "
               f"{overhead_pct(proposed, ref_cols):7.1f}%")
@@ -495,7 +552,7 @@ def sweep_summary(ref_cols=128, use_bank_wrap=False):
         else:
             pattern = wmma_kcontig_pattern(kWidth=effective_kw, element_bytes=elem_bytes)
         pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern,
-                                 pad_interval=pi)
+                                 pad_interval=pi, num_banks=wmma_banks)
         print(f"  {'wmma non-transposed':<22s} {dtype_name:>5s} {proposed:9d} "
               f"{pro_c:2d}-way    "
               f"{overhead_pct(proposed, ref_cols):7.1f}%")
@@ -505,10 +562,39 @@ def sweep_summary(ref_cols=128, use_bank_wrap=False):
             pattern_b64 = wmma_kcontig_pattern(kWidth=effective_kw,
                                                element_bytes=elem_bytes)
             pro_c_b64 = get_max_conflict(ref_cols, proposed, elem_bytes,
-                                         pattern_b64, pad_interval=pi)
+                                         pattern_b64, pad_interval=pi,
+                                         num_banks=wmma_banks)
             print(f"  {'wmma non-tr (b64)':<22s} {dtype_name:>5s} {proposed:9d} "
                   f"{pro_c_b64:2d}-way    "
                   f"{overhead_pct(proposed, ref_cols):7.1f}%")
+
+        print()
+
+    # MFMA summary (all dtypes, both directions)
+    for dtype_name, (elem_bytes, elem_bits) in MFMA_DTYPES.items():
+        pi_mfma = bank_wrap_interval(elem_bytes, mfma_banks) if use_bank_wrap else 0
+        for instr_name, nonKDim, kWidth, kDim in MFMA_GEOMETRIES[dtype_name]:
+            proposed = min(kWidth, 128 // elem_bits)
+
+            # Non-transposed (K-contiguous)
+            pattern_kc = mfma16_kcontig_pattern(kWidth=kWidth) if nonKDim == 16 \
+                else mfma32_kcontig_pattern(kWidth=kWidth)
+            pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern_kc,
+                                     pad_interval=pi_mfma, num_banks=mfma_banks)
+            print(f"  {'mfma non-transposed':<22s} {dtype_name:>5s} {proposed:9d} "
+                  f"{pro_c:2d}-way    "
+                  f"{overhead_pct(proposed, ref_cols):7.1f}%")
+            print(f"    ({instr_name}, nonKDim={nonKDim})")
+
+            # Transposed scalar
+            pattern_ts = mfma16_transposed_scalar_pattern(kWidth=kWidth) if nonKDim == 16 \
+                else mfma32_transposed_scalar_pattern(kWidth=kWidth)
+            pro_c = get_max_conflict(ref_cols, proposed, elem_bytes, pattern_ts,
+                                     pad_interval=pi_mfma, num_banks=mfma_banks)
+            print(f"  {'mfma tr-scalar':<22s} {dtype_name:>5s} {proposed:9d} "
+                  f"{pro_c:2d}-way    "
+                  f"{overhead_pct(proposed, ref_cols):7.1f}%")
+            print(f"    ({instr_name}, nonKDim={nonKDim})")
 
         print()
 
@@ -524,34 +610,43 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  python sweep_padding_analysis.py                  # per-row padding (default)
-  python sweep_padding_analysis.py --pad-mode bank-wrap  # bank-wrap padInterval
+  python sweep_padding_analysis.py                        # per-row padding (default)
+  python sweep_padding_analysis.py --pad-mode bank-wrap   # bank-wrap padInterval
+  python sweep_padding_analysis.py --num-banks 32         # override all parts to 32 banks
 """)
     parser.add_argument(
         '--pad-mode', choices=['per-row', 'bank-wrap'], default='per-row',
         help='Padding strategy: per-row (default) inserts padding after every '
              'row. bank-wrap uses padInterval = max(cols, numBanks*4/elemBytes) '
              'so small tiles pad at the bank-wrap boundary instead.')
+    parser.add_argument(
+        '--num-banks', type=int, default=None,
+        help='Override LDS bank count for ALL parts. '
+             'Default: 64 for WMMA (MI450), 32 for MFMA (MI350).')
     args = parser.parse_args()
 
     use_bw = args.pad_mode == 'bank-wrap'
+    wmma_banks = args.num_banks if args.num_banks is not None else MI450_NUM_BANKS
+    mfma_banks = args.num_banks if args.num_banks is not None else MI350_NUM_BANKS
 
     print("=" * 80)
     print("LDS PADDING COMPREHENSIVE SWEEP")
     print("=" * 80)
     print()
-    print("Hardware: 64 banks, 4 bytes/bank")
-    print("WMMA (gfx1250):  warp_size=32, nonKDim=16")
+    print(f"WMMA (MI450): {wmma_banks} banks, 4 bytes/bank, warp_size=32")
+    print(f"MFMA (MI350): {mfma_banks} banks, 4 bytes/bank, warp_size=64")
+    if args.num_banks is not None:
+        print(f"  (--num-banks {args.num_banks} overrides both)")
     print(f"Pad mode: {args.pad_mode}")
     if use_bw:
         print("  padInterval = max(cols, numBanks * bankBytes / elemBytes)")
-        print("  fp16: 128,  fp8: 256,  f32: 64")
 
-    sweep_transposed(use_bw)
-    sweep_non_transposed(use_bw)
-    sweep_transposed_scalar(use_bw)
-    sweep_mfma_f32_non_transposed(use_bw)
-    sweep_summary(use_bank_wrap=use_bw)
+    sweep_transposed(use_bw, wmma_banks)
+    sweep_non_transposed(use_bw, wmma_banks)
+    sweep_transposed_scalar(use_bw, wmma_banks)
+    sweep_mfma_non_transposed(use_bw, mfma_banks)
+    sweep_mfma_transposed_scalar(use_bw, mfma_banks)
+    sweep_summary(use_bank_wrap=use_bw, wmma_banks=wmma_banks, mfma_banks=mfma_banks)
 
 
 if __name__ == "__main__":
