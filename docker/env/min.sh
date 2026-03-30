@@ -66,3 +66,11 @@ else
 fi
 
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
+
+# Install Claude Code CLI and patch subscription key
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/claude.sh" ]; then
+    bash "$SCRIPT_DIR/claude.sh"
+elif [ -f ~/scripts/docker/env/claude.sh ]; then
+    bash ~/scripts/docker/env/claude.sh
+fi

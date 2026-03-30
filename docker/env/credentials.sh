@@ -36,6 +36,8 @@ CREDENTIAL_PATHS=(
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
     ".npmrc"                     # NPM registry auth
+    ".claude.json"               # Claude Code config + API key
+    ".claude/settings.json"      # Claude Code settings
 )
 
 # Find the persistent storage root (mounted host home or PVC)
