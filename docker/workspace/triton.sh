@@ -14,6 +14,11 @@ setup_workspace "triton" "https://github.com/triton-lang/triton.git"
 # Triton-specific setup (runs after clone, in $HOME/triton)
 cd "$HOME/triton"
 
+# Install pre-commit git hooks so they run automatically on git commit
+if command -v pre-commit &> /dev/null && [ -f ".pre-commit-config.yaml" ]; then
+    pre-commit install
+fi
+
 # Setup gtags for MLIR code navigation
 if command -v gtags &> /dev/null && [ -d "lib" ]; then
     echo "   Setting up gtags..."
