@@ -10,13 +10,15 @@
 #   - nodejs + npm installed (handled by min.sh)
 #   - ~/.claude.json template deployed by rc_files/install.sh (stow)
 #
-# The subscription key is stored in a private GitHub gist to keep it
-# out of public repos. The gist raw URL is stable across revisions.
+# The subscription key is encrypted with the user's SSH public key using 'age'.
+# Only someone with the matching private SSH key can decrypt it.
+# This works seamlessly since SSH keys are synced via credentials.sh/priv.sh.
 
 set -e
 
 CLAUDE_VERSION="2.1.22"
-GIST_RAW_URL="YOUR_PRIVATE_GIST_URL_HERE"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENCRYPTED_KEY_FILE="$SCRIPT_DIR/claude_key.age"
 CLAUDE_CONFIG="$HOME/.claude.json"
 PLACEHOLDER="__CLAUDE_SUB_KEY__"
 
@@ -52,14 +54,39 @@ patch_subscription_key() {
         return 0
     fi
 
-    echo "🔑 Fetching subscription key from private gist..."
+    echo "🔑 Decrypting subscription key with SSH key..."
     local sub_key
-    sub_key=$(wget -qO- "$GIST_RAW_URL" 2>/dev/null || curl -fsSL "$GIST_RAW_URL" 2>/dev/null || echo "")
+
+    if [ ! -f "$ENCRYPTED_KEY_FILE" ]; then
+        echo "⚠️  Encrypted key file not found: $ENCRYPTED_KEY_FILE"
+        echo "   Create it with: echo 'YOUR_KEY' | age -R ~/.ssh/id_rsa.pub -o $ENCRYPTED_KEY_FILE"
+        return 0
+    fi
+
+    if ! command -v age &>/dev/null; then
+        echo "⚠️  age not installed — run 'apt install age' or 'brew install age'"
+        return 0
+    fi
+
+    # Try common SSH key locations
+    local ssh_key=""
+    for key in ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [ -f "$key" ]; then
+            ssh_key="$key"
+            break
+        fi
+    done
+
+    if [ -z "$ssh_key" ]; then
+        echo "⚠️  No SSH private key found — ensure credentials.sh has run"
+        return 0
+    fi
+
+    sub_key=$(age -d -i "$ssh_key" "$ENCRYPTED_KEY_FILE" 2>/dev/null || echo "")
     sub_key=$(echo "$sub_key" | tr -d '[:space:]')
 
     if [ -z "$sub_key" ]; then
-        echo "⚠️  Could not fetch subscription key from gist — skipping"
-        echo "   You can manually replace $PLACEHOLDER in $CLAUDE_CONFIG"
+        echo "⚠️  Could not decrypt key — wrong SSH key or corrupted file"
         return 0
     fi
 

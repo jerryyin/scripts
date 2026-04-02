@@ -40,7 +40,7 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
      git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim vim wget \
-     python-is-python3 gdb gist openssh-client
+     python-is-python3 gdb gist openssh-client age
 
 # rc files
 if [ ! -d rc_files ]; then
