@@ -1,0 +1,19 @@
+results/
+__pycache__/
+
+# AM run artifacts
+*.csv
+*.s
+*.log
+*.mon
+*.json
+*.ini
+*.rd
+*.gclog
+*.txt
+*.pp
+*.xls
+*.gz
+*.conf
+*.missed
+utcl2_seed
