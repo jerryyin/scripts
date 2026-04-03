@@ -16,27 +16,40 @@
 
 set -e
 
-CLAUDE_VERSION="2.1.22"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENCRYPTED_KEY_FILE="$SCRIPT_DIR/claude_key.age"
 CLAUDE_CONFIG="$HOME/.claude.json"
 PLACEHOLDER="__CLAUDE_SUB_KEY__"
 
 install_claude_cli() {
-    if command -v claude &>/dev/null; then
-        echo "✓ Claude Code CLI already installed ($(claude --version 2>/dev/null || echo 'unknown'))"
-        return 0
-    fi
-
-    echo "📦 Installing Claude Code CLI v${CLAUDE_VERSION}..."
     # Always install to ~/.local to avoid /usr/local being overridden
     # by Docker tools_volume mount at runtime
     mkdir -p "$HOME/.local"
     npm config set prefix "$HOME/.local" 2>/dev/null || true
-    npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" 2>&1 | tail -1
+
+    local latest
+    latest=$(npm view @anthropic-ai/claude-code version 2>/dev/null || echo "")
+    if [ -z "$latest" ]; then
+        echo "⚠️  Could not fetch latest version from npm — check network"
+        return 1
+    fi
+
+    if command -v claude &>/dev/null; then
+        local current
+        current=$(claude --version 2>/dev/null || echo "")
+        if [ "$current" = "$latest" ]; then
+            echo "✓ Claude Code CLI already at latest ($current)"
+            return 0
+        fi
+        echo "📦 Upgrading Claude Code CLI $current → $latest..."
+    else
+        echo "📦 Installing Claude Code CLI v${latest}..."
+    fi
+
+    npm install -g "@anthropic-ai/claude-code@latest" 2>&1 | tail -1
 
     if [ -x "$HOME/.local/bin/claude" ]; then
-        echo "✓ Claude Code CLI installed at ~/.local/bin/claude"
+        echo "✓ Claude Code CLI $(claude --version 2>/dev/null) installed at ~/.local/bin/claude"
         return 0
     fi
     echo "⚠️  Claude CLI not found after install — check npm prefix"
