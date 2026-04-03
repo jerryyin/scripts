@@ -19,7 +19,7 @@ spec:
     fsGroup: 1001
   containers:
     - name: interactive-ssh
-      image: rocm/dev-ubuntu-24.04:latest
+      image: {{DOCKER_IMAGE}}
       imagePullPolicy: IfNotPresent
       command:
         - /bin/bash

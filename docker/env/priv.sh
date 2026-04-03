@@ -12,7 +12,7 @@
 #
 # Called by:
 #   - Docker: docker-compose.yml at container startup
-#   - Kubernetes: Can be called manually or from setup-pod.sh
+#   - Kubernetes: via setup-service.sh (called by connect.sh)
 #
 # This script is idempotent - safe to run multiple times.
 
