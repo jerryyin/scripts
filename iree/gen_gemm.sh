@@ -46,6 +46,12 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+# For bf16/f16, accumulate in f32 (standard mixed-precision pattern)
+accType="$dType"
+case "$dType" in
+    bf16|f16) accType="f32" ;;
+esac
+
 # Derived types  
 lhs_type=""  
 rhs_type=""  
@@ -60,19 +66,19 @@ decide_type() {
         "batch_matmul")  
             lhs_type_ref="${Batch}x${gemmM}x${gemmK}x${dType}"  
             rhs_type_ref="${Batch}x${gemmK}x${gemmN}x${dType}"  
-            result_type_ref="${Batch}x${gemmM}x${gemmN}x${dType}"  
+            result_type_ref="${Batch}x${gemmM}x${gemmN}x${accType}"  
             gemm_test_ref="${output_file:-test_bmm.mlir}"
             ;;  
         "matmul")  
             lhs_type_ref="${gemmM}x${gemmK}x${dType}"  
             rhs_type_ref="${gemmK}x${gemmN}x${dType}"  
-            result_type_ref="${gemmM}x${gemmN}x${dType}"  
+            result_type_ref="${gemmM}x${gemmN}x${accType}"  
             gemm_test_ref="${output_file:-test_mm.mlir}"
             ;;  
         "matmul_transpose_b")  
             lhs_type_ref="${gemmM}x${gemmK}x${dType}"  
             rhs_type_ref="${gemmN}x${gemmK}x${dType}"  
-            result_type_ref="${gemmM}x${gemmN}x${dType}"  
+            result_type_ref="${gemmM}x${gemmN}x${accType}"  
             gemm_test_ref="${output_file:-test_mm_transpose_b.mlir}"
             ;;  
         *)  
@@ -90,9 +96,9 @@ generate_gemm() {
 !RHS_TYPE = tensor<${rhs_type}>
 !RESULT_TYPE = tensor<${result_type}>
 func.func @${gemmType}(%lhs : !LHS_TYPE, %rhs : !RHS_TYPE) -> !RESULT_TYPE {
-    %c0 = arith.constant 0.0 : ${dType}
+    %c0 = arith.constant 0.0 : ${accType}
     %empty = tensor.empty() : !RESULT_TYPE
-    %fill = linalg.fill ins(%c0 : ${dType}) outs(%empty : !RESULT_TYPE) -> !RESULT_TYPE
+    %fill = linalg.fill ins(%c0 : ${accType}) outs(%empty : !RESULT_TYPE) -> !RESULT_TYPE
     %mm = linalg.${gemmType} ins(%lhs, %rhs : !LHS_TYPE, !RHS_TYPE) outs(%fill : !RESULT_TYPE) -> !RESULT_TYPE
     return %mm : !RESULT_TYPE
 }

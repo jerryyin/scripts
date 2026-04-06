@@ -4,7 +4,7 @@
 # equivalent results across various matrix sizes.
 #
 # Usage:
-#   ./test_direct_load.sh [--target gfx950] [--threshold 0.001] [--id N] [-q]
+#   ./test_direct_load.sh [--target gfx950] [--threshold 0.001] [--id N] [--stages S] [-q]
 #
 set -e
 
@@ -17,6 +17,7 @@ THRESHOLD="0.001"
 DTYPE="f32"
 QUIET=""
 TEST_ID=""
+STAGES=""
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -25,6 +26,7 @@ while [[ "$#" -gt 0 ]]; do
         --threshold) THRESHOLD="$2"; shift ;;
         --dtype) DTYPE="$2"; shift ;;
         --id) TEST_ID="$2"; shift ;;
+        --stages) STAGES="$2"; shift ;;
         -q|--quiet) QUIET="-q" ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -34,6 +36,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --threshold N    Comparison threshold (default: 0.001)"
             echo "  --dtype TYPE     Data type (default: f32)"
             echo "  --id N           Run only test N (0-6), omit to run all"
+            echo "  --stages N       Pipeline stages (default: compiler default)"
             echo "  -q, --quiet      Minimal output from sub-scripts"
             echo ""
             echo "Test IDs:"
@@ -50,6 +53,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  $0 --id 6                    # Run only 4096x4096x4096"
             echo "  $0 --id 4 -q                 # Run 1024x1024x1024 quietly"
             echo "  $0 --target gfx942 --id 0    # Run smallest test on gfx942"
+            echo "  $0 --stages 3                # Test with 3-stage pipelining"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -79,15 +83,25 @@ else
     SIZES=("${ALL_SIZES[@]}")
 fi
 
+# Build compare flags
+COMPARE_FLAGS="--iree-llvmgpu-use-direct-load"
+if [ -n "$STAGES" ]; then
+    COMPARE_FLAGS="${COMPARE_FLAGS} --iree-llvmgpu-prefetch-num-stages=${STAGES}"
+fi
+
 echo "============================================================"
 echo "Direct Load Flag Comparison Test"
 echo "============================================================"
 echo "Target:    ${TARGET}"
 echo "Dtype:     ${DTYPE}"
 echo "Threshold: ${THRESHOLD}"
+if [ -n "$STAGES" ]; then
+    echo "Stages:    ${STAGES}"
+fi
 if [ -n "$TEST_ID" ]; then
     echo "Test ID:   ${TEST_ID}"
 fi
+echo "Flags:     ${COMPARE_FLAGS}"
 echo "Tests:     ${#SIZES[@]} configuration(s)"
 [ -n "$QUIET" ] && echo "Mode:      Quiet"
 echo "============================================================"
@@ -130,7 +144,7 @@ for idx in "${!SIZES[@]}"; do
         -i "${M}x${K}" \
         -i "${K}x${N}" \
         --target "$TARGET" \
-        --compare-flags '--iree-llvmgpu-use-direct-load' \
+        --compare-flags "$COMPARE_FLAGS" \
         --threshold "$THRESHOLD" \
         $QUIET; then
         echo "[PASS] ${TEST_NAME}"
