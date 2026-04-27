@@ -3,16 +3,16 @@
 #
 # Usage: setup-service.sh <service_name>
 #
+# Caller MUST ensure ~/scripts is on disk before invoking this:
+#   - Docker build:  base.dockerfile clones scripts.git into /root/scripts
+#   - K8s pod:       PVC mounts scripts/
+#   - Manual:        bash ~/scripts/docker/setup-service.sh triton
+#
 # Runs the full setup sequence (all steps idempotent):
 #   1. env/min.sh          - Base packages, dotfiles, rc_files
 #   2. env/<service>.sh    - Service-specific dependencies (if exists)
 #   3. workspace/<svc>.sh  - Clone repos, setup workspace (if exists)
 #   4. env/priv.sh         - SSH keys, credentials from persistent storage
-#
-# Works as a black box from any context:
-#   - Docker build:  wget this script → runs min.sh (clones scripts/) → re-execs
-#   - K8s pod:       scripts/ already exists → runs everything directly
-#   - Manual:        bash ~/scripts/docker/setup-service.sh triton
 #
 # Adding a new service: just create env/<name>.sh and/or workspace/<name>.sh
 
@@ -20,16 +20,6 @@ set -e
 
 SERVICE="${1:?Usage: setup-service.sh <service_name>}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Bootstrap: if env/min.sh isn't next to us, we were downloaded in isolation
-# (e.g., Docker build wget'd us to /tmp/). Run min.sh to clone scripts/,
-# then re-exec from the canonical location.
-if [[ ! -f "$SCRIPT_DIR/env/min.sh" ]]; then
-    echo "📦 Bootstrapping: downloading and running min.sh..."
-    wget -qO /tmp/min.sh "https://raw.githubusercontent.com/jerryyin/scripts/master/docker/env/min.sh"
-    bash /tmp/min.sh
-    exec bash "$HOME/scripts/docker/setup-service.sh" "$SERVICE"
-fi
 
 # 1. Base packages + dotfiles
 echo "📦 Base packages (env/min.sh)..."
