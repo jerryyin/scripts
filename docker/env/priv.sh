@@ -1,10 +1,17 @@
 #!/bin/bash
 # priv.sh - Container initialization script (works for both Docker and Kubernetes)
 #
-# This script handles privileged/runtime setup that needs to run once per container:
-#   - SSH key setup from persistent storage
-#   - Hostname resolution fix
-#   - Authentication credential sync (gist, copilot, gh, etc.)
+# Invoked at every container start (see docker-compose.yml `command:`), so it
+# MUST be lean: no apt/pip/npm installs here. Two phases:
+#
+#   1. First-time bootstrap (only when ~/.ssh/id_rsa is missing):
+#        - SSH keys from persistent storage
+#        - Hostname resolution fix
+#        - credentials.sh (symlink credentials from persistent storage)
+#
+#   2. Runtime patches (every start, idempotent + cheap, no network):
+#        - claude.sh --patch-only (decrypt + sed in subscription key)
+#        - any other quick post-credential patch hooks
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -14,16 +21,16 @@
 #   - Docker: docker-compose.yml at container startup
 #   - Kubernetes: via setup-service.sh (called by connect.sh)
 #
-# This script is idempotent - safe to run multiple times.
+# Use `priv.sh --force` to re-run the first-time bootstrap.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if initialization was already completed
-check_already_initialized() {
-    # SSH keys configured = already initialized
-    [ -f ~/.ssh/id_rsa ]
+# First-time bootstrap is gated on ~/.ssh/id_rsa: once SSH keys exist, we
+# assume the heavy one-time setup is done and skip straight to runtime patches.
+needs_first_time_bootstrap() {
+    [ ! -f ~/.ssh/id_rsa ]
 }
 
 # Find the persistent storage root (same logic as credentials.sh)
@@ -108,15 +115,8 @@ fix_hostname() {
     fi
 }
 
-# Main
-main() {
-    # Early exit if already initialized (idempotent)
-    # Use --force to re-run initialization
-    if [ "${1:-}" != "--force" ] && check_already_initialized; then
-        echo "✓ Container already initialized (use 'priv.sh --force' to re-run)"
-        return 0
-    fi
-
+# Phase 1: heavy, run once per container.
+first_time_bootstrap() {
     echo "════════════════════════════════════════════════════════════════"
     echo "  Container Initialization (priv.sh)"
     echo "════════════════════════════════════════════════════════════════"
@@ -132,13 +132,9 @@ main() {
     echo "════════════════════════════════════════════════════════════════"
     echo ""
 
-    # 1. Setup SSH keys
     setup_ssh "$persistent_root"
-
-    # 2. Fix hostname resolution
     fix_hostname
 
-    # 3. Sync authentication credentials
     echo ""
     if [ -f "$SCRIPT_DIR/credentials.sh" ]; then
         bash "$SCRIPT_DIR/credentials.sh"
@@ -151,6 +147,25 @@ main() {
     echo "════════════════════════════════════════════════════════════════"
     echo "  ✅ Container initialization complete"
     echo "════════════════════════════════════════════════════════════════"
+}
+
+# Phase 2: cheap, idempotent, runs at every container start.
+# Strict rule: NO network calls, NO package/dep installs, NO apt/pip/npm here.
+# Each step must early-return quickly when there is nothing to do, and stay
+# silent on the no-op path so repeat container starts don't spam.
+runtime_patches() {
+    if [ -f "$SCRIPT_DIR/claude.sh" ]; then
+        bash "$SCRIPT_DIR/claude.sh" --patch-only
+    elif [ -f ~/scripts/docker/env/claude.sh ]; then
+        bash ~/scripts/docker/env/claude.sh --patch-only
+    fi
+}
+
+main() {
+    if [ "${1:-}" = "--force" ] || needs_first_time_bootstrap; then
+        first_time_bootstrap
+    fi
+    runtime_patches
 }
 
 main "$@"

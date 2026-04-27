@@ -1,14 +1,19 @@
 #!/bin/bash
 # claude.sh - Install Claude Code CLI and configure credentials
 #
-# This script:
-#   1. Installs Claude Code CLI via npm (skips if already installed)
-#   2. Patches ~/.claude.json with the subscription key from a private gist
-#      (only if the placeholder __CLAUDE_SUB_KEY__ is present)
+# Modes:
+#   claude.sh                # Full setup: install CLI + patch subscription key
+#   claude.sh --patch-only   # Patch subscription key only (no npm install)
+#                            # Use this at runtime (every docker run) — fast,
+#                            # no network, no dependency install.
+#
+# Full setup is for build time (called from min.sh); --patch-only is for
+# runtime (called from priv.sh) once SSH keys are mounted from the host.
 #
 # Prerequisites:
-#   - nodejs + npm installed (handled by min.sh)
+#   - nodejs + npm installed (handled by min.sh) — only for full setup
 #   - ~/.claude.json template deployed by rc_files/install.sh (stow)
+#   - ~/.ssh/id_rsa (or id_ed25519) — only for the patch step
 #
 # The subscription key is encrypted with the user's SSH public key using 'age'.
 # Only someone with the matching private SSH key can decrypt it.
@@ -58,12 +63,13 @@ install_claude_cli() {
 
 patch_subscription_key() {
     if [ ! -f "$CLAUDE_CONFIG" ]; then
-        echo "⚠️  $CLAUDE_CONFIG not found — run rc_files/install.sh first"
+        # Quiet on the runtime path; loud on full setup.
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CLAUDE_CONFIG not found — run rc_files/install.sh first"
         return 0
     fi
 
     if ! grep -q "$PLACEHOLDER" "$CLAUDE_CONFIG"; then
-        echo "✓ Claude config already has subscription key"
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "✓ Claude config already has subscription key"
         return 0
     fi
 
@@ -108,6 +114,24 @@ patch_subscription_key() {
 }
 
 main() {
+    local skip_install=false
+    case "${1:-}" in
+        --patch-only) skip_install=true ;;
+        "") ;;
+        *)
+            echo "Usage: claude.sh [--patch-only]"
+            echo "  (no args)      Install Claude Code CLI + patch subscription key (build time)"
+            echo "  --patch-only   Patch subscription key only, skip CLI install (runtime)"
+            exit 1
+            ;;
+    esac
+
+    if [ "$skip_install" = true ]; then
+        # Runtime path: cheap, idempotent, no network/install. Silent if no-op.
+        QUIET_NOOP=1 patch_subscription_key
+        return
+    fi
+
     echo ""
     echo "🤖 Claude Code Setup"
     echo "────────────────────"
