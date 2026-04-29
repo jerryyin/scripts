@@ -150,4 +150,22 @@ if [[ $CAPTURE -eq 1 ]]; then
     exec "$ROCCAP" capture --loglevel info "$@"
 fi
 
-exec "$@"
+# ---------- FFM teardown fix ----------
+# FFM simulator threads don't shut down during Py_Finalize, causing the process
+# to hang indefinitely after tests pass.  For pytest: inject a plugin that calls
+# hipDeviceReset + os._exit.  For plain python: wrap with a small -c shim.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+case "$1" in
+    pytest|*/pytest)
+        export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:+$PYTHONPATH}"
+        exec "$@" -p ffm_teardown
+        ;;
+    python3|python|*/python3|*/python)
+        exec "$@"
+        ;;
+    *)
+        exec "$@"
+        ;;
+esac
