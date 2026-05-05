@@ -1,34 +1,38 @@
-# This is primarily meant as a docker image for gfx1250 CI.
-# But it tries to be cooperative with mirror accounts inside the docker to
-# avoid touching all files with root ownership; so you can build on top it
-# for personal development environment.
-
-# This docker image tries to install necessary packages to be hermetic.
-# Though in order to make updating key components easier, it expects volume
-# binding to the following directories inside docker:
+# Dev container image for gfx1250 (mi450), ported from upstream
+# triton/mi400/gfx1250.Dockerfile and adapted for personal local use.
 #
-# - /code/: Github Action Runner's Triton work directory
-# - /llvm/: LLVM pre-built package
-# - /ffm/: Directory containing FFM pre-built package
-# - /home/mirror/.triton/: Triton cache directory
-# - /home/mirror/.ccache/: ccache directory
-
-# Build docker with public PyTorch:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-env \
-#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
-
-# Build docker with NPI PyTorch:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-pytorch-env \
-#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_NPI_TORCH=TRUE --build-arg ROCM_BUILD_NUMBER=744
-
-# Build docker with NPI ROCm + roccap:
-# docker build . -f /path/to/triton/mi400/gfx1250.Dockerfile -t ci/gfx1250-roccap \
-#   --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
-#   --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
-#   --build-arg USE_NPI_ROCM=TRUE --build-arg USE_ROCCAP=TRUE --build-arg ROCM_BUILD_NUMBER=744
+# Differences from upstream CI image:
+#   - Creates a non-root "mirror" user matching the host UID/GID, so files
+#     in bind mounts ($HOME -> /zyin) keep their host ownership.
+#   - Adds the host's render group so the container user can access /dev/dri
+#     and /dev/kfd.
+#   - The upstream FFM bake-in (COPY ffmlite/ /ffm) is omitted; the usual
+#     flow here is to bind-mount the package at runtime via docker-compose.
+#     See the FFM section below for re-enabling hermetic bake-in.
+#
+# This image expects the following bind mounts at runtime:
+#   - /code/                       Triton source tree
+#   - /llvm/                       LLVM pre-built package
+#   - /ffm/ or /am-ffm/            AM+FFM Lite package (mounted by compose)
+#   - /home/mirror/.triton/        Triton cache directory
+#   - /home/mirror/.ccache/        ccache directory
+#
+# Build with public PyTorch:
+#   docker build . -f /path/to/triton-mi450.dockerfile -t jeryin/dev:mi450 \
+#     --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#     --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3)
+#
+# Build with NPI PyTorch (ROCm gfx1250 wheels via genesis):
+#   docker build . -f /path/to/triton-mi450.dockerfile -t jeryin/dev:mi450 \
+#     --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#     --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+#     --build-arg USE_NPI_TORCH=TRUE
+#
+# Build with NPI PyTorch + roccap:
+#   docker build . -f /path/to/triton-mi450.dockerfile -t jeryin/dev:mi450 \
+#     --build-arg DOCKER_USERID=$(id -u) --build-arg DOCKER_GROUPID=$(id -g) \
+#     --build-arg DOCKER_RENDERID=$(getent group render | cut -d: -f3) \
+#     --build-arg USE_NPI_TORCH=TRUE --build-arg USE_ROCCAP=TRUE
 FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
@@ -37,75 +41,56 @@ SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
   git clang lld ccache \
   python3 python3-dev python3-pip \
-  sudo numactl libelf1 libzstd-dev curl wget rsync
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+  sudo numactl libelf1 libzstd-dev curl wget rsync && \
+  apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # gfx1250 development environment
 # We are in a docker so it's fine to break system packages
 RUN pip config set global.break-system-packages true
-RUN pip install --ignore-installed --upgrade pip PyYAML
+RUN pip install --no-cache-dir --ignore-installed --upgrade pip PyYAML
 
 # Install pip packages needed for Triton development
-RUN pip install --ignore-installed --upgrade "setuptools>=40.8.0" wheel
-RUN pip install --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pybind11>=2.13.1" nanobind \
+RUN pip install --no-cache-dir --ignore-installed --upgrade "setuptools>=40.8.0" wheel
+RUN pip install --no-cache-dir --upgrade "cmake>=3.20,<4.0" "ninja>=1.11.1" "pybind11>=2.13.1" nanobind \
   numpy scipy pandas matplotlib einops \
-  pytest pytest-xdist pytest-repeat lit expecttest \
-  pylama pre-commit clang-format
+  pytest pytest-xdist pytest-repeat pytest-forked lit \
+  expecttest pylama pre-commit clang-format
 
-ARG USE_NPI_ROCM=FALSE
 # Switch to choose either NPI or regular torch distribution
 ARG USE_NPI_TORCH=FALSE
 
-# Pick ROCm build number and it must match PyTorch NPI build
-# To get the build numbers, go to: http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/
-# and pick the desired build
-ARG ROCM_BUILD_NUMBER=781
-
-# We try to automatically get AMDGPU_BUILD_NUMBER in the following with curl.
-# If running into errors, you can manually specify AMDGPU_BUILD_NUMBER by
-# getting it with your browser.
-ARG AMDGPU_BUILD_NUMBER=0
-RUN set -eux; \
-    if [ "$AMDGPU_BUILD_NUMBER" = "0" ]; then \
-        AMDGPU_BUILD_NUMBER=$(curl -s http://rocm-ci.amd.com/view/mi450/job/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/ | grep -oP 'Mesa UMD Build Number:\K\d+'); \
-    fi; \
-    echo "Using ROCm Build Number: ${ROCM_BUILD_NUMBER}"; \
-    echo "Using AMDGPU Build Number: ${AMDGPU_BUILD_NUMBER}"; \
-    echo "${AMDGPU_BUILD_NUMBER}" > /tmp/amdgpu_build_number
-
-RUN set -eux; \
-  if [ "${USE_NPI_ROCM}" = "TRUE" ]; then \
-    AMDGPU_BUILD_NUMBER=$(cat /tmp/amdgpu_build_number); \
-    wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.3-24.04-1_all.deb && \
-    sudo apt-get install ./amdgpu-install-internal_7.3-24.04-1_all.deb && \
-    amdgpu-repo --amdgpu-build=${AMDGPU_BUILD_NUMBER} --rocm-build=compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER} && \
-    amdgpu-install -y --usecase=rocm; \
-  fi
-
+# For NPI PyTorch we install from the genesis gfx1250 wheel index.
+# rocm-sdk-devel provides /opt/rocm via the rocm-sdk path mechanism.
 RUN set -eux; \
   if [ "${USE_NPI_TORCH}" = "TRUE" ]; then \
-    URL_BASE=https://compute-artifactory.amd.com/artifactory/compute-pytorch-rocm/compute-rocm-npi-mi450/${ROCM_BUILD_NUMBER}/mi450 && \
-    echo "Fetching wheels from ${URL_BASE}" && \
-    TORCH_WHL=$(curl -s ${URL_BASE}/ | grep -oP 'torch-[^"]*'\\.whl | head -n1) && \
-    TORCHVISION_WHL=$(curl -s ${URL_BASE}/ | grep -oP 'torchvision-[^"]*'\\.whl | head -n1) && \
-    TRITON_WHL=$(curl -s ${URL_BASE}/ | grep -oP 'triton-[^"]*'\\.whl | head -n1) && \
-    pip install \
-      ${URL_BASE}/${TORCH_WHL} \
-      ${URL_BASE}/${TORCHVISION_WHL} \
-      ${URL_BASE}/${TRITON_WHL} && \
+    pip install --no-cache-dir typing_extensions sympy networkx jinja2 fsspec && \
+    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ --no-cache-dir torch torchaudio torchvision && \
+    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ rocm-sdk-devel && \
+    mkdir -p /opt/rocm/ && ln -s $(rocm-sdk path --root)/lib /opt/rocm/lib && \
     # hip-python not required but needed to support current gfx1250 workarounds
-    pip install --upgrade hip-python -i https://test.pypi.org/simple/ && \
+    pip install --no-cache-dir --upgrade hip-python -i https://test.pypi.org/simple/ && \
     pip uninstall -y triton pytorch-triton pytorch-triton-rocm; \
   else \
-    pip install --upgrade hip-python -i https://test.pypi.org/simple/ && \
-    pip install torch -i https://download.pytorch.org/whl/nightly/rocm6.4 && \
+    pip install --no-cache-dir --upgrade hip-python -i https://test.pypi.org/simple/ && \
+    pip install --no-cache-dir torch -i https://download.pytorch.org/whl/nightly/rocm6.4 && \
     pip uninstall -y triton pytorch-triton pytorch-triton-rocm && \
     rm -rf $(pip show torch | grep ^Location: | cut -d' ' -f2-)/torch/lib/libamdhip64.so; \
   fi
 
-# Copy a local FFM Lite package for hermetic environment
-# In CI we may want to rebind it when invoking docker for easy upgrade.
-COPY rocm-ffmlite-mi450-eaafd2a/ /ffm
+# FFM Lite package handling.
+#
+# Local workflow: bind-mount the package at runtime via docker-compose, so
+# nothing is baked in here -- /ffm is just an empty mount point.
+#
+# Hermetic workflow (mirroring upstream gfx1250.Dockerfile): symlink or copy
+# the package as "ffmlite/" in the build context, then uncomment the COPY
+# below before building. (Docker COPY cannot be made conditional via ARG.)
+#
+#   COPY ffmlite/ /ffm
+RUN mkdir -p /ffm
+
+# Ccache settings
+RUN ccache --max-size=15G
 
 # Create non-root user account to mirror host user account
 ARG DOCKER_USERID=0
@@ -136,9 +121,6 @@ RUN if [ ${DOCKER_USERID} -ne 0 ] && [ ${DOCKER_RENDERID} -ne 0 ]; then \
     echo "username ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/username; \
 fi
 
-# Ccache settings
-RUN ccache --max-size=15G
-
 # Create mapping directories and chown before switching user
 RUN mkdir -p /code && chown -R ${DOCKER_USERID}:${DOCKER_GROUPID} /code && \
   mkdir -p /llvm && chown -R ${DOCKER_USERID}:${DOCKER_GROUPID} /llvm && \
@@ -150,23 +132,35 @@ RUN mkdir -p /code && chown -R ${DOCKER_USERID}:${DOCKER_GROUPID} /code && \
 USER ${DOCKER_USERNAME}
 WORKDIR /home/${DOCKER_USERNAME}
 
+# Optional: build & install rocplaycap. Requires NPI torch (rocm-sdk-core
+# provides ROCM_PATH for the build).
 ARG USE_ROCCAP=FALSE
 ARG ROCPLAYCAP_VERSION="4.5.1"
 
 RUN set -eux; \
   if [ "${USE_ROCCAP}" = "TRUE" ]; then \
+    pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ --no-cache-dir rocm-sdk-core && \
+    export ROCM_PATH="$(pip show torch | grep ^Location: | cut -d' ' -f2-)/_rocm_sdk_core" && \
+    export LD_LIBRARY_PATH="${ROCM_PATH}/lib/" && \
+    echo "ROCM_PATH=${ROCM_PATH}" && \
+    find ${ROCM_PATH} -name "libhsa-runtime64.so*" && \
     wget https://atlartifactory.amd.com/artifactory/HW-RocPlayCap-REL/releases/rocplaycap-${ROCPLAYCAP_VERSION}/rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     tar -xf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz && \
     cd ./rocplaycap-src-${ROCPLAYCAP_VERSION} && \
-    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$HOME/.local -DCMAKE_PREFIX_PATH=/opt/rocm/ -DHSA_ROOT_DIR:PATH=/opt/rocm/hsa/ && \
+    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$HOME/.local \
+      -DCMAKE_PREFIX_PATH=$ROCM_PATH \
+      -DHSA_LIBRARY:FILEPATH=${ROCM_PATH}/lib/libhsa-runtime64.so.1 \
+      -DHSA_INCLUDE_DIR:PATH=${ROCM_PATH}/include/ && \
     cmake --build build --target install && \
     cd .. && rm -rf ./rocplaycap-src-${ROCPLAYCAP_VERSION}.tar.gz ./rocplaycap-src-${ROCPLAYCAP_VERSION}; \
   fi
 
 RUN pip config set global.break-system-packages true
 RUN mkdir $HOME/.ssh && echo -e "Host github.com\n\tHostname ssh.github.com\n\tPort 443" >> $HOME/.ssh/config
+
 ENV CCACHE_DIR=/home/${DOCKER_USERNAME}/.ccache
 ENV PATH="/home/${DOCKER_USERNAME}/.local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/rocm/lib"
 
 WORKDIR /code
 ENTRYPOINT /usr/bin/bash
