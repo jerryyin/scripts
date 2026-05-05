@@ -1,23 +1,26 @@
 #!/bin/bash
 # claude.sh - Install Claude Code CLI and configure credentials
 #
-# This script:
-#   1. Installs Claude Code CLI via npm (skips if already installed)
-#   2. Patches ~/.claude.json with the subscription key from a private gist
-#      (only if the placeholder __CLAUDE_SUB_KEY__ is present)
+# Modes:
+#   claude.sh                # Full setup: install CLI + patch subscription key
+#   claude.sh --patch-only   # Patch only (no npm install). Use this at runtime
+#                            # (priv.sh): fast, no network, no dependency install,
+#                            # silent on no-op.
+#
+# Source of truth for the subscription key: $HOME/vault/claude_key.txt
+# (cloned by priv.sh's sync_vault from a private GitHub repo). The patch step
+# reads the plaintext from there and sed-substitutes it into ~/.claude.json
+# in place of the __CLAUDE_SUB_KEY__ placeholder shipped by rc_files.
 #
 # Prerequisites:
-#   - nodejs + npm installed (handled by min.sh)
+#   - nodejs + npm installed (handled by min.sh) — only for full setup
 #   - ~/.claude.json template deployed by rc_files/install.sh (stow)
-#
-# The subscription key is encrypted with the user's SSH public key using 'age'.
-# Only someone with the matching private SSH key can decrypt it.
-# This works seamlessly since SSH keys are synced via credentials.sh/priv.sh.
+#   - ~/vault/claude_key.txt populated — handled by priv.sh's sync_vault
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENCRYPTED_KEY_FILE="$SCRIPT_DIR/claude_key.age"
+KEY_FILE="${KEY_FILE:-$HOME/vault/claude_key.txt}"
 CLAUDE_CONFIG="$HOME/.claude.json"
 PLACEHOLDER="__CLAUDE_SUB_KEY__"
 
@@ -58,48 +61,27 @@ install_claude_cli() {
 
 patch_subscription_key() {
     if [ ! -f "$CLAUDE_CONFIG" ]; then
-        echo "⚠️  $CLAUDE_CONFIG not found — run rc_files/install.sh first"
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CLAUDE_CONFIG not found — run rc_files/install.sh first"
         return 0
     fi
 
     if ! grep -q "$PLACEHOLDER" "$CLAUDE_CONFIG"; then
-        echo "✓ Claude config already has subscription key"
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "✓ Claude config already has subscription key"
         return 0
     fi
 
-    echo "🔑 Decrypting subscription key with SSH key..."
+    if [ ! -f "$KEY_FILE" ]; then
+        [ "${QUIET_NOOP:-0}" = "1" ] || {
+            echo "⚠️  $KEY_FILE not found — vault not synced yet"
+            echo "   Run priv.sh to clone the vault, then re-run this script."
+        }
+        return 0
+    fi
+
     local sub_key
-
-    if [ ! -f "$ENCRYPTED_KEY_FILE" ]; then
-        echo "⚠️  Encrypted key file not found: $ENCRYPTED_KEY_FILE"
-        echo "   Create it with: echo 'YOUR_KEY' | age -R ~/.ssh/id_rsa.pub -o $ENCRYPTED_KEY_FILE"
-        return 0
-    fi
-
-    if ! command -v age &>/dev/null; then
-        echo "⚠️  age not installed — run 'apt install age' or 'brew install age'"
-        return 0
-    fi
-
-    # Try common SSH key locations
-    local ssh_key=""
-    for key in ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
-        if [ -f "$key" ]; then
-            ssh_key="$key"
-            break
-        fi
-    done
-
-    if [ -z "$ssh_key" ]; then
-        echo "⚠️  No SSH private key found — ensure credentials.sh has run"
-        return 0
-    fi
-
-    sub_key=$(age -d -i "$ssh_key" "$ENCRYPTED_KEY_FILE" 2>/dev/null || echo "")
-    sub_key=$(echo "$sub_key" | tr -d '[:space:]')
-
+    sub_key=$(tr -d '[:space:]' < "$KEY_FILE")
     if [ -z "$sub_key" ]; then
-        echo "⚠️  Could not decrypt key — wrong SSH key or corrupted file"
+        echo "⚠️  $KEY_FILE is empty"
         return 0
     fi
 
@@ -108,6 +90,23 @@ patch_subscription_key() {
 }
 
 main() {
+    local skip_install=false
+    case "${1:-}" in
+        --patch-only) skip_install=true ;;
+        "") ;;
+        *)
+            echo "Usage: claude.sh [--patch-only]"
+            echo "  (no args)      Install Claude Code CLI + patch subscription key (build time)"
+            echo "  --patch-only   Patch subscription key only, skip CLI install (runtime)"
+            exit 1
+            ;;
+    esac
+
+    if [ "$skip_install" = true ]; then
+        QUIET_NOOP=1 patch_subscription_key
+        return
+    fi
+
     echo ""
     echo "🤖 Claude Code Setup"
     echo "────────────────────"

@@ -1,10 +1,18 @@
 #!/bin/bash
 # priv.sh - Container initialization script (works for both Docker and Kubernetes)
 #
-# This script handles privileged/runtime setup that needs to run once per container:
-#   - SSH key setup from persistent storage
-#   - Hostname resolution fix
-#   - Authentication credential sync (gist, copilot, gh, etc.)
+# Invoked at every container start (see docker-compose.yml `command:`), so it
+# MUST be lean: no apt/pip/npm installs here. Two phases:
+#
+#   1. First-time bootstrap (only when ~/.ssh/id_rsa is missing):
+#        - SSH keys from persistent storage
+#        - Hostname resolution fix
+#        - credentials.sh (symlink credentials from persistent storage)
+#        - sync_vault (clone the private vault repo with shared dev secrets)
+#
+#   2. Runtime patches (every start, idempotent + cheap, no network):
+#        - claude.sh --patch-only (read ~/vault/claude_key.txt -> ~/.claude.json)
+#        - gh.sh     --patch-only (read ~/vault/gh_token.txt   -> ~/.config/gh/hosts.yml)
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -12,18 +20,18 @@
 #
 # Called by:
 #   - Docker: docker-compose.yml at container startup
-#   - Kubernetes: Can be called manually or from setup-pod.sh
+#   - Kubernetes: via setup-service.sh (called by connect.sh)
 #
-# This script is idempotent - safe to run multiple times.
+# Use `priv.sh --force` to re-run the first-time bootstrap.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if initialization was already completed
-check_already_initialized() {
-    # SSH keys configured = already initialized
-    [ -f ~/.ssh/id_rsa ]
+# First-time bootstrap is gated on ~/.ssh/id_rsa: once SSH keys exist, we
+# assume the heavy one-time setup is done and skip straight to runtime patches.
+needs_first_time_bootstrap() {
+    [ ! -f ~/.ssh/id_rsa ]
 }
 
 # Find the persistent storage root (same logic as credentials.sh)
@@ -90,6 +98,26 @@ setup_ssh() {
     echo "✓ SSH keys configured"
 }
 
+# Clone the private vault repo (~/vault). Holds shared dev secrets in plaintext;
+# its privacy is gated by GitHub repo permissions / your account's SSH keys.
+# Idempotent: clone if missing, otherwise no-op (run `git -C ~/vault pull` by
+# hand to refresh).
+VAULT_REPO="${VAULT_REPO:-git@github.com:jerryyin/vault.git}"
+VAULT_DIR="${VAULT_DIR:-$HOME/vault}"
+sync_vault() {
+    if [ -d "$VAULT_DIR/.git" ]; then
+        echo "✓ vault already cloned at $VAULT_DIR (use 'git -C $VAULT_DIR pull' to refresh)"
+        return 0
+    fi
+    echo "📥 Cloning vault from $VAULT_REPO..."
+    if git clone --depth 1 --quiet "$VAULT_REPO" "$VAULT_DIR"; then
+        echo "✓ vault cloned to $VAULT_DIR"
+    else
+        echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
+        echo "   (claude.sh / gh.sh patches will be skipped until the vault is present)"
+    fi
+}
+
 # Fix hostname resolution
 fix_hostname() {
     if [ -z "${HOSTNAME:-}" ]; then
@@ -108,15 +136,8 @@ fix_hostname() {
     fi
 }
 
-# Main
-main() {
-    # Early exit if already initialized (idempotent)
-    # Use --force to re-run initialization
-    if [ "${1:-}" != "--force" ] && check_already_initialized; then
-        echo "✓ Container already initialized (use 'priv.sh --force' to re-run)"
-        return 0
-    fi
-
+# Phase 1: heavy, run once per container.
+first_time_bootstrap() {
     echo "════════════════════════════════════════════════════════════════"
     echo "  Container Initialization (priv.sh)"
     echo "════════════════════════════════════════════════════════════════"
@@ -132,25 +153,34 @@ main() {
     echo "════════════════════════════════════════════════════════════════"
     echo ""
 
-    # 1. Setup SSH keys
     setup_ssh "$persistent_root"
-
-    # 2. Fix hostname resolution
     fix_hostname
 
-    # 3. Sync authentication credentials
     echo ""
-    if [ -f "$SCRIPT_DIR/credentials.sh" ]; then
-        bash "$SCRIPT_DIR/credentials.sh"
-    elif [ -f ~/scripts/docker/env/credentials.sh ]; then
-        bash ~/scripts/docker/env/credentials.sh
-    else
-        echo "⚠️  credentials.sh not found - skipping credential sync"
-    fi
+    bash "$SCRIPT_DIR/credentials.sh"
+
+    echo ""
+    sync_vault
 
     echo "════════════════════════════════════════════════════════════════"
     echo "  ✅ Container initialization complete"
     echo "════════════════════════════════════════════════════════════════"
+}
+
+# Phase 2: cheap, idempotent, runs at every container start.
+# Strict rule: NO network calls, NO package/dep installs, NO apt/pip/npm here.
+# Each step must early-return quickly when there is nothing to do, and stay
+# silent on the no-op path so repeat container starts don't spam.
+runtime_patches() {
+    bash "$SCRIPT_DIR/claude.sh" --patch-only
+    bash "$SCRIPT_DIR/gh.sh"     --patch-only
+}
+
+main() {
+    if [ "${1:-}" = "--force" ] || needs_first_time_bootstrap; then
+        first_time_bootstrap
+    fi
+    runtime_patches
 }
 
 main "$@"
