@@ -108,7 +108,8 @@ fi
 echo ""
 
 # Find all interactive pods for this user
-PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | .metadata.name" 2>/dev/null || true)
+# Match all interactive pods for this user (any service: iree, triton, etc.)
+PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-\")) | .metadata.name" 2>/dev/null || true)
 
 if [ -n "$PODS" ]; then
     POD_ARRAY=($PODS)

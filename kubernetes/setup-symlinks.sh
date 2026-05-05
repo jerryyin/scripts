@@ -50,6 +50,7 @@ echo "2. Setting up kubeconfig files..."
 create_symlink "$SCRIPT_DIR/kube-configs/tw-tus1-bm-private-sso.conf" "$HOME/.kube/configs/tw-tus1-bm-private-sso.conf"
 create_symlink "$SCRIPT_DIR/kube-configs/tw-mia1-bm-public-sso.conf" "$HOME/.kube/configs/tw-mia1-bm-public-sso.conf"
 create_symlink "$SCRIPT_DIR/kube-configs/tw-tus1-bm-public-sso.conf" "$HOME/.kube/configs/tw-tus1-bm-public-sso.conf"
+create_symlink "$SCRIPT_DIR/kube-configs/conductor-mi35x.conf" "$HOME/.kube/configs/conductor-mi35x.conf"
 echo ""
 
 # 3. Interactive pod configuration

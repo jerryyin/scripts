@@ -38,7 +38,8 @@ echo "================================================================"
 echo ""
 
 # Find all interactive pods for this user (including non-Running states for debugging)
-PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-iree-\")) | .metadata.name" 2>/dev/null || true)
+# Match all interactive pods for this user (any service: iree, triton, etc.)
+PODS=$(kubectl get pods -n "$NAMESPACE" -o json | jq -r ".items[] | select(.metadata.name | startswith(\"${USER}-\")) | .metadata.name" 2>/dev/null || true)
 
 if [ -z "$PODS" ]; then
     echo "No pods found."

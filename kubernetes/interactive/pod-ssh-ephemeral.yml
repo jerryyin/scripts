@@ -18,7 +18,7 @@ spec:
     - name: interactive-ssh
       # Docker image to use for the interactive session.
       # ROCm base image for IREE development
-      image: rocm/dev-ubuntu-24.04:latest
+      image: {{DOCKER_IMAGE}}
       imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
