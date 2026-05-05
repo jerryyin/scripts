@@ -40,7 +40,7 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
      git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim vim wget \
-     python-is-python3 gdb gist openssh-client age
+     python-is-python3 gdb gist openssh-client
 
 # rc files
 if [ ! -d rc_files ]; then
@@ -67,10 +67,9 @@ fi
 
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
-# Install Claude Code CLI and patch subscription key
+# Sibling scripts in the same env/ dir: install + (best-effort) patch.
+# Patches that need ~/.ssh/id_rsa will no-op silently here at build time;
+# priv.sh re-runs them at runtime once SSH keys are mounted from the host.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/claude.sh" ]; then
-    bash "$SCRIPT_DIR/claude.sh"
-elif [ -f ~/scripts/docker/env/claude.sh ]; then
-    bash ~/scripts/docker/env/claude.sh
-fi
+bash "$SCRIPT_DIR/claude.sh"
+bash "$SCRIPT_DIR/gh.sh"

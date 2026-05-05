@@ -28,16 +28,21 @@
 
 set -e
 
-# Credential paths relative to home directory
+# Credential paths relative to home directory.
+#
+# NOT listed here (intentionally):
+#   - .config/gh          — managed by gh.sh from ~/vault/gh_token.txt
+#   - .claude.json        — managed by claude.sh from ~/vault/claude_key.txt
+#                           (and stowed-with-placeholder by rc_files)
+# The vault is the source of truth for those secrets, so we don't want
+# credentials.sh to overwrite them with stale host-side copies.
 CREDENTIAL_PATHS=(
     ".gist"                      # gist-paste token
     ".config/github-copilot"     # GitHub Copilot (vim/neovim)
-    ".config/gh"                 # GitHub CLI
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
     ".npmrc"                     # NPM registry auth
-    ".claude.json"               # Claude Code config + API key
-    ".claude/settings.json"      # Claude Code settings
+    ".claude/settings.json"      # Claude Code per-user settings (non-secret)
 )
 
 # Find the persistent storage root (mounted host home or PVC)
