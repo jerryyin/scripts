@@ -72,4 +72,5 @@ sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 # priv.sh re-runs them at runtime once SSH keys are mounted from the host.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "$SCRIPT_DIR/claude.sh"
+bash "$SCRIPT_DIR/codex.sh"
 bash "$SCRIPT_DIR/gh.sh"
