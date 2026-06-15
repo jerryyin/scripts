@@ -28,10 +28,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# First-time bootstrap is gated on ~/.ssh/id_rsa: once SSH keys exist, we
-# assume the heavy one-time setup is done and skip straight to runtime patches.
+# First-time bootstrap is gated on the SSH private key: once any supported key
+# (id_rsa or id_ed25519) exists, we assume the heavy one-time setup is done and
+# skip straight to runtime patches.
 needs_first_time_bootstrap() {
-    [ ! -f ~/.ssh/id_rsa ]
+    [ ! -f ~/.ssh/id_rsa ] && [ ! -f ~/.ssh/id_ed25519 ]
 }
 
 # Find the persistent storage root (same logic as credentials.sh)
@@ -84,7 +85,7 @@ setup_ssh() {
         return 0
     fi
 
-    if [ -f ~/.ssh/id_rsa ]; then
+    if [ -f ~/.ssh/id_rsa ] || [ -f ~/.ssh/id_ed25519 ]; then
         echo "✓ SSH keys already configured"
         return 0
     fi
@@ -93,8 +94,10 @@ setup_ssh() {
     rm -rf ~/.ssh
     cp -r "$persistent_root/.ssh" ~/.ssh
     chmod 700 ~/.ssh 2>/dev/null || true
-    chmod 600 ~/.ssh/id_rsa 2>/dev/null || true
-    ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+    # Lock down private keys; public pairs (*.pub) stay world-readable.
+    chmod 600 ~/.ssh/id_rsa ~/.ssh/id_ed25519 2>/dev/null || true
+    chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/id_ed25519.pub 2>/dev/null || true
+    ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
     echo "✓ SSH keys configured"
 }
 
