@@ -43,7 +43,8 @@ CREDENTIAL_PATHS=(
     ".netrc"                     # HTTP basic auth
     ".npmrc"                     # NPM registry auth
     ".claude/settings.json"      # Claude Code per-user settings (non-secret)
-    ".codex"                     # OpenAI Codex CLI (OAuth tokens, auto-refreshed)
+    ".codex"                     # OpenAI Codex CLI state (OAuth tokens, auto-refreshed;
+                                 # config.toml is patched afterward by codex.sh)
 )
 
 # Find the persistent storage root (mounted host home or PVC)

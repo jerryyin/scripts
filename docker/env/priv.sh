@@ -12,6 +12,7 @@
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - claude.sh --patch-only (read ~/vault/claude_key.txt -> ~/.claude.json)
+#        - codex.sh  --patch-only (copy ~/.codex.config.toml.template -> ~/.codex/config.toml)
 #        - gh.sh     --patch-only (read ~/vault/gh_token.txt   -> ~/.config/gh/hosts.yml)
 #
 # Works with:
@@ -176,6 +177,7 @@ first_time_bootstrap() {
 # silent on the no-op path so repeat container starts don't spam.
 runtime_patches() {
     bash "$SCRIPT_DIR/claude.sh" --patch-only
+    bash "$SCRIPT_DIR/codex.sh"  --patch-only
     bash "$SCRIPT_DIR/gh.sh"     --patch-only
 }
 
