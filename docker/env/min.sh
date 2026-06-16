@@ -41,6 +41,10 @@ curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
      git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim vim wget \
      python-is-python3 gdb gist openssh-client
+# NodeSource nodejs replaces Ubuntu's nodejs+libnode+node-* ecosystem in a single
+# transaction, leaving nodejs with zero reverse-deps. apt then considers it
+# "auto-installed" and apt autoremove will purge it. Mark it manual.
+sudo apt-mark manual nodejs
 
 # rc files
 if [ ! -d rc_files ]; then
