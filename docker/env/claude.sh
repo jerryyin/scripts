@@ -7,14 +7,18 @@
 #                            # (priv.sh): fast, no network, no dependency install,
 #                            # silent on no-op.
 #
-# Source of truth for the subscription key: $HOME/vault/claude_key.txt
-# (cloned by priv.sh's sync_vault from a private GitHub repo). The patch step
-# reads the plaintext from there and sed-substitutes it into ~/.claude.json
-# in place of the __CLAUDE_SUB_KEY__ placeholder shipped by rc_files.
+# The config file (~/.claude.json) is generated from the template
+# (~/.claude.json.template, deployed by rc_files/install.sh via stow).
+# On first run (or when the template is newer), the template is copied
+# and placeholders are substituted:
+#   __CLAUDE_SUB_KEY__  → vault/claude_key.txt
+#   __LATEST_OPUS__     → latest Opus model ID
+#   __LATEST_SONNET__   → latest Sonnet model ID
+#   __LATEST_HAIKU__    → latest Haiku model ID
 #
 # Prerequisites:
 #   - nodejs + npm installed (handled by min.sh) — only for full setup
-#   - ~/.claude.json template deployed by rc_files/install.sh (stow)
+#   - ~/.claude.json.template deployed by rc_files/install.sh (stow)
 #   - ~/vault/claude_key.txt populated — handled by priv.sh's sync_vault
 
 set -e
@@ -22,7 +26,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${KEY_FILE:-$HOME/vault/claude_key.txt}"
 CLAUDE_CONFIG="$HOME/.claude.json"
-PLACEHOLDER="__CLAUDE_SUB_KEY__"
+CLAUDE_TEMPLATE="$HOME/.claude.json.template"
+
+# Latest model IDs — update these when new model generations ship.
+LATEST_OPUS="Claude-Opus-4.8"
+LATEST_SONNET="Claude-Sonnet-4.6"
+LATEST_HAIKU="Claude-Haiku-4.5"
 
 install_claude_cli() {
     # Always install to ~/.local to avoid /usr/local being overridden
@@ -59,34 +68,48 @@ install_claude_cli() {
     return 1
 }
 
-patch_subscription_key() {
-    if [ ! -f "$CLAUDE_CONFIG" ]; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CLAUDE_CONFIG not found — run rc_files/install.sh first"
+patch_claude_config() {
+    if [ ! -f "$CLAUDE_TEMPLATE" ]; then
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CLAUDE_TEMPLATE not found — run rc_files/install.sh first"
         return 0
     fi
 
-    if ! grep -q "$PLACEHOLDER" "$CLAUDE_CONFIG"; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || echo "✓ Claude config already has subscription key"
-        return 0
+    # Copy template if config doesn't exist or template is newer
+    if [ ! -f "$CLAUDE_CONFIG" ] || [ "$CLAUDE_TEMPLATE" -nt "$CLAUDE_CONFIG" ]; then
+        cp "$CLAUDE_TEMPLATE" "$CLAUDE_CONFIG"
+        echo "✓ Copied $CLAUDE_TEMPLATE → $CLAUDE_CONFIG"
     fi
 
-    if [ ! -f "$KEY_FILE" ]; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || {
-            echo "⚠️  $KEY_FILE not found — vault not synced yet"
-            echo "   Run priv.sh to clone the vault, then re-run this script."
-        }
-        return 0
+    # Substitute model placeholders (idempotent — no-op if already replaced)
+    if grep -q "__LATEST_" "$CLAUDE_CONFIG"; then
+        sed -i \
+            -e "s/__LATEST_OPUS__/${LATEST_OPUS}/g" \
+            -e "s/__LATEST_SONNET__/${LATEST_SONNET}/g" \
+            -e "s/__LATEST_HAIKU__/${LATEST_HAIKU}/g" \
+            "$CLAUDE_CONFIG"
+        echo "✓ Model versions set: opus=$LATEST_OPUS sonnet=$LATEST_SONNET haiku=$LATEST_HAIKU"
     fi
 
-    local sub_key
-    sub_key=$(tr -d '[:space:]' < "$KEY_FILE")
-    if [ -z "$sub_key" ]; then
-        echo "⚠️  $KEY_FILE is empty"
-        return 0
-    fi
+    # Substitute subscription key
+    if grep -q "__CLAUDE_SUB_KEY__" "$CLAUDE_CONFIG"; then
+        if [ ! -f "$KEY_FILE" ]; then
+            [ "${QUIET_NOOP:-0}" = "1" ] || {
+                echo "⚠️  $KEY_FILE not found — vault not synced yet"
+                echo "   Run priv.sh to clone the vault, then re-run this script."
+            }
+            return 0
+        fi
 
-    sed -i "s/${PLACEHOLDER}/${sub_key}/" "$CLAUDE_CONFIG"
-    echo "✓ Subscription key patched into $CLAUDE_CONFIG"
+        local sub_key
+        sub_key=$(tr -d '[:space:]' < "$KEY_FILE")
+        if [ -z "$sub_key" ]; then
+            echo "⚠️  $KEY_FILE is empty"
+            return 0
+        fi
+
+        sed -i "s/__CLAUDE_SUB_KEY__/${sub_key}/" "$CLAUDE_CONFIG"
+        echo "✓ Subscription key patched into $CLAUDE_CONFIG"
+    fi
 }
 
 main() {
@@ -103,7 +126,7 @@ main() {
     esac
 
     if [ "$skip_install" = true ]; then
-        QUIET_NOOP=1 patch_subscription_key
+        QUIET_NOOP=1 patch_claude_config
         return
     fi
 
@@ -111,7 +134,7 @@ main() {
     echo "🤖 Claude Code Setup"
     echo "────────────────────"
     install_claude_cli
-    patch_subscription_key
+    patch_claude_config
     echo ""
 }
 
