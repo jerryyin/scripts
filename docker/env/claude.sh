@@ -10,11 +10,11 @@
 # The config file (~/.claude.json) is generated from the template
 # (~/.claude.json.template, deployed by rc_files/install.sh via stow).
 # On first run (or when the template is newer), the template is copied
-# and placeholders are substituted:
-#   __CLAUDE_SUB_KEY__  → vault/claude_key.txt
-#   __LATEST_OPUS__     → latest Opus model ID
-#   __LATEST_SONNET__   → latest Sonnet model ID
-#   __LATEST_HAIKU__    → latest Haiku model ID
+# and the __CLAUDE_SUB_KEY__ placeholder is substituted from vault.
+#
+# Model selection is left to Claude Code's built-in defaults (latest at
+# each release). No ANTHROPIC_MODEL or ANTHROPIC_DEFAULT_*_MODEL env
+# vars — those override the built-in and require manual bumping.
 #
 # Prerequisites:
 #   - nodejs + npm installed (handled by min.sh) — only for full setup
@@ -27,11 +27,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${KEY_FILE:-$HOME/vault/claude_key.txt}"
 CLAUDE_CONFIG="$HOME/.claude.json"
 CLAUDE_TEMPLATE="$HOME/.claude.json.template"
-
-# Latest model IDs — update these when new model generations ship.
-LATEST_OPUS="Claude-Opus-4.8"
-LATEST_SONNET="Claude-Sonnet-4.6"
-LATEST_HAIKU="Claude-Haiku-4.5"
 
 install_claude_cli() {
     # Always install to ~/.local to avoid /usr/local being overridden
@@ -78,16 +73,6 @@ patch_claude_config() {
     if [ ! -f "$CLAUDE_CONFIG" ] || [ "$CLAUDE_TEMPLATE" -nt "$CLAUDE_CONFIG" ]; then
         cp "$CLAUDE_TEMPLATE" "$CLAUDE_CONFIG"
         echo "✓ Copied $CLAUDE_TEMPLATE → $CLAUDE_CONFIG"
-    fi
-
-    # Substitute model placeholders (idempotent — no-op if already replaced)
-    if grep -q "__LATEST_" "$CLAUDE_CONFIG"; then
-        sed -i \
-            -e "s/__LATEST_OPUS__/${LATEST_OPUS}/g" \
-            -e "s/__LATEST_SONNET__/${LATEST_SONNET}/g" \
-            -e "s/__LATEST_HAIKU__/${LATEST_HAIKU}/g" \
-            "$CLAUDE_CONFIG"
-        echo "✓ Model versions set: opus=$LATEST_OPUS sonnet=$LATEST_SONNET haiku=$LATEST_HAIKU"
     fi
 
     # Substitute subscription key
