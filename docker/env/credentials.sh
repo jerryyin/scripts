@@ -30,11 +30,12 @@ set -e
 
 # Credential paths relative to home directory.
 #
-# NOT listed here (intentionally):
-#   - .config/gh          — managed by gh.sh from ~/vault/gh_token.txt
-#   - .claude.json        — managed by claude.sh from ~/vault/claude_key.txt
-#                           (and stowed-with-placeholder by rc_files)
-# The vault is the source of truth for those secrets, so we don't want
+# This list is for runtime-authenticated SECRETS that the vault cannot track
+# (OAuth / login tokens that are refreshed in-session). Non-secret config does
+# NOT belong here — it is owned by rc_files (stow) so it stays portable and
+# reviewable in version control.
+#
+# The vault is the source of truth for the secrets above, so we don't want
 # credentials.sh to overwrite them with stale host-side copies.
 CREDENTIAL_PATHS=(
     ".gist"                      # gist-paste token
@@ -42,7 +43,6 @@ CREDENTIAL_PATHS=(
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
     ".npmrc"                     # NPM registry auth
-    ".claude/settings.json"      # Claude Code per-user settings (non-secret)
     ".codex"                     # OpenAI Codex CLI state (OAuth tokens, auto-refreshed;
                                  # config.toml is patched afterward by codex.sh)
 )
