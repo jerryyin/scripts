@@ -11,6 +11,15 @@ ItraceViz: <https://github.com/AMD-Triton/ItraceViz>, cloned at `/root/ItraceViz
 > Status: **pipeline proven end-to-end on a tiny shape.** The real ticket shape
 > (decode M=128, N×K=7168×2048, 256/8) has not been traced yet — see
 > [Open items](#open-items).
+>
+> **Update — AM r6.06 fixes the gluon TDM abort.** On
+> `rocdtif-7.13-am+ffmlite-mi400-r6.06` the gluon a8w4 GEMM1 TDM path
+> (`tensor_load_to_lds` / `async_gather`) that aborted on r4.05 (Gotcha-equivalent
+> Hiccup 5 in the decode chronicle) now runs with **zero `tcp.cpp:4894` aborts**,
+> traced for the prefill config `--M 1024 --shape 1024 2880 --experts 8 4`
+> (block_m=128). Full write-up incl. fresh-container env setup (triton fork pin
+> `5583cf28b`, aiter pin `5c058d5c`, and the ROCm-version-must-match-the-AM-package
+> rule) in [`MOE_PREFILL_ITRACE_R606_CHRONICLE.md`](MOE_PREFILL_ITRACE_R606_CHRONICLE.md).
 
 ---
 
