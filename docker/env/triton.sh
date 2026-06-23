@@ -10,7 +10,10 @@ set -x
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f -y -qq kitware-archive-keyring
-sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build clangd clang lld
+# m4: macro processor used by the AM simulator to preprocess model.conf. Without
+# it, AM fails preprocessing fatally but its SystemC threads never tear down, so
+# the hang masquerades as a futex/GIL deadlock. See triton/moe/AM_ITRACE_NOTES.md.
+sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build clangd clang lld m4
 
 python -m pip config set global.break-system-packages true
 

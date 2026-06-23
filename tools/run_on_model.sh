@@ -78,6 +78,11 @@ if [[ -z "$BACKEND" ]]; then
     fi
 fi
 
+# The vendor env scripts (am_env.sh / ffmlite_env.sh) append to $LD_PRELOAD by
+# reading it. Under `set -u` that aborts ("LD_PRELOAD: unbound variable") if the
+# caller never exported it. Define it (empty) here so callers don't have to.
+export LD_PRELOAD="${LD_PRELOAD:-}"
+
 case "$BACKEND" in
     am)
         if [[ ! -f "$PKG_DIR/am_env.sh" ]]; then
