@@ -18,7 +18,8 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Shared lib_moe_ffm.py lives in the parent dir (../) after the folder reorg.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Phase -> batch size. With the default shape (dim1=256, dim2=512, 32/4 experts)
 # routing yields block_m=16 for batch 64 and block_m=128 for batch 2048.

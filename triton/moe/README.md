@@ -1,123 +1,133 @@
-# aiter MoE GEMM kernels under FFM (gfx1250)
+# aiter MoE a8w4 / a4w4 GEMM on gfx1250 — simulator tooling
 
-Verify the aiter Mixture-of-Experts GEMM kernels behind
-`bench_moe_gemm_a4w4.py` / `bench_moe_gemm_a8w4.py` run **correctly** under FFM,
-for every (kernel, backend, phase) combination — without the proton profiling
-layer the bench scripts use (which does not work under FFM).
+Tooling for the aiter Mixture-of-Experts GEMM kernels (ticket
+AMD-Triton/triton-mi450#56) on gfx1250, run under the **FFM** and **AM**
+simulators. Two distinct jobs, two folders, plus shared code at the top level:
 
-## TL;DR results
+```
+moe/
+├── README.md                 # this file (overview)
+├── lib_moe_ffm.py            # SHARED lib: input build, scale swizzle, quant,
+│                             #   dequant torch reference, comparison
+├── am_probe.py               # SHARED diagnostic: AM capability ladder
+│                             #   (cuda -> triton -> gate GEMM -> routing -> GEMM1)
+│
+├── ffm_verification/         # JOB 1: correctness of the kernels under FFM
+│   ├── run_moe_gemm_ffm.py   #   verify one (kernel, backend, phase) cell vs torch ref
+│   └── check_proton_ffm.py   #   probe: does triton's proton profiler run here? (no)
+│
+└── am_itrace/                # JOB 2: instruction trace (itrace) of GEMM1 under AM
+    ├── precompute_routing.py #   CPU routing + fabricated mxfp4 weights -> .pt payload
+    ├── itrace_gemm1_pre.py   #   AM: single GEMM1 launch from the .pt -> .mon trace
+    ├── analyze_itrace.py     #   .mon -> per-WGP instruction-mix breakdown
+    ├── run_decode_itrace.sh  #   end-to-end, idempotent orchestration of the above
+    ├── AM_ITRACE_NOTES.md    #   generic AM-itrace procedure + every gotcha & fix
+    └── MOE_DECODE_ITRACE_CHRONICLE.md  # decode run log: every hiccup, edit, result
+```
 
-All cells **PASS** under FFM on gfx1250 (full 2-layer forward vs a dequantized
-torch reference, default shape `dim1=256 dim2=512`, `32/4` experts):
-
-| kernel | backend | decode (block_m=16) | prefill (block_m=128) |
-|--------|---------|---------------------|-----------------------|
-| a4w4   | triton (only path) | PASS cos≈1.0000 | PASS cos≈0.99998 |
-| a8w4   | gluon (default)    | PASS cos≈0.99996 | PASS cos≈0.99993 |
-| a8w4   | triton (forced)    | PASS cos≈0.99996 | PASS cos≈0.99993 |
-
-Key facts:
-- **a4w4** is pure Triton already (no gluon path) — it works out of the box.
-- **a8w4** dispatches to **gluon** by default on gfx1250. Forcing **triton**
-  works too and produces output **byte-identical to gluon** (rel_err 0), *provided
-  the scales are swizzled with the CDNA4 layout* (see below).
-- The bench wrappers themselves do **not** run under FFM because of proton; drive
-  the kernels directly (this is what the scripts here do).
-
-## Files (orthogonal; shared logic lives in the lib)
-
-| file | purpose |
-|------|---------|
-| `lib_moe_ffm.py` | Shared helpers: input build, scale swizzle, dequantized torch reference, comparison. Single source of truth — no duplication. |
-| `run_moe_gemm_ffm.py` | Matrix driver: verify one (kernel, backend, phase) cell vs the reference. Non-zero exit on FAIL (CI-usable). |
-| `check_proton_ffm.py` | Orthogonal probe: does Triton's `proton` profiler (rocprofiler-sdk) work here? Exit 0 = yes, 1 = no (FFM). |
-
-## Setup
+## Common setup
 
 ```bash
-pip install psutil                      # required to import aiter
-export AITER_HOME=/root/aiter           # only if aiter is not at /root/aiter
+pip install psutil                 # required to import aiter
+export AITER_HOME=/root/aiter       # only if aiter is not at /root/aiter
 ```
 
-The scripts read `AITER_HOME` (default `/root/aiter`) and add it to `sys.path`
-(aiter is not pip-installed). Run them from **anywhere except** the triton source
-tree `/root/triton` (running there breaks `import triton.profiler`).
+- Scripts read `AITER_HOME` (default `/root/aiter`) and add it to `sys.path`
+  (aiter is not pip-installed).
+- **Run from anywhere except the triton source tree `/root/triton`** (running
+  there breaks `import triton.profiler` / `triton.language`).
+- Simulator runs go through the canonical wrapper `~/scripts/tools/run_on_model.sh`
+  (`--backend ffm` or `--backend am`). For AM, prefix `LD_PRELOAD= GPU_ARCHS=gfx1250`
+  (am_env.sh reads `$LD_PRELOAD` under `set -u`; AM has no working `rocminfo`).
 
-## The aiter change (one line, on a branch)
+The kernels themselves: **a4w4** is pure Triton; **a8w4** dispatches to **gluon**
+by default on gfx1250 and to the **triton** kernel when `AITER_FORCE_TRITON=1`
+(which needs the CDNA4 scale swizzle, not the GFX1250 one). The drivers handle
+this; see `lib_moe_ffm._swizzle`.
 
-Forcing triton for a8w4 needs a switch in aiter. It lives on branch
-`users/jerryyin/moe-a8w4-force-triton-env` (commit in `/root/aiter`), which adds
-an env gate to the existing dispatch in `moe_op_gemm_a8w4.py`:
+---
 
-```python
-use_gluon = get_arch() == "gfx1250" and os.environ.get("AITER_FORCE_TRITON", "0") != "1"
-```
+## Job 1 — FFM correctness verification (`ffm_verification/`)
 
-Default behaviour is unchanged. `run_moe_gemm_ffm.py --backend triton` sets
-`AITER_FORCE_TRITON=1` and also swizzles scales with the CDNA4 layout that the
-triton kernel requires (the gluon kernel uses the GFX1250 layout; feeding that to
-the triton kernel yields NaN).
-
-## Reproduction matrix — one command per cell
-
-Decode uses batch 64 (→ block_m 16); prefill uses batch 2048 (→ block_m 128).
+Confirms each a4w4 / a8w4 kernel runs **correctly** under FFM against a
+dequantized torch reference — without the proton layer the aiter bench scripts
+use (proton doesn't work under FFM). Verifies the **full two-GEMM forward** (the
+final scattered batch rows), not isolated GEMMs.
 
 ```bash
 cd /root/scripts/triton/moe
 
 # a4w4 (pure Triton)
-python3 run_moe_gemm_ffm.py --kernel a4w4 --phase decode
-python3 run_moe_gemm_ffm.py --kernel a4w4 --phase prefill
+run_on_model.sh --backend ffm -- python3 ffm_verification/run_moe_gemm_ffm.py --kernel a4w4 --phase decode
+run_on_model.sh --backend ffm -- python3 ffm_verification/run_moe_gemm_ffm.py --kernel a4w4 --phase prefill
 
-# a8w4 — gluon (the default path on gfx1250)
-python3 run_moe_gemm_ffm.py --kernel a8w4 --backend gluon --phase decode
-python3 run_moe_gemm_ffm.py --kernel a8w4 --backend gluon --phase prefill
-
+# a8w4 — gluon (default on gfx1250)
+run_on_model.sh --backend ffm -- python3 ffm_verification/run_moe_gemm_ffm.py --kernel a8w4 --backend gluon  --phase decode
 # a8w4 — triton (forced via AITER_FORCE_TRITON + CDNA4 swizzle)
-python3 run_moe_gemm_ffm.py --kernel a8w4 --backend triton --phase decode
-python3 run_moe_gemm_ffm.py --kernel a8w4 --backend triton --phase prefill
+run_on_model.sh --backend ffm -- python3 ffm_verification/run_moe_gemm_ffm.py --kernel a8w4 --backend triton --phase decode
 ```
 
-Each prints a line like:
+Each prints e.g. `forward: PASS  ... cosine=0.999955` and `RESULT: PASS`
+(non-zero exit on FAIL → CI-usable). Decode uses batch 64 (→ block_m 16);
+prefill uses batch 2048 (→ block_m 128). Custom shapes via `--shape DIM1 DIM2`
+and `--experts TOT ACT`.
 
-```
-arch=gfx1250 kernel=a8w4 backend=triton phase=prefill batch=2048 experts=32/4 block_m=128
-  forward: PASS  finite_frac=1.000 rel_err=0.01006 cosine=0.999926
-RESULT: PASS
-```
+**Result (all PASS):** a4w4 works out of the box; a8w4 gluon and a8w4 triton both
+pass and agree (triton byte-identical to gluon given the CDNA4 swizzle).
 
-Custom shapes / expert counts (e.g. closer to gpt-oss):
+Forcing triton for a8w4 needs the one-line env gate in aiter (branch
+`users/jerryyin/moe-a8w4-force-triton-env`):
+`use_gluon = get_arch()=="gfx1250" and os.environ.get("AITER_FORCE_TRITON","0")!="1"`.
+
+`check_proton_ffm.py` is an orthogonal probe — exit 1 under FFM because
+rocprofiler-sdk can't enumerate the simulated agents (why the bench scripts
+can't run here).
+
+### Caveats
+- **Verify the full forward**, not isolated GEMMs (gather padding differs; only
+  the final batch output lines up). `lib_moe_ffm.run_forward` does this.
+- **Degenerate routing**: too few experts for the token count makes aiter's
+  histogram not sum to `batch*n_expts_act`; the driver warns. Default 32/4 is
+  well-formed.
+- **FFM teardown**: FFM hangs on normal interpreter exit → the drivers call
+  `os._exit()`. Do the same in any custom driver.
+- The torch reference matmuls run on **CPU** on purpose (FFM simulates every GPU
+  matmul instruction-by-instruction).
+
+---
+
+## Job 2 — AM instruction trace of GEMM1 (`am_itrace/`)
+
+Captures an instruction trace (itrace) of the a8w4 **layer-1 GEMM** under AM and
+compares gluon vs triton per-WGP. itrace is AM-only; the aiter routing kernel
+aborts AM, so routing + weights are precomputed off-model and only **GEMM1** runs
+under AM.
 
 ```bash
-python3 run_moe_gemm_ffm.py --kernel a8w4 --backend triton --phase prefill \
-    --shape 256 512 --experts 128 4
+# one command does everything (idempotent: reuses any existing .pt / .mon / .html):
+bash am_itrace/run_decode_itrace.sh
+# defaults to a tractable decode shape (32 experts, block_m=16, K=2048, N=7168).
+# For ticket-exact (very large, slow; gluon will FATAL — see below):
+EXPERTS_TOT=256 EXPERTS_ACT=8 BATCH=128 bash am_itrace/run_decode_itrace.sh
 ```
 
-## Check the proton profiler (why the bench scripts don't run here)
+Artifacts land in `/root/itrace_runs/decode_<backend>/` (per-WGP HTML timeline via
+ItraceViz + `run.log`). `analyze_itrace.py <mon> <wgp>` prints the instruction-mix
+breakdown.
 
-```bash
-python3 check_proton_ffm.py    # under FFM: prints the rocprofiler-sdk failure, exit 1
-```
+**Key results (decode):** decode GEMM1 is **memory/addressing-bound**, not
+compute-bound (wmma ≈ 2%); time goes to weight movement (`ds_load` /
+`global_load_async_to_lds` / `s_wait_dscnt`) and ragged gather/scatter index
+math. **Triton traces cleanly; gluon aborts AM** on its TDM `tensor_load_to_lds`
+path (async-copy tracker overflow, not raisable enough) — so a steady-state gluon
+trace needs B0 hardware or a deeper-tracker AM build.
 
-Under FFM rocprofiler-sdk cannot enumerate the simulated agents, so
-`proton.start(hook="triton")` aborts. The bench scripts depend on it for timing;
-on FFM you can only do the functional verification above (FFM perf is meaningless
-anyway).
+See **`am_itrace/AM_ITRACE_NOTES.md`** (generic procedure + every gotcha: missing
+`m4`, `LD_PRELOAD`, `GPU_ARCHS`, the routing abort, itrace env flags) and
+**`am_itrace/MOE_DECODE_ITRACE_CHRONICLE.md`** (the full decode run log: every
+hiccup, what was edited where and why — incl. `tcp_async_copy_depth` — and the
+results).
 
-## Notes / caveats
-
-- **Verify the full forward, not isolated GEMMs.** The kernel pads the gather to
-  `block_m`; `moe_gemm_torch` packs raw expert ranges. Intermediate row layouts
-  differ, so per-GEMM tensors do not line up — only the final batch output is
-  comparable. `lib_moe_ffm.run_forward` does this.
-- **Degenerate routing.** Too few experts for the token count (e.g. `--experts 8 2`
-  at batch 2048) makes aiter routing return a histogram that does not sum to
-  `batch*n_expts_act`; the torch reference then desyncs and the driver prints a
-  `WARNING` (the verdict is unreliable, not a kernel bug — the kernels still agree
-  with each other). The default `32/4` is well-formed.
-- **FFM teardown.** FFM hangs on normal interpreter exit, so the scripts call
-  `os._exit()`. If you write your own driver, do the same or processes will zombie
-  and contend for the single simulated device (causing apparent multi-minute hangs).
-- The reference matmuls run on **CPU** on purpose: under FFM every GPU matmul is
-  simulated instruction-by-instruction, so a GPU reference would dominate runtime.
-```
+`am_probe.py` (shared, top level) is the diagnostic that localized the routing
+abort: an AM capability ladder (cuda → triton vadd → gate GEMM → routing →
+GEMM1). Reusable when a new kernel/model breaks under AM.
