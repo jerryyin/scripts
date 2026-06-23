@@ -69,8 +69,9 @@ patch_claude_config() {
         return 0
     fi
 
-    # Copy template if config doesn't exist or template is newer
-    if [ ! -f "$CLAUDE_CONFIG" ] || [ "$CLAUDE_TEMPLATE" -nt "$CLAUDE_CONFIG" ]; then
+    # Copy template if the config is missing or still unpatched. An mtime
+    # guard is unreliable since Claude Code rewrites ~/.claude.json on every run.
+    if [ ! -f "$CLAUDE_CONFIG" ] || grep -q "__CLAUDE_SUB_KEY__" "$CLAUDE_CONFIG"; then
         cp "$CLAUDE_TEMPLATE" "$CLAUDE_CONFIG"
         echo "✓ Copied $CLAUDE_TEMPLATE → $CLAUDE_CONFIG"
     fi
