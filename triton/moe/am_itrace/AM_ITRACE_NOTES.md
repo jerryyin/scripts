@@ -118,6 +118,17 @@ a8w4 GEMM1 itself do **not** abort — only routing does (capability ladder belo
 
 **Fix:** never run routing under AM; precompute it (Gotcha-4 → the whole pipeline).
 
+**Reproduce the abort** with `itrace_gemm1_pre.py --build`, which constructs the
+inputs inline on-device (gate GEMM + routing + weight quant via `lib_moe_ffm`)
+instead of loading a precomputed payload, so the `routing()` dispatch runs under
+AM and aborts:
+```bash
+LD_PRELOAD= GPU_ARCHS=gfx1250 run_on_model.sh --backend am -- \
+    python3 itrace_gemm1_pre.py --backend gluon --build \
+        --shape 2048 7168 --experts 256 8 --batch 128
+```
+(The default `--data <payload>.pt` mode runs GEMM1 only and does **not** abort.)
+
 ### 5. Enabling itrace in `am_env.sh`
 Set `DtifExtraTestArgs=""` (drop `-no_itrace`, line ~79) and uncomment
 `"test.enable_itrace=true"` / `"test.itrace_perf_detail=true"` (lines ~126–127).

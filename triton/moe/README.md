@@ -115,6 +115,10 @@ Artifacts land in `/root/itrace_runs/decode_<backend>/` (per-WGP HTML timeline v
 ItraceViz + `run.log`). `analyze_itrace.py <mon> <wgp>` prints the instruction-mix
 breakdown.
 
+To **reproduce the routing-kernel AM crash** (instead of avoiding it), run
+`itrace_gemm1_pre.py --build`, which builds inputs inline on-device so `routing()`
+dispatches under AM and aborts — see `am_itrace/AM_ITRACE_NOTES.md` §4.
+
 **Key results (decode):** decode GEMM1 is **memory/addressing-bound**, not
 compute-bound (wmma ≈ 2%); time goes to weight movement (`ds_load` /
 `global_load_async_to_lds` / `s_wait_dscnt`) and ragged gather/scatter index
