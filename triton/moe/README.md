@@ -122,9 +122,11 @@ dispatches under AM and aborts — see `am_itrace/AM_ITRACE_NOTES.md` §4.
 **Key results (decode):** decode GEMM1 is **memory/addressing-bound**, not
 compute-bound (wmma ≈ 2%); time goes to weight movement (`ds_load` /
 `global_load_async_to_lds` / `s_wait_dscnt`) and ragged gather/scatter index
-math. **Triton traces cleanly; gluon aborts AM** on its TDM `tensor_load_to_lds`
-path (async-copy tracker overflow, not raisable enough) — so a steady-state gluon
-trace needs B0 hardware or a deeper-tracker AM build.
+math. **Triton traces cleanly; gluon aborts AM** on its TDM activation gather
+(`gl.amd.gfx1250.tdm.async_gather`, the `x` load — pinned to the crashing
+instruction in the trace), which AM services as per-row direct copies and
+overflows the async-copy tracker (depth not raisable enough) — so a steady-state
+gluon trace needs B0 hardware or a deeper-tracker AM build.
 
 See **`am_itrace/AM_ITRACE_NOTES.md`** (generic procedure + every gotcha: missing
 `m4`, `LD_PRELOAD`, `GPU_ARCHS`, the routing abort, itrace env flags) and

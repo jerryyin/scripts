@@ -113,12 +113,30 @@ to `comm==python3` to avoid false "still alive".
    with addr 500e20000 ...)
 ```
 The `.mon` stops growing and the process hangs (FATAL doesn't tear down cleanly).
-**Root cause:** the **gluon** kernel loads weights via the **TDM path** —
-`tensor_load_to_lds` (gfx1250 hardware async *direct* copy to LDS). At
-`block_m=16` it has many async direct copies in flight; AM's per-pipe async-copy
-**tracker table** can't find/track an entry → fatal assertion. The **triton**
-kernel does **not** use TDM (it uses `global_load_async_to_lds` + `ds_load`), so
-it never hits this.
+**Root cause (pinned to the exact instruction from the trace):** the gluon decode
+kernel issues two kinds of TDM (gfx1250 hardware async copy to LDS) load, both
+disassembling to `tensor_load_to_lds`:
+- **`gl.amd.gfx1250.tdm.async_load`** (direct copy) → ISA form
+  `tensor_load_to_lds s[..], s[..], null, null` — used for **`w` and `w_scales`**.
+- **`gl.amd.gfx1250.tdm.async_gather`** (gather) → ISA form
+  `tensor_load_to_lds s[..], s[..], s[..], s[..]` (extra regs = per-row offsets) —
+  used for **`x`** (activations), because GEMM1 gathers token rows via `gather_indx`.
+
+The abort is the **`async_gather`** (activation gather), **not** the weight
+`async_load`. Proof: the FATAL's `inst_id 0x207` is a *static PC* (the trace's
+col-2; the set of TDM PCs recurs each loop iteration), and on the actual crashing
+wave (`dbg_id 50b00031`, in `xcc0se1sa0` ⇒ SE1/`pipe_id 1`) PC `0x207` is
+`tensor_load_to_lds s[76:79], s[44:51], s[80:83], s[4:7]` — the **gather** form.
+The direct `async_load`s (PCs `0x19e/0x20f/0x212/0x214/0x261/0x2a2`) had already
+issued fine in the same prologue. The message says "async **direct** copy" because
+AM (which has separate `cu_cache_async_direct_copy_*` vs `…_indirect_copy_*`
+subsystems) services the gather as a set of per-row **direct** copies; the failing
+request still carries the gather's `inst_id`. That also explains why bumping
+`tcp_async_copy_depth` to 256 didn't help: one `block_m=16` gather spawns ~16
+in-flight direct copies, ×`NUM_BUFFERS` prefetch ⇒ over the tracker depth.
+
+The **triton** kernel does **not** use TDM at all (it uses
+`global_load_async_to_lds` + `ds_load`), so it never hits this.
 
 **The knob I tried — `tcp_async_copy_depth`:**
 - **Where:** `/am-ffm/package/etc/am/conf/model.conf`, two occurrences:
