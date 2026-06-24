@@ -16,16 +16,18 @@ export GPU_ARCHS="${GPU_ARCHS:-gfx1250}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${OUT:-/zyin}"
-PROF="${PROF:-$HOME/scripts/tools/prof.sh}"          # generic ATT wrapper
+# Derive prof.sh from THIS script's location (b0_bringup -> moe -> triton -> scripts ->
+# tools), not $HOME -- in the container $HOME=/root has a stale scripts clone.
+PROF="${PROF:-$(cd "$HERE/../../../tools" && pwd)/prof.sh}"
 A8W4="$HERE/../run_a8w4_gemm1.py"         # shared a8w4 GEMM1 launcher
 MOE="${MOE:-/root/triton/third_party/amd/python/examples/gluon/moe_gfx1250.py}"
 ITERS="${ITERS:-50}"
 cd /tmp
 
-run() {  # $1=name  $2..=command
-  local name="$1"; shift
-  echo "######## ATT: $name ########  $(date)"
-  timeout 1500 bash "$PROF" att "$@"
+run() {  # $1=name  $2=kernel-regex  $3..=command
+  local name="$1" kregex="$2"; shift 2
+  echo "######## ATT: $name (kernel=$kregex) ########  $(date)"
+  ATT_KERNEL_REGEX="$kregex" timeout 1500 bash "$PROF" att "$@"
   echo "PROF_RC=$? ($name)"
   rm -rf "$OUT/att_$name"
   mv /zyin/rocprof_att "$OUT/att_$name" 2>/dev/null
@@ -33,10 +35,11 @@ run() {  # $1=name  $2..=command
   echo "== $name -> $(du -sh "$OUT/att_$name" 2>/dev/null | cut -f1)  ui_output=$ui"
 }
 
-run a8w4_gluon_decode   python "$A8W4" --backend gluon --data "$OUT/moe_decode.pt"  --iters "$ITERS"
-run a8w4_gluon_prefill  python "$A8W4" --backend gluon --data "$OUT/moe_prefill.pt" --iters "$ITERS"
-run moe_gfx1250_decode  python "$MOE" --action dispatch --x_dtype fp8 --w_dtype mx4 --dim1 2048 --dim2 7168 -et 256 -ea 8 -b 4
-run moe_gfx1250_prefill python "$MOE" --action dispatch --x_dtype fp8 --w_dtype mx4 --dim1 2048 --dim2 7168 -et 256 -ea 8 -b 512
+# Capture ONLY the GEMM kernel of each side (drops surrounding pytorch/helper kernels)
+run a8w4_gluon_decode   "_moe_gemm_a8w4.*"  python "$A8W4" --backend gluon --data "$OUT/moe_decode.pt"  --iters "$ITERS"
+run a8w4_gluon_prefill  "_moe_gemm_a8w4.*"  python "$A8W4" --backend gluon --data "$OUT/moe_prefill.pt" --iters "$ITERS"
+run moe_gfx1250_decode  "_matmul_swiglu_fn" python "$MOE" --action dispatch --x_dtype fp8 --w_dtype mx4 --dim1 2048 --dim2 7168 -et 256 -ea 8 -b 4
+run moe_gfx1250_prefill "_matmul_swiglu_fn" python "$MOE" --action dispatch --x_dtype fp8 --w_dtype mx4 --dim1 2048 --dim2 7168 -et 256 -ea 8 -b 512
 
 echo "######## ALL DONE $(date) ########"
 ls -d "$OUT"/att_a8w4_gluon_* "$OUT"/att_moe_gfx1250_decode "$OUT"/att_moe_gfx1250_prefill 2>/dev/null

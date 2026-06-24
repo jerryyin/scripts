@@ -62,14 +62,21 @@ python ~/scripts/triton/moe/precompute_routing.py --out moe_prefill.pt --shape 2
 # 2. collect all four ATT traces (decoded ui_output + stats CSV) under $OUT
 OUT=/zyin bash ~/scripts/triton/moe/b0_bringup/att_collect.sh
 
-# 3. analyze a decoded GEMM dispatch
-python ~/scripts/tools/att_analyze.py <out>/att_a8w4_gluon_decode/stats_ui_output_*_dispatch_8.csv
+# 3. analyze a decoded GEMM dispatch (each trace now has exactly ONE dispatch)
+python ~/scripts/tools/att_analyze.py <out>/att_a8w4_gluon_decode/stats_ui_output_*.csv
 ```
 
 `prof.sh att` writes raw `.att` + decoded `ui_output/` + `stats_ui_output_*.csv`.
 `run_a8w4_gemm1.py --iters 50` loops the GEMM so the single-CU ATT target reliably
 captures it (a single launch often misses CU0). The moe gemm = `moe_gfx1250.py
 --action dispatch` (the `_matmul_swiglu_fn` dispatch is the GEMM).
+
+**Kernel filtering (clean single-kernel traces).** `prof.sh att` honors
+`ATT_KERNEL_REGEX` (substituted into att.json's `kernel_include_regex`) so ATT captures
+ONLY matching kernels and drops the surrounding pytorch/helper dispatches.
+`att_collect.sh` sets it per side: `_moe_gemm_a8w4.*` for gluon, `_matmul_swiglu_fn`
+for moe_gfx1250. Result: each trace is one dispatch (moe shrank from ~17 dispatches /
+225 MB to 1 / ~40 MB), so inspection is trivial.
 
 ## Environment notes (therock image: no /opt/rocm)
 The therock-npi image has ROCm in the venv (`_rocm_sdk_devel`), not `/opt/rocm`. **No

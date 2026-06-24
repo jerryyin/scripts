@@ -98,6 +98,16 @@ att() {
     echo "[HINT] normal ROCm images: run ~/scripts/docker/env/att.sh to install it"
   fi
 
+  # Optional kernel filter: set ATT_KERNEL_REGEX to capture only matching kernels
+  # (e.g. "_matmul_swiglu_fn") instead of every dispatch -- keeps the trace to the
+  # kernel of interest and drops surrounding pytorch/helper kernels. Default: all.
+  local ATT_CFG="$SCRIPT_DIR/att.json"
+  if [[ -n "${ATT_KERNEL_REGEX:-}" ]]; then
+    ATT_CFG="$(mktemp --suffix=.att.json)"
+    python3 -c "import json,os; d=json.load(open('$SCRIPT_DIR/att.json')); [j.update(kernel_include_regex=os.environ['ATT_KERNEL_REGEX']) for j in d['jobs']]; json.dump(d, open('$ATT_CFG','w'))"
+    echo "[ATT] kernel filter: $ATT_KERNEL_REGEX"
+  fi
+
   echo "[ATT] Profiling: $*"
   echo "[ATT] Output directory: $OUTBASE"
   echo "[ATT] ROCm: $ROCM_DIR"
@@ -105,8 +115,10 @@ att() {
   rocprofv3 \
     --att-library-path "$ROCM_DIR/lib" \
     --preload "$ROCM_DIR/lib/libamdhip64.so" \
-    -i "$SCRIPT_DIR/att.json" \
+    -i "$ATT_CFG" \
     -d "$OUTBASE" -- "$@"
+
+  [[ "$ATT_CFG" != "$SCRIPT_DIR/att.json" ]] && rm -f "$ATT_CFG"
 
   # Check if output was generated
   if [[ -d "$OUTBASE" ]]; then
