@@ -5,6 +5,22 @@ set -euo pipefail
 # dpkg -i /zyin/hsa-amd-aqlprofile_1.0.0-local_amd64_rocm6.3.deb
 pip install websockets matplotlib
 
+# therock images ship ROCm in the venv (_rocm_sdk_devel) WITH the trace decoder
+# and aqlprofile already bundled, and have no /opt/rocm. ATT works there out of the
+# box: tools/prof.sh resolves the venv ROCm and points rocprofv3 at it
+# (--att-library-path/--preload), so nothing below needs to run. This block makes
+# att.sh a documented no-op on therock instead of failing on the missing /opt/rocm-*.
+if [[ ! -e /opt/rocm ]]; then
+  VENV_ROCM=$(ls -d /opt/venv/lib/python*/site-packages/_rocm_sdk_devel 2>/dev/null | head -1)
+  if [[ -n "$VENV_ROCM" && -f "$VENV_ROCM/lib/librocprof-trace-decoder.so" ]]; then
+    echo "therock layout: trace decoder + aqlprofile bundled in $VENV_ROCM/lib"
+    echo "ATT works via tools/prof.sh (no /opt/rocm, no decoder install needed). Done."
+    exit 0
+  fi
+fi
+
+# --- Below: normal ROCm images only (versioned /opt/rocm-*, decoder installed to it) ---
+
 # Download therock and find ~/install/bin/roprofv3 for latest rocprof
 # This can be dropped after att support becomes default
 #wget https://github.com/ROCm/TheRock/releases/download/nightly-tarball/therock-dist-linux-gfx94X-dcgpu-7.0.0rc20250701.tar.gz

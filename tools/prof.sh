@@ -10,55 +10,43 @@ show_usage() {
   exit 1
 }
 
-# Ensure /opt/rocm symlink points to the versioned ROCm directory.
-# The ATT decoder installer can overwrite this symlink, breaking things.
-ensure_rocm_symlink() {
-  # Find the versioned ROCm directory
-  local ROCM_VERSIONED
-  ROCM_VERSIONED=$(ls -d /opt/rocm-* 2>/dev/null | head -1)
-  
-  if [[ -z "$ROCM_VERSIONED" ]]; then
-    echo "Error: No versioned ROCm directory found in /opt/"
-    return 1
-  fi
-
-  # Check if /opt/rocm is a valid symlink to the versioned directory
-  if [[ -L /opt/rocm ]]; then
-    local CURRENT_TARGET
-    CURRENT_TARGET=$(readlink -f /opt/rocm)
-    if [[ "$CURRENT_TARGET" == "$ROCM_VERSIONED" ]]; then
-      # Symlink is correct
-      return 0
+# Resolve the ROCm root WITHOUT mutating the filesystem, supporting both layouts:
+#   - normal ROCm image:   /opt/rocm  (or a versioned /opt/rocm-*)
+#   - therock image:       ROCm lives in the venv as _rocm_sdk_devel, NO /opt/rocm
+# Sets global ROCM_DIR. rocprofv3 ATT does NOT need /opt/rocm to exist as long as
+# --preload / --att-library-path / LD_LIBRARY_PATH point at the right lib dir, so we
+# never create a symlink here (forcing /opt/rocm in base setup is too invasive).
+resolve_rocm_dir() {
+  if [[ -e /opt/rocm ]]; then
+    ROCM_DIR=$(readlink -f /opt/rocm)
+  else
+    local versioned venv
+    versioned=$(ls -d /opt/rocm-* 2>/dev/null | head -1)
+    venv=$(ls -d /opt/venv/lib/python*/site-packages/_rocm_sdk_devel 2>/dev/null | head -1)
+    if [[ -n "$versioned" ]]; then
+      ROCM_DIR=$(readlink -f "$versioned")
+    elif [[ -n "$venv" ]]; then
+      ROCM_DIR="$venv"   # therock layout
+    else
+      echo "Error: no ROCm found (/opt/rocm, /opt/rocm-*, or venv _rocm_sdk_devel)"
+      return 1
     fi
-    echo "[WARN] /opt/rocm points to $CURRENT_TARGET instead of $ROCM_VERSIONED"
-    echo "[FIX] Correcting symlink..."
-    rm -f /opt/rocm
-  elif [[ -d /opt/rocm ]]; then
-    echo "[WARN] /opt/rocm is a directory, not a symlink"
-    echo "[FIX] Converting to symlink..."
-    # Backup and remove
-    mv /opt/rocm /opt/rocm_backup_$$ 2>/dev/null || rm -rf /opt/rocm
   fi
-
-  # Create the symlink
-  ln -sf "$ROCM_VERSIONED" /opt/rocm
-  echo "[FIX] Created symlink: /opt/rocm -> $ROCM_VERSIONED"
+  echo "[ROCm] using ROCM_DIR=$ROCM_DIR"
 }
 
-# Set up environment for IREE with HIP
+# Set up environment for the profiler / IREE with HIP.
 setup_hip_env() {
   # IREE_HIP_DYLIB_PATH tells IREE where to find libamdhip64.so
-  export IREE_HIP_DYLIB_PATH=/opt/rocm/lib
-  
-  # Also add to LD_LIBRARY_PATH for the profiler
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/opt/rocm/lib"
+  export IREE_HIP_DYLIB_PATH="$ROCM_DIR/lib"
+  # Also add to LD_LIBRARY_PATH for the profiler and the trace decoder
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$ROCM_DIR/lib"
 }
 
 trace() {
   local OUTBASE="rocprof_ktrace"
 
-  # Ensure ROCm symlink is correct
-  ensure_rocm_symlink || exit 1
+  resolve_rocm_dir || exit 1
   setup_hip_env
 
   rocprofv3 --kernel-trace -o "$OUTBASE" --output-format csv -- "$@"
@@ -89,8 +77,7 @@ trace() {
 att() {
   local OUTBASE="/zyin/rocprof_att"
 
-  # Ensure ROCm symlink is correct (ATT installer may have broken it)
-  ensure_rocm_symlink || exit 1
+  resolve_rocm_dir || exit 1
   setup_hip_env
 
   # Ensure output directory's parent exists
@@ -102,20 +89,22 @@ att() {
     mv "$OUTBASE" "${OUTBASE}_bkp"
   fi
 
-  # Check for ATT decoder
-  local ATT_DECODER="/opt/rocm/libexec/rocprofiler-sdk/att/att_decoder.py"
-  if [[ ! -f "$ATT_DECODER" ]]; then
-    echo "[WARN] ATT decoder not found at $ATT_DECODER"
-    echo "[HINT] Run ~/scripts/docker/env/att.sh to install it"
+  # The SQTT trace decoder. On therock it ships in the venv ROCm; on normal images
+  # att.sh installs it under /opt/rocm/lib. Pass its dir explicitly via
+  # --att-library-path so it is found regardless of whether /opt/rocm exists.
+  local DECODER="$ROCM_DIR/lib/librocprof-trace-decoder.so"
+  if [[ ! -f "$DECODER" ]]; then
+    echo "[WARN] trace decoder not found at $DECODER"
+    echo "[HINT] normal ROCm images: run ~/scripts/docker/env/att.sh to install it"
   fi
 
-  # att.json is in the same directory as this script (tools/)
   echo "[ATT] Profiling: $*"
   echo "[ATT] Output directory: $OUTBASE"
-  echo "[ATT] Using HIP library: $IREE_HIP_DYLIB_PATH"
-  
+  echo "[ATT] ROCm: $ROCM_DIR"
+
   rocprofv3 \
-    --preload /opt/rocm/lib/libamdhip64.so \
+    --att-library-path "$ROCM_DIR/lib" \
+    --preload "$ROCM_DIR/lib/libamdhip64.so" \
     -i "$SCRIPT_DIR/att.json" \
     -d "$OUTBASE" -- "$@"
 
