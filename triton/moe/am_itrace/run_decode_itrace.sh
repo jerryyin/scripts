@@ -103,7 +103,7 @@ free_device() {
   local p tries=0
   while :; do
     local found=0
-    for p in $(pgrep -f "itrace_gemm1_pre.py" 2>/dev/null); do
+    for p in $(pgrep -f "run_a8w4_gemm1.py" 2>/dev/null); do
       [[ "$(cat /proc/$p/comm 2>/dev/null)" == "python3" ]] && { kill -9 "$p" 2>/dev/null; found=1; }
     done
     [[ "$found" == 0 ]] && { [[ $tries -gt 0 ]] && sleep 3; return 0; }
@@ -117,7 +117,7 @@ precompute() {
   log "step 3: precompute routing(cpu)+weights -> $PAYLOAD"
   if [[ -s "$PAYLOAD" ]]; then info "payload exists ($(du -h "$PAYLOAD" | cut -f1)) -> skip"; return 0; fi
   info "building (CPU only, fabricated mxfp4 weights)..."
-  GPU_ARCHS="$GPU_ARCHS" python3 "$SCRIPT_DIR/precompute_routing.py" \
+  GPU_ARCHS="$GPU_ARCHS" python3 "$SCRIPT_DIR/../precompute_routing.py" \
       --out "$PAYLOAD" --shape "$SHAPE_K" "$SHAPE_N" \
       --experts "$EXPERTS_TOT" "$EXPERTS_ACT" --batch "$BATCH" \
       2>&1 | grep -E "arch=|weights:|saved|WARNING|Error" || true
@@ -145,7 +145,7 @@ run_backend() {
   info "running (cwd=$dir) ..."
   ( cd "$dir" && exec env LD_PRELOAD= GPU_ARCHS="$GPU_ARCHS" \
         "$RUNNER" --backend am -- \
-        python3 "$SCRIPT_DIR/itrace_gemm1_pre.py" --backend "$be" --data "$PAYLOAD" \
+        python3 "$SCRIPT_DIR/../run_a8w4_gemm1.py" --backend "$be" --data "$PAYLOAD" \
   ) >"$logf" 2>&1 &
   local pid=$!
 

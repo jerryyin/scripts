@@ -15,9 +15,7 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-# Shared lib_moe_ffm.py lives in the parent (shared) dir after the folder reorg.
-sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)   # lib_moe_ffm.py is a sibling in moe/
 _AITER_HOME = os.environ.get("AITER_HOME", "/root/aiter")
 if _AITER_HOME not in sys.path:
     sys.path.insert(0, _AITER_HOME)

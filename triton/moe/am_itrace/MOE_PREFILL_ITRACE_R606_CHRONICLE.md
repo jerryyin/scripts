@@ -58,7 +58,7 @@ GPU_ARCHS=gfx1250 AITER_HOME=/root/aiter python3 precompute_routing.py \
 
 # AM itrace, gluon backend
 GPU_ARCHS=gfx1250 AITER_HOME=/root/aiter run_on_model.sh --backend am -- \
-    python3 itrace_gemm1_pre.py --backend gluon --data moe_cfg.pt
+    python3 run_a8w4_gemm1.py --backend gluon --data moe_cfg.pt
 #   -> xcc0se{0,1}sa{0,1}_itrace_emu.mon  (all four SAs ~equal size here)
 
 grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0_gluon.txt

@@ -1,28 +1,34 @@
-# aiter MoE a8w4 / a4w4 GEMM on gfx1250 — simulator tooling
+# aiter MoE a8w4 / a4w4 GEMM on gfx1250 — FFM / AM / B0 tooling
 
 Tooling for the aiter Mixture-of-Experts GEMM kernels (ticket
-AMD-Triton/triton-mi450#56) on gfx1250, run under the **FFM** and **AM**
-simulators. Two distinct jobs, two folders, plus shared code at the top level:
+AMD-Triton/triton-mi450#56) on gfx1250, across the **FFM** and **AM** simulators and
+**B0** physical hardware. Shared code lives at the top level; each environment has its
+own folder:
 
 ```
 moe/
 ├── README.md                 # this file (overview)
 ├── lib_moe_ffm.py            # SHARED lib: input build, scale swizzle, quant,
 │                             #   dequant torch reference, comparison
+├── precompute_routing.py     # SHARED: CPU routing + fabricated mxfp4 weights -> .pt
+│                             #   payload (used by AM itrace AND B0 ATT)
+├── run_a8w4_gemm1.py         # SHARED a8w4 GEMM1 launcher (AM/FFM/B0): --data/--build,
+│                             #   --iters loop; os._exit under sim, normal exit on HW
 ├── am_probe.py               # SHARED diagnostic: AM capability ladder
-│                             #   (cuda -> triton -> gate GEMM -> routing -> GEMM1)
 │
-├── ffm_verification/         # JOB 1: correctness of the kernels under FFM
-│   ├── run_moe_gemm_ffm.py   #   verify one (kernel, backend, phase) cell vs torch ref
-│   └── check_proton_ffm.py   #   probe: does triton's proton profiler run here? (no)
+├── ffm_verification/         # FFM: kernel correctness vs torch ref
+│   ├── run_moe_gemm_ffm.py
+│   └── check_proton_ffm.py
 │
-└── am_itrace/                # JOB 2: instruction trace (itrace) of GEMM1 under AM
-    ├── precompute_routing.py #   CPU routing + fabricated mxfp4 weights -> .pt payload
-    ├── itrace_gemm1_pre.py   #   AM: single GEMM1 launch from the .pt -> .mon trace
-    ├── analyze_itrace.py     #   .mon -> per-WGP instruction-mix breakdown
-    ├── run_decode_itrace.sh  #   end-to-end, idempotent orchestration of the above
-    ├── AM_ITRACE_NOTES.md    #   generic AM-itrace procedure + every gotcha & fix
-    └── MOE_DECODE_ITRACE_CHRONICLE.md  # decode run log: every hiccup, edit, result
+├── am_itrace/                # AM: instruction trace (itrace) of GEMM1
+│   ├── analyze_itrace.py     #   .mon -> per-WGP instruction-mix breakdown
+│   ├── run_decode_itrace.sh  #   end-to-end orchestration (uses ../run_a8w4_gemm1.py)
+│   ├── AM_ITRACE_NOTES.md    #   generic AM-itrace procedure + every gotcha & fix
+│   └── MOE_DECODE_ITRACE_CHRONICLE.md
+│
+└── b0_bringup/               # B0 hardware: rocprofv3 ATT of the GEMM
+    ├── att_collect.sh        #   collect 4 decoded traces (thin wrapper on tools/prof.sh)
+    └── README.md             #   workflow, version pinning, os._exit gotcha, findings
 ```
 
 ## Common setup
@@ -116,7 +122,7 @@ ItraceViz + `run.log`). `analyze_itrace.py <mon> <wgp>` prints the instruction-m
 breakdown.
 
 To **reproduce the routing-kernel AM crash** (instead of avoiding it), run
-`itrace_gemm1_pre.py --build`, which builds inputs inline on-device so `routing()`
+`run_a8w4_gemm1.py --build`, which builds inputs inline on-device so `routing()`
 dispatches under AM and aborts — see `am_itrace/AM_ITRACE_NOTES.md` §4.
 
 **Key results (decode):** decode GEMM1 is **memory/addressing-bound**, not

@@ -8,6 +8,11 @@ under the AM model, and compare them in ItraceViz.
 Methodology per the ticket: **AM (`rocdtif-7.13-am+ffmlite-mi400-r4.05`) + itrace**.
 ItraceViz: <https://github.com/AMD-Triton/ItraceViz>, cloned at `/root/ItraceViz`.
 
+> **Note (script relocation):** `precompute_routing.py` and `run_a8w4_gemm1.py` are now
+> shared and live in the parent `moe/` dir (also used by `b0_bringup`), not here. The
+> orchestrator `run_decode_itrace.sh` already calls them via `../`; if you run the
+> commands below standalone, prefix the script paths with `../` (or run from `moe/`).
+
 > Status: **pipeline proven end-to-end on a tiny shape.** The real ticket shape
 > (decode M=128, N×K=7168×2048, 256/8) has not been traced yet — see
 > [Open items](#open-items).
@@ -38,7 +43,7 @@ apt-get install -y m4
 
 # 3. run GEMM1-ONLY under AM from the payload, per backend -> emits *.mon
 GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
-    python3 itrace_gemm1_pre.py --backend gluon  --data moe.pt     # then --backend triton
+    python3 run_a8w4_gemm1.py --backend gluon  --data moe.pt     # then --backend triton
 
 # 4. extract one WGP and render the timeline HTML
 grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
@@ -127,13 +132,13 @@ a8w4 GEMM1 itself do **not** abort — only routing does (capability ladder belo
 
 **Fix:** never run routing under AM; precompute it (Gotcha-4 → the whole pipeline).
 
-**Reproduce the abort** with `itrace_gemm1_pre.py --build`, which constructs the
+**Reproduce the abort** with `run_a8w4_gemm1.py --build`, which constructs the
 inputs inline on-device (gate GEMM + routing + weight quant via `lib_moe_ffm`)
 instead of loading a precomputed payload, so the `routing()` dispatch runs under
 AM and aborts:
 ```bash
 LD_PRELOAD= GPU_ARCHS=gfx1250 run_on_model.sh --backend am -- \
-    python3 itrace_gemm1_pre.py --backend gluon --build \
+    python3 run_a8w4_gemm1.py --backend gluon --build \
         --shape 2048 7168 --experts 256 8 --batch 128
 ```
 (The default `--data <payload>.pt` mode runs GEMM1 only and does **not** abort.)
@@ -166,9 +171,9 @@ Shape: `dim1(K)=256 dim2(N)=512`, experts `8/8`, batch `64` → `block_m=64`.
 
 # AM GEMM1, per backend (each emits xcc0se{0,1}sa{0,1}_itrace_emu.mon)
 GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
-  python3 itrace_gemm1_pre.py --backend gluon  --data moe_tiny2.pt
+  python3 run_a8w4_gemm1.py --backend gluon  --data moe_tiny2.pt
 GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
-  python3 itrace_gemm1_pre.py --backend triton --data moe_tiny2.pt
+  python3 run_a8w4_gemm1.py --backend triton --data moe_tiny2.pt
 
 # visualize + analyze WGP00
 grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
@@ -210,7 +215,7 @@ In this directory (`am_itrace/`):
 | file | role |
 |------|------|
 | `precompute_routing.py` | CPU routing (`cpu_routing`, mirrors aiter `routing_torch`) + fabricated mxfp4 weights + scale swizzle → `.pt` payload |
-| `itrace_gemm1_pre.py`   | AM: load payload, fire a single a8w4 GEMM1 launch (gluon/triton) → `.mon` |
+| `run_a8w4_gemm1.py`   | AM: load payload, fire a single a8w4 GEMM1 launch (gluon/triton) → `.mon` |
 | `analyze_itrace.py`     | categorize per-WGP instruction mix + TS span from a `.mon` |
 | `run_decode_itrace.sh`  | end-to-end, idempotent orchestration of the whole flow |
 

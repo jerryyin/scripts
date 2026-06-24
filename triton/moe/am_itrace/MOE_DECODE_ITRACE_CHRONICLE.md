@@ -30,8 +30,8 @@ for the routing-abort and m4/LD_PRELOAD/GPU_ARCHS background.
 
 ```
 precompute_routing.py  (CPU only)         -> moe_decode*.pt   (routing + fabricated mxfp4 weights)
-itrace_gemm1_pre.py --backend triton      -> xcc0se0sa0_itrace_emu.mon   (AM)
-itrace_gemm1_pre.py --backend gluon       -> FATAL (see hiccup 5)
+run_a8w4_gemm1.py --backend triton      -> xcc0se0sa0_itrace_emu.mon   (AM)
+run_a8w4_gemm1.py --backend gluon       -> FATAL (see hiccup 5)
 analyze_itrace.py <mon> 0                  -> per-WGP00 instruction-mix table
 gen_timeline.py (ItraceViz) <wgp0.txt>    -> HTML timeline
 ```
@@ -100,9 +100,9 @@ produced an empty log / failed init.
 **Root cause:** the AM model is a single simulated device; a killed run
 (especially one stuck in teardown) doesn't release it instantly. The README warns
 of exactly this contention.
-**Fix:** after killing, **poll until no `itrace_gemm1_pre` process remains** (and
+**Fix:** after killing, **poll until no `run_a8w4_gemm1` process remains** (and
 a few seconds extra) before relaunching. `run_decode_itrace.sh` does this. NB:
-`pgrep -f itrace_gemm1_pre` also matches the *shell* running the command — filter
+`pgrep -f run_a8w4_gemm1` also matches the *shell* running the command — filter
 to `comm==python3` to avoid false "still alive".
 
 ### Hiccup 5 — gluon decode aborts AM on the TDM async-copy tracker (the big one)
@@ -223,7 +223,7 @@ needs B0 or a deeper-tracker AM build.
 | path | what |
 |------|------|
 | `precompute_routing.py` | CPU routing (`cpu_routing`) + fabricated mxfp4 weights → `.pt` |
-| `itrace_gemm1_pre.py` | AM: single GEMM1 launch from `.pt` |
+| `run_a8w4_gemm1.py` | AM: single GEMM1 launch from `.pt` |
 | `analyze_itrace.py` | per-WGP instruction-mix + TS span from a `.mon` |
 | `run_decode_itrace.sh` | end-to-end, idempotent automation of all of the above |
 | `/root/itrace_runs/dec32_triton/triton_dec_wgp0.html` | triton decode timeline |
