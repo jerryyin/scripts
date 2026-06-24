@@ -2,9 +2,12 @@
 
 Ticket: AMD-Triton/triton-mi450#56. This folder is the **physical B0 hardware**
 counterpart to `../am_itrace` (AM simulator) and `../ffm_verification` (FFM). It
-captures ATT (Advanced Thread Trace) of the aiter **a8w4 gluon** GEMM vs the upstream
-**triton** `moe_gfx1250.py` GEMM and decodes them to per-instruction stats, so the
-gluon perf path that *aborts under AM* can finally be analyzed on real hardware.
+captures ATT (Advanced Thread Trace) of the a8w4 GEMM and decodes it to per-instruction
+stats, so the gluon perf path that *aborts under AM* can finally be analyzed on real
+hardware. Three single-kernel variants are collected on one shared config:
+- **a8w4 gluon** — `aiter .../_gluon_kernels/gfx1250/moe/moe_op_gemm_a8w4.py` (`_moe_gemm_a8w4_{decode,prefill}`)
+- **a8w4 triton** — `aiter .../_triton_kernels/moe/moe_op_gemm_a8w4.py` (`_moe_gemm_a8w4`; needs the force-triton gate, see below)
+- **moe_gfx1250** — upstream triton reference (`_matmul_swiglu_fn`)
 
 ---
 
