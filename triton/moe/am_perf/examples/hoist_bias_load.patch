@@ -1,0 +1,50 @@
+diff --git a/third_party/amd/python/examples/gluon/moe_gfx1250.py b/third_party/amd/python/examples/gluon/moe_gfx1250.py
+index 3377c998d..1ceac44d2 100644
+--- a/third_party/amd/python/examples/gluon/moe_gfx1250.py
++++ b/third_party/amd/python/examples/gluon/moe_gfx1250.py
+@@ -1109,6 +1109,22 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
+ 
+     Y_ptr = Y + start_z_out.to(cfg.index_type) * stride_y_z
+ 
++    # bias load (hoisted above the K-loop): issue the global load here so the
++    # matmul pipeline below hides its latency. Previously this load sat right
++    # before its use in the epilogue, exposing s_wait_loadcnt 0x0.
++    b_dtype = B.dtype if B is not None else gl.float32
++    BLOCKED_LAYOUT_BIAS: gl.constexpr = get_blocked_layout([BLOCK_N], b_dtype, cfg.NUM_WARPS, 1)
++    offs_bias_n = BLOCK_N * pid_n + gl.arange(0, BLOCK_N, BLOCKED_LAYOUT_BIAS)
++    mask_bias_n = offs_bias_n < N
++    if B is not None:
++        BPtrs = B + expt_id * stride_b_e + offs_bias_n
++        if pid_k == 0:
++            bias = gl.load(BPtrs, mask=mask_bias_n, other=0)
++        else:
++            bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
++    else:
++        bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
++
+     if SCHEDULE == 'sliceNK':
+         pgm = MoESliceNKProgram.initialize(cfg, x_desc, w_desc, x_scale_desc, w_scale_desc, gathered_m,
+                                            off_k_x // cfg.DIV_FACTOR_X)
+@@ -1125,20 +1141,8 @@ def _matmul(Y, stride_y_k, stride_y_z, stride_y_m, stride_y_n, X, stride_x_z, st
+     else:
+         acc = pgm.pipeline(loop_k)
+ 
+-    # bias
+-    b_dtype = B.dtype if B is not None else gl.float32
+-    BLOCKED_LAYOUT_BIAS: gl.constexpr = get_blocked_layout([BLOCK_N], b_dtype, cfg.NUM_WARPS, 1)
+-    offs_bias_n = BLOCK_N * pid_n + gl.arange(0, BLOCK_N, BLOCKED_LAYOUT_BIAS)
+-    mask_bias_n = offs_bias_n < N
+-    if B is not None:
+-        BPtrs = B + expt_id * stride_b_e + offs_bias_n
+-        if pid_k == 0:
+-            bias = gl.load(BPtrs, mask=mask_bias_n, other=0)
+-        else:
+-            bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
+-    else:
+-        bias = gl.full([BLOCK_N], 0, dtype=gl.float32, layout=BLOCKED_LAYOUT_BIAS)
+-
++    # bias (consume the hoisted load): by now the K-loop has overlapped the
++    # global-load latency, so s_wait_loadcnt 0x0 here should be ~free.
+     bias = gl.convert_layout(bias, gl.SliceLayout(0, cfg.acc_layout))
+     acc += bias[None, :]
+ 
