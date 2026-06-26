@@ -1,0 +1,19 @@
+### The softmax-reshape convert: ds_read_b64 of swizzled LDS (loc standard.py:293 @ mha.py:220)
+
+--- llc -O0 (more conservative waits; workload-correct) ---
+	ds_read_b64 v[26:27], v26
+	v_mul_f32_e64 v58, v58, v59
+	v_add_f32_e64 v8, v8, v58
+	s_waitcnt lgkmcnt(0)
+	s_barrier
+                                        ; implicit-def: $sgpr10
+
+--- llc -O3 (waits elided; workload-racy) ---
+	ds_read_b64 v[84:85], v66
+	v_pk_add_f32 v[78:79], v[4:5], v[6:7]
+	v_pk_add_f32 v[80:81], v[14:15], v[8:9]
+	v_pk_add_f32 v[82:83], v[12:13], v[10:11]
+
+Counts (identical on triton-LLVM 87717bf9 and upstream tip ebe87bafc):
+  -O0: s_waitcnt=128  ds_read_b64=5  s_barrier=29
+  -O3: s_waitcnt=55   ds_read_b64=5  s_barrier=29
