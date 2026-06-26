@@ -197,7 +197,7 @@ postprocess() {
   fi
 
   info "instruction mix (WGP$(printf '%02d' "$WGP")):"
-  python3 "$SCRIPT_DIR/analyze_itrace.py" "$mon" "$WGP" 2>/dev/null | sed 's/^/     /' || true
+  python3 "$SCRIPT_DIR/itrace_analyze.py" mix "$mon" "$WGP" 2>/dev/null | sed 's/^/     /' || true
 }
 
 # -------------------------------- main ---------------------------------------

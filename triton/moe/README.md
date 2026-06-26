@@ -21,7 +21,7 @@ moe/
 │   └── check_proton_ffm.py
 │
 ├── am_itrace/                # AM: instruction trace (itrace) of GEMM1
-│   ├── analyze_itrace.py     #   .mon -> per-WGP instruction-mix breakdown
+│   ├── itrace_analyze.py      #   .mon -> per-WGP instruction-mix breakdown
 │   ├── run_decode_itrace.sh  #   end-to-end orchestration (uses ../run_a8w4_gemm1.py)
 │   ├── AM_ITRACE_NOTES.md    #   generic AM-itrace procedure + every gotcha & fix
 │   └── MOE_DECODE_ITRACE_CHRONICLE.md
@@ -118,7 +118,7 @@ EXPERTS_TOT=256 EXPERTS_ACT=8 BATCH=128 bash am_itrace/run_decode_itrace.sh
 ```
 
 Artifacts land in `/root/itrace_runs/decode_<backend>/` (per-WGP HTML timeline via
-ItraceViz + `run.log`). `analyze_itrace.py <mon> <wgp>` prints the instruction-mix
+ItraceViz + `run.log`). `itrace_analyze.py mix <mon> <wgp>` prints the instruction-mix
 breakdown.
 
 To **reproduce the routing-kernel AM crash** (instead of avoiding it), run

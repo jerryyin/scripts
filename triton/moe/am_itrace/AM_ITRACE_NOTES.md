@@ -50,7 +50,7 @@ grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
 python3 /root/ItraceViz/gen_timeline.py wgp0.txt out.html
 
 # 5. compare instruction mix across backends
-python3 analyze_itrace.py xcc0se0sa0_itrace_emu.mon 0
+python3 itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
 ```
 
 Each AM run takes minutes (cycle-accurate). `precompute_routing.py` is run once
@@ -178,7 +178,7 @@ GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
 # visualize + analyze WGP00
 grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
 python3 /root/ItraceViz/gen_timeline.py wgp0.txt out.html
-python3 analyze_itrace.py xcc0se0sa0_itrace_emu.mon 0
+python3 itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
 ```
 
 Artifacts produced (under `/root/itrace_runs/`):
@@ -216,7 +216,7 @@ In this directory (`am_itrace/`):
 |------|------|
 | `precompute_routing.py` | CPU routing (`cpu_routing`, mirrors aiter `routing_torch`) + fabricated mxfp4 weights + scale swizzle → `.pt` payload |
 | `run_a8w4_gemm1.py`   | AM: load payload, fire a single a8w4 GEMM1 launch (gluon/triton) → `.mon` |
-| `analyze_itrace.py`     | categorize per-WGP instruction mix + TS span from a `.mon` |
+| `itrace_analyze.py mix`     | categorize per-WGP instruction mix + TS span from a `.mon` |
 | `run_decode_itrace.sh`  | end-to-end, idempotent orchestration of the whole flow |
 
 Shared, in the parent dir (`../`):
