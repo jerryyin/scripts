@@ -15,16 +15,20 @@ moe/
 ├── run_a8w4_gemm1.py         # SHARED a8w4 GEMM1 launcher (AM/FFM/B0): --data/--build,
 │                             #   --iters loop; os._exit under sim, normal exit on HW
 ├── am_probe.py               # SHARED diagnostic: AM capability ladder
+├── itrace_analyze.py         # SHARED: AM .mon analyzer -- mix (instr-mix) | stall (per-instr stall)
 │
 ├── ffm_verification/         # FFM: kernel correctness vs torch ref
 │   ├── run_moe_gemm_ffm.py
 │   └── check_proton_ffm.py
 │
 ├── am_itrace/                # AM: instruction trace (itrace) of GEMM1
-│   ├── itrace_analyze.py      #   .mon -> per-WGP instruction-mix breakdown
 │   ├── run_decode_itrace.sh  #   end-to-end orchestration (uses ../run_a8w4_gemm1.py)
 │   ├── AM_ITRACE_NOTES.md    #   generic AM-itrace procedure + every gotcha & fix
 │   └── MOE_DECODE_ITRACE_CHRONICLE.md
+│
+├── am_perf/                  # AM: perf-iteration loop (timing + stall) for moe_gfx1250
+│   ├── drive_kernel_only.py / drive_matmul.py / dispatch_durations.py
+│   └── README.md             #   benchmark-driven optimization process template
 │
 └── b0_bringup/               # B0 hardware: rocprofv3 ATT of the GEMM
     ├── att_collect.sh        #   collect 4 decoded traces (thin wrapper on tools/prof.sh)

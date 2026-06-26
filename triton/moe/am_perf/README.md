@@ -21,11 +21,11 @@ edits, and keep only the one that the simulator says helps — all off-hardware.
 
 ```bash
 # 0. one-time env (see "Environment" below; new triton tip must be built)
-export LD_PRELOAD= GPU_ARCHS=gfx1250
+export GPU_ARCHS=gfx1250
 export PYTHONPATH=/root/triton-mi450/python/triton_kernels:/root/triton-mi450/python
 RUN=~/scripts/tools/run_on_model.sh
 AMP=~/scripts/triton/moe/am_perf
-AMI=~/scripts/triton/moe/am_itrace      # shared AM itrace analyzer lives here
+MOE=~/scripts/triton/moe                # shared itrace_analyze.py lives at the moe base
 
 # 1. BASELINE timing run (isolated single kernel, grid=1) under AM
 mkdir -p ~/moe_am/baseline && cd ~/moe_am/baseline && rm -f *.mon run.log
@@ -36,7 +36,7 @@ MM_M=128 MM_N=128 MM_K=512 timeout 1200 $RUN --backend am -- \
 python3 $AMP/dispatch_durations.py run.log        # -> "suggested window: LO HI"
 
 # 3. measure the targeted stall (e.g. the bias s_wait_loadcnt)
-python3 $AMI/itrace_analyze.py stall xcc0se0sa0_itrace_emu.mon <LO> <HI>
+python3 $MOE/itrace_analyze.py stall xcc0se0sa0_itrace_emu.mon <LO> <HI>
 
 # 4. edit moe_gfx1250.py (ONE change), then re-run 1-3 in ~/moe_am/fix1
 #    (add TRITON_ALWAYS_COMPILE=1 so the edit actually recompiles)
@@ -58,7 +58,7 @@ grep -E "relative error|DRIVE:" run.log
 | `drive_kernel_only.py` | **timing** driver: builds inputs + launches ONLY `_matmul` once (grid=1), no routing/reference/assert. Config via `MM_*` env. |
 | `drive_matmul.py` | **correctness** driver: calls in-tree `test_matmul` (build + torch ref + assert). Run under FFM. |
 | `dispatch_durations.py` | parse AM `run.log` → per-dispatch clk durations; prints the target kernel's window. |
-| `../am_itrace/itrace_analyze.py stall` | parse itrace `.mon`, window to the kernel, attribute TS-gap (= stall at occupancy 1) per mnemonic; calls out `s_wait_loadcnt`. (Shared AM itrace analyzer; `mix` mode gives the per-WGP instruction-mix.) |
+| `../itrace_analyze.py stall` | parse itrace `.mon`, window to the kernel, attribute TS-gap (= stall at occupancy 1) per mnemonic; calls out `s_wait_loadcnt`. (Shared AM itrace analyzer; `mix` mode gives the per-WGP instruction-mix.) |
 | `examples/hoist_bias_load.patch` | worked example (see "Worked example"). |
 
 ---

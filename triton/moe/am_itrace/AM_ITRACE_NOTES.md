@@ -50,7 +50,7 @@ grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
 python3 /root/ItraceViz/gen_timeline.py wgp0.txt out.html
 
 # 5. compare instruction mix across backends
-python3 itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
+python3 ~/scripts/triton/moe/itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
 ```
 
 Each AM run takes minutes (cycle-accurate). `precompute_routing.py` is run once
@@ -178,7 +178,7 @@ GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
 # visualize + analyze WGP00
 grep -A1 WGP00 xcc0se0sa0_itrace_emu.mon > wgp0.txt
 python3 /root/ItraceViz/gen_timeline.py wgp0.txt out.html
-python3 itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
+python3 ~/scripts/triton/moe/itrace_analyze.py mix xcc0se0sa0_itrace_emu.mon 0
 ```
 
 Artifacts produced (under `/root/itrace_runs/`):
