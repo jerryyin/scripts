@@ -76,6 +76,18 @@ contiguous-64-bit `ds_read_b64` lowering is implicated specifically: a sibling
 kernel that emits the strided `ds_read2st64_b32` for the same conversion is
 unaffected.
 
+### Bisect
+
+Not a recent regression. The faulty `-O3` codegen is byte-identical (in the
+`ds_read_b64` region) from the **introduction of the async-load-to-LDS /
+`asyncmark` feature (#180466 + #180467, 2026-02-11)** through current `main`.
+That is the earliest commit where the IR is even valid — before it, `llc`
+rejects `llvm.amdgcn.raw.ptr.buffer.load.async.lds`. So this is a latent defect
+in the async-LDS / `asyncmark` waitcnt path since inception, most plausibly in
+`SIInsertWaitcnts` `lgkmcnt` accounting around `asyncmark` (cf. `mergeAsyncMarks`,
+#193499) interacting with the conversion's regular `ds_read_b64`. Probes at
+2026-02-11, 04-23, 06-08, and tip all give the same `-O3` result (55 `s_waitcnt`).
+
 ### Environment
 
 - gfx950 (CDNA4 / MI35X), ROCm 7.2.4
