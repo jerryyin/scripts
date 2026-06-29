@@ -1,0 +1,35 @@
+#blocked = #ttg.blocked<{sizePerThread = [2, 1], threadsPerWarp = [8, 8], warpsPerCTA = [1, 4], order = [0, 1]}>
+#blockedp = #ttg.blocked<{sizePerThread = [4, 4], threadsPerWarp = [8, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#mma = #ttg.amd_mfma<{version = 4, warpsPerCTA = [4, 1], instrShape = [32, 32, 16], isTransposed = true}>
+#mma1 = #ttg.amd_mfma<{version = 4, warpsPerCTA = [4, 1], instrShape = [16, 16, 32], isTransposed = true}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx950", "ttg.threads-per-warp" = 64 : i32} {
+  tt.func public @repro(%pin: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %out: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
+    %c32splat = arith.constant dense<32> : tensor<128x1xi32, #blockedp>
+    %prp = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blockedp}>>
+    %prpe = tt.expand_dims %prp {axis = 1 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blockedp}>> -> tensor<128x1xi32, #blockedp>
+    %pcol = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32, #ttg.slice<{dim = 0, parent = #blockedp}>>
+    %pcole = tt.expand_dims %pcol {axis = 0 : i32} : tensor<32xi32, #ttg.slice<{dim = 0, parent = #blockedp}>> -> tensor<1x32xi32, #blockedp>
+    %prow = arith.muli %prpe, %c32splat : tensor<128x1xi32, #blockedp>
+    %prowb = tt.broadcast %prow : tensor<128x1xi32, #blockedp> -> tensor<128x32xi32, #blockedp>
+    %pcolb = tt.broadcast %pcole : tensor<1x32xi32, #blockedp> -> tensor<128x32xi32, #blockedp>
+    %pidx = arith.addi %prowb, %pcolb : tensor<128x32xi32, #blockedp>
+    %pp0 = tt.splat %pin : !tt.ptr<f32> -> tensor<128x32x!tt.ptr<f32>, #blockedp>
+    %pp = tt.addptr %pp0, %pidx : tensor<128x32x!tt.ptr<f32>, #blockedp>, tensor<128x32xi32, #blockedp>
+    %pv = tt.load %pp : tensor<128x32x!tt.ptr<f32>, #blockedp>
+    %pm = ttg.convert_layout %pv : tensor<128x32xf32, #blockedp> -> tensor<128x32xf32, #mma>
+    %m = "tt.reduce"(%pm) <{axis = 1 : i32}> ({
+    ^bb0(%a: f32, %b: f32):
+      %mx = arith.maxnumf %a, %b : f32
+      tt.reduce.return %mx : f32
+    }) : (tensor<128x32xf32, #mma>) -> tensor<128xf32, #ttg.slice<{dim = 1, parent = #mma}>>
+    %acc1d = tt.expand_dims %m {axis = 1 : i32} : tensor<128xf32, #ttg.slice<{dim = 1, parent = #mma}>> -> tensor<128x1xf32, #mma>
+    %accm1 = ttg.convert_layout %acc1d : tensor<128x1xf32, #mma> -> tensor<128x1xf32, #mma1>
+    %back = ttg.convert_layout %accm1 : tensor<128x1xf32, #mma1> -> tensor<128x1xf32, #blocked>
+    %r = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked}>>
+    %re = tt.expand_dims %r {axis = 1 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked}>> -> tensor<128x1xi32, #blocked>
+    %op = tt.splat %out : !tt.ptr<f32> -> tensor<128x1x!tt.ptr<f32>, #blocked>
+    %opo = tt.addptr %op, %re : tensor<128x1x!tt.ptr<f32>, #blocked>, tensor<128x1xi32, #blocked>
+    tt.store %opo, %back : tensor<128x1x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}

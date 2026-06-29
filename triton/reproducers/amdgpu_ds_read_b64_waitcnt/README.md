@@ -1,135 +1,80 @@
-# [AMDGPU] gfx950: `ds_read_b64` from swizzled LDS miscompiles at `-O3` (race; `s_waitcnt` elided vs `-O0`)
+# gfx950 `convert_layout` race after swizzle PR #9662
 
-Standalone reproducer for an AMDGPU backend correctness bug on **gfx950 (CDNA4)**.
-An LLVM IR module compiled with the AMDGPU backend at **`-O3`** produces a
-**nondeterministic data race** on `ds_read_b64` reads of a swizzled LDS buffer.
-The same IR at **`-O0`** is correct. The kernel contains **no atomics**, so for
-fixed inputs a correct compilation must be bitwise deterministic.
+Investigation of AMD-Triton issue #1881: on **gfx950 (CDNA4)**, the AITER
+`test_mha_backward_with_pe` forward output is numerically nondeterministic after
+Triton swizzle PR **#9662** (`f4a3db9`, "Refine optimal swizzling for
+wavefront64"). Last good commit before it: `4a1df47`.
 
-- **Reproduces with plain `llc`** — no Triton, no PyTorch, no IREE.
-- **Reproduces on upstream LLVM tip** (`ebe87bafc`, 2026-06-26) and on the
-  Triton-bundled LLVM (`87717bf9`), both `23.0.0git`.
-- Originates from a Triton attention kernel (AMD-Triton issue #1881); the IR is
-  committed here as the backend input so the backend can be examined in isolation.
+## Conclusion (current)
 
-## Quick start
+**It is a Triton swizzle-layout bug, not an LLVM backend bug.**
 
-```bash
-# (1) Deterministic, GPU-free: show the codegen difference (only needs llc)
-LLC=/path/to/llc ./reproduce_codegen.sh
+- #9662 makes gfx950 use `numBanks=64`, which (via the pre-existing `log2Vec<2`
+  vectorization-boost reorder in `GenericSwizzling`) lowers the softmax
+  correction convert `tensor<128x1xf32,#mma> -> #mma1` to a **contiguous
+  `ds_read_b64`** LDS read instead of a strided pair of scalar reads.
+- That contiguous convert is **correct in isolation**. It only races when it
+  **coexists at LDS offset 0 with the `#shared2` P-reshape** (`local_alloc` /
+  `local_load` feeding the PV `tt.dot`) of the same attention step.
+- The backend is exonerated by direct experiment: not a missing `s_waitcnt`
+  (max waits don't fix), not the `ds_read_b64` instruction (scalar reads of the
+  same addresses still race), not `-O3` vs `-O0` (both race), not timing
+  (LDS-point barriers fix, ALU-point barriers don't).
+- Fix lever: revert this convert to the strided layout (`SWIZ_NO_REORDER`, or
+  clamp `effNumBanks` to 32 for `log2Vec<2`). Both drive `ds_read_b64 -> 0` and
+  make the kernel deterministic, while keeping #9662's 64-bank modeling elsewhere.
 
-# (2) Runtime: build a standalone HIP driver and show the race (needs a gfx950 GPU)
-LLVM_BIN=/path/to/llvm/bin ./reproduce_runtime.sh
-```
-
-## Reproducer
-
-`ir/kernel.ll` is the AMDGPU LLVM IR of one Triton attention-forward kernel
-(`_attn_fwd`, config `BLOCK_M=128 BLOCK_N=32 BLOCK_DMODEL=16`, gfx950). It is the
-IR *after* the LLVM middle-end (`opt -O3`); the only variable below is the
-**backend codegen opt level** passed to `llc`:
-
-```bash
-llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx950 -O0 ir/kernel.ll -o k_O0.s   # correct
-llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx950 -O3 ir/kernel.ll -o k_O3.s   # racy
-```
-
-## The codegen difference
-
-Same IR, same 5 `ds_read_b64`, same 29 `s_barrier`; `-O3` drops more than half of
-the `s_waitcnt` instructions:
-
-| `llc` opt | `s_waitcnt` | `ds_read_b64` | `s_barrier` | runtime |
-|-----------|-------------|---------------|-------------|---------|
-| `-O0`     | **128**     | 5             | 29          | correct (workload) |
-| `-O3`     | **55**      | 5             | 29          | **race** |
-
-(Identical counts on upstream tip `ebe87bafc` and Triton-LLVM `87717bf9`.)
-
-The 5 affected reads are the LDS load of a **register→shared→register layout
-conversion** (a `bf16`/`f32` "transpose" of the softmax tensor; source loc
-`standard.py:293 @ mha.py:220`). At `-O0` the destination registers are guarded
-by a conservative `s_waitcnt lgkmcnt(0)` before use; at `-O3` the wait is hoisted
-/ folded away and the read's result is consumed earlier. See
-`asm/codegen_evidence.txt` for the side-by-side, and `asm/tip_O3.s` /
-`asm/tip_O0.s` for the full upstream-tip output.
-
-## Results (runtime)
-
-The kernel has **no atomics** (`grep -c atomic k_O3.s == 0`); with fixed inputs a
-correct build must be deterministic. The standalone driver launches the exact
-captured grid (`grid=(2048,1,1)`, `block=(256,1,1)`, `shmem=17472`, 37 args —
-see `capture/`) with fixed pseudo-random `bf16` inputs and checks whether the
-primary output is stable across runs:
-
-```
--O3 build: output differs every run, ~50–210 elems exceed tol 0.01,
-           max_abs_diff ≈ 0.03   ->  NONDETERMINISTIC (data race)
-```
-
-The race is **timing- and data-sensitive**: with saturating (inf/NaN) inputs the
-corrupted reads do not change the output, and in isolation the conservative `-O0`
-build can also be perturbed. The clean, opt-level-attributable correctness signal
-comes from the original workload (see next section); the **deterministic,
-reproducible artifact is the codegen difference above**, which is what we ask the
-backend to examine.
-
-## Workload-level correctness signal (origin; uses Triton)
-
-In the full fp16 attention test the difference is unambiguous and matches the
-`llc` opt level exactly (`DISABLE_LLVM_OPT=1` forces `CodeGenOptLevel::None` in
-the AMDGPU backend, i.e. backend `-O0`, middle-end unchanged):
-
-| backend codegen | result |
-|-----------------|--------|
-| `-O3` (default) | **3/10 runs pass** (fwd mismatch, ~44–61 elems, max ≈ 0.09) |
-| `-O0` (`DISABLE_LLVM_OPT=1`) | **20/20 runs pass** |
-
-Both select the same 5 `ds_read_b64`; only the `s_waitcnt`/scheduling differs.
-
-## What we know
-
-- **Identical between `-O0` and `-O3`:** the IR, the 5 `ds_read_b64`, the 64
-  `ds_write_b16` + 10 `ds_write_b32` LDS writes, the 29 `s_barrier`, and the LDS
-  allocation (offsets + 17472-byte total). No atomics in either.
-- **The only difference:** `s_waitcnt` count (55 vs 128) and instruction
-  scheduling around the `ds_read_b64` results.
-- **Instruction dependence:** the affected reads are `ds_read_b64` (contiguous
-  64-bit LDS loads of a swizzled buffer). The kernel that emits the *strided*
-  alternative (`ds_read2st64_b32`) for the same conversion is unaffected — i.e.
-  the defect is specific to the `ds_read_b64` lowering/scheduling, not the layout.
-- **Hypothesis:** the `-O3` machine scheduler / `SIInsertWaitcnts` removes or
-  mis-counts an `lgkmcnt` wait that is required before the `ds_read_b64` result
-  (written cross-wavefront through LDS) is consumed, allowing the consumer to read
-  stale VGPRs. `-O0`'s per-read conservative `lgkmcnt(0)` masks the hazard.
-
-## Reproduce
-
-```bash
-# Deterministic codegen difference (no GPU):
-LLC=/root/llvm-tip/build/bin/llc ./reproduce_codegen.sh        # upstream tip
-LLC=/root/.triton/llvm/llvm-87717bf9-ubuntu-x64/bin/llc ./reproduce_codegen.sh
-
-# Runtime race (gfx950 GPU; needs llc + ld.lld + hipcc):
-LLVM_BIN=/root/llvm-tip/build/bin ./reproduce_runtime.sh
-```
+The exact silicon reason the contiguous + coexisting pattern races despite a
+correct barrier is the one open item (would need an ATT trace); the trigger,
+layer, and fix are pinned by the experiments below.
 
 ## Layout
 
 ```
-ir/kernel.ll              AMDGPU LLVM IR (backend input) — the reproducer
-asm/codegen_evidence.txt  side-by-side ds_read_b64 region, -O0 vs -O3
-asm/tip_O0.s, tip_O3.s    full upstream-tip (ebe87bafc) assembly
-driver.cpp                standalone HIP launcher (no Triton)
-reproduce_codegen.sh      llc -O0 vs -O3, prints the waitcnt difference
-reproduce_runtime.sh      builds hsacos + driver, runs the race demo
-capture/                  LD_PRELOAD-style capture of the exact launch
-                          (capture.c) + the captured descriptor (launch_capture.bin);
-                          how the launch grid/args were obtained, for provenance
+README.md                  ← this file
+analysis/
+  root-cause.md            ← the full causal chain + evidence table (start here)
+  access-pattern.md        ← exact per-lane LDS addresses, wrong vs correct, from the IR
+  minimal-repro.md         ← standalone-repro attempts + the trim-down to the minimal trace
+  barrier-analysis.md      ← the asm barrier experiments (sync layer analysis)
+ir/
+  attn_fwd.full.ttgir              ← full kernel TTGIR (input to repro)
+  attn_fwd.wrong.ll               ← racy 64-bank LLVM IR (contiguous ds_read_b64)
+  attn_fwd.correct.ll             ← NO_REORDER LLVM IR (strided scalar reads; correct)
+  minimal-trace.ttgir             ← full kernel trimmed (forced constants) to the minimal racer
+  minimal-trace.canonicalized.ttgir ← above, dead branches folded (310 lines)
+  minimal-convert.ttgir / .ll     ← faithful standalone convert (#5) — does NOT race alone
+harness/
+  driver.cpp               ← standalone HIP launcher (loads hsaco, runs N times, diffs runs)
+  compile.py               ← triton.compile(ttgir) -> hsaco + amdgcn (honors SWIZ_* env)
+archive/                   ← superseded "LLVM -O3 backend miscompile" framing (disproven)
 ```
 
-## Environment
+## Reproduce
 
-- GPU: AMD Instinct MI35X, `gfx950` (CDNA4), ROCm 7.2.4
-- LLVM: upstream tip `ebe87bafc` (2026-06-26) and `87717bf9`, both `23.0.0git`
-- Toolchain: `llc`, `ld.lld`, `hipcc`
+Requires a gfx950 GPU, a Triton build, and the env-gated prototype in the Triton
+tree (`SWIZ_NO_REORDER` in `lib/Tools/GenericSwizzling.cpp`).
+
+```bash
+# 1. compile the full kernel TTGIR -> hsaco  (baseline = racy)
+python harness/compile.py ir/attn_fwd.full.ttgir /tmp/baseline.hsaco
+
+# 2. build + run the launcher: run N times, compare run0 vs runs
+#    exits non-zero (worst max_abs_diff > 0.01) when it races
+hipcc -O2 harness/driver.cpp -o /tmp/driver
+/tmp/driver /tmp/baseline.hsaco 8        # baseline: ~0.035 (RACES)
+
+# 3. A/B: recompile with the fix, confirm deterministic
+SWIZ_NO_REORDER=1 TRITON_ALWAYS_COMPILE=1 python harness/compile.py ir/attn_fwd.full.ttgir /tmp/fixed.hsaco
+/tmp/driver /tmp/fixed.hsaco 8           # fixed: 0.000 (deterministic)
+```
+
+The minimal trace (`ir/minimal-trace.ttgir`) reproduces the same way and is the
+smallest racing configuration: one attention step (no loops, no QK dot) =
+convert + `#shared2` P-reshape + PV dot. See `analysis/minimal-repro.md`.
+
+## Status
+
+Root-caused and a working fix identified (`SWIZ_NO_REORDER`). Not yet a
+finalized upstream patch (needs target-conditioning on wavefront64 + a regression
+test in `unittest/Dialect/TritonGPU/SwizzleTest.cpp`). Nothing committed.
