@@ -1,21 +1,22 @@
-# Archive — superseded "LLVM backend miscompile" framing (DISPROVEN)
+# Archive
 
-These files reflect the **initial hypothesis**, which later investigation
-**disproved**: that gfx950 `-O3` elided an `s_waitcnt` around a `ds_read_b64`
-from swizzled LDS (an LLVM AMDGPU backend miscompile).
+Historical material only. The current handoff is the top level
+(`../README.md`, `../ISSUE.md`, `../reproduce.sh`).
 
-It is **not** a backend bug. Direct experiments showed:
-- max `s_waitcnt lgkmcnt(0)` everywhere does NOT fix it (not a missing wait),
-- replacing `ds_read_b64` with scalar `ds_read_b32` at the same addresses still
-  races (not the instruction),
-- `-O0` also races (not an `-O3`-only effect).
+```text
+context-ir/              original/full-kernel and intermediate IR snapshots
+legacy-backend-ticket/   old attention harness + IR (the O0/O3 backend-ticket
+                         draft itself was removed: its missing-waitcnt thesis was
+                         falsified — visible waits are present and equal, and -O0
+                         also races for attention)
+outdated-investigations/ older analysis notes; only the ones whose conclusions
+                         still hold are kept (access-pattern, minimal-repro,
+                         fix-and-suspects, the pre-isa-audit draft)
+verbose-notes/           longer GenericSwizzling root-cause drafts (nop "fix"
+                         claims removed — that lead was falsified)
+```
 
-The real cause is a Triton swizzle-layout interaction (see `../README.md` and
-`../analysis/`). Kept here only for history.
-
-Contents:
-- `ISSUE.md`         — paste-ready LLVM ticket draft (do NOT file; framing wrong)
-- `reproduce.sh`     — old O0/O3 + ds_read_b64-vs-strided codegen A/B harness
-- `attn_fwd_strided.ll` — old 32-bank "correct" control IR (superseded by
-  `../ir/attn_fwd.correct.ll`)
-- `asm/`, `build/`   — assembly + build artifacts from the backend A/B
+Wrong/superseded conclusions were deleted, not just labelled. Notably removed:
+the `s_nop`-padding "fix" notes (non-monotonic luck, not a fix), the `-O0`/`-O3`
+missing-waitcnt ticket, the "backend exonerated / Triton-only bug" verdict, and
+the "missing CTA barrier in MembarAnalysis" hypothesis.
