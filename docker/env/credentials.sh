@@ -30,15 +30,12 @@ set -e
 
 # Credential paths relative to home directory.
 #
-# This list is for runtime-authenticated SECRETS that the vault cannot track
-# (OAuth / login tokens that are refreshed in-session). Non-secret config does
-# NOT belong here — it is owned by rc_files (stow) so it stays portable and
-# reviewable in version control.
-#
-# The vault is the source of truth for the secrets above, so we don't want
-# credentials.sh to overwrite them with stale host-side copies.
+# This list is for runtime-authenticated SECRETS (OAuth / login tokens that are
+# refreshed in-session). Non-secret config does NOT belong here — it is owned by
+# rc_files (stow) so it stays portable and reviewable in version control.
 CREDENTIAL_PATHS=(
     ".gist"                      # gist-paste token
+    ".config/gh"                 # GitHub CLI auth state, including multi-account hosts.yml
     ".config/github-copilot"     # GitHub Copilot (vim/neovim)
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
@@ -210,7 +207,7 @@ pull_all() {
         echo "  1. Authenticate each tool:"
         echo "     gist-paste --login"
         echo "     vim → :Copilot auth"
-        echo "     gh auth login"
+        echo "     gh auth login -h github.com -p https -s repo,read:org,gist"
         echo "  2. Mount persistent storage or PVC"
         echo "  3. Run: credentials.sh --save"
         echo ""
@@ -235,7 +232,7 @@ pull_all() {
         echo "  1. Authenticate each tool you need:"
         echo "     gist-paste --login       # GitHub Gist"
         echo "     vim → :Copilot auth      # GitHub Copilot"
-        echo "     gh auth login            # GitHub CLI"
+        echo "     gh auth login -h github.com -p https -s repo,read:org,gist"
         echo ""
         echo "  2. Save to persistent storage:"
         echo "     ~/scripts/docker/env/credentials.sh --save"
@@ -281,7 +278,7 @@ push_all() {
         echo "To set up new credentials:"
         echo "  gist-paste --login       # GitHub Gist"
         echo "  vim → :Copilot auth      # GitHub Copilot"
-        echo "  gh auth login            # GitHub CLI"
+        echo "  gh auth login -h github.com -p https -s repo,read:org,gist"
         echo ""
         return 0
     fi

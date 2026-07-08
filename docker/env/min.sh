@@ -71,9 +71,8 @@ fi
 
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
-# Sibling scripts in the same env/ dir: install + (best-effort) patch.
-# Patches that need ~/.ssh/id_rsa will no-op silently here at build time;
-# priv.sh re-runs them at runtime once SSH keys are mounted from the host.
+# Sibling scripts in the same env/ dir: install CLIs and best-effort config.
+# priv.sh handles runtime credential/config sync once host storage is mounted.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "$SCRIPT_DIR/claude.sh"
 bash "$SCRIPT_DIR/codex.sh"

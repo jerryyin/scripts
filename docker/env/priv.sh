@@ -7,13 +7,12 @@
 #   1. First-time bootstrap (only when ~/.ssh/id_rsa is missing):
 #        - SSH keys from persistent storage
 #        - Hostname resolution fix
-#        - credentials.sh (symlink credentials from persistent storage)
-#        - sync_vault (clone the private vault repo with shared dev secrets)
+#        - sync_vault (link mounted vault, or clone the private vault repo)
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
+#        - credentials.sh (symlink OAuth credentials from persistent storage)
 #        - claude.sh --patch-only (read ~/vault/claude_key.txt -> ~/.claude.json)
 #        - codex.sh  --patch-only (copy ~/.codex.config.toml.template -> ~/.codex/config.toml)
-#        - gh.sh     --patch-only (read ~/vault/gh_token.txt   -> ~/.config/gh/hosts.yml)
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -109,6 +108,18 @@ setup_ssh() {
 VAULT_REPO="${VAULT_REPO:-git@github.com:jerryyin/vault.git}"
 VAULT_DIR="${VAULT_DIR:-$HOME/vault}"
 sync_vault() {
+    local persistent_root="${1:-}"
+    local persistent_vault="${persistent_root:+$persistent_root/vault}"
+
+    if [ -n "$persistent_vault" ] && [ -d "$persistent_vault" ] && [ ! -e "$VAULT_DIR" ] && [ ! -L "$VAULT_DIR" ]; then
+        ln -s "$persistent_vault" "$VAULT_DIR"
+    fi
+    if [ -n "$persistent_vault" ] && [ -d "$persistent_vault" ] \
+        && [ -L "$VAULT_DIR" ] && [ "$(readlink "$VAULT_DIR")" = "$persistent_vault" ]; then
+        [ "${QUIET_VAULT_SYNC:-0}" = "1" ] || echo "✓ vault linked at $VAULT_DIR -> $persistent_vault"
+        return 0
+    fi
+
     if [ -d "$VAULT_DIR/.git" ]; then
         echo "✓ vault already cloned at $VAULT_DIR (use 'git -C $VAULT_DIR pull' to refresh)"
         return 0
@@ -118,7 +129,7 @@ sync_vault() {
         echo "✓ vault cloned to $VAULT_DIR"
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
-        echo "   (claude.sh / gh.sh patches will be skipped until the vault is present)"
+        echo "   (claude.sh patches will be skipped until the vault is present)"
     fi
 }
 
@@ -161,10 +172,7 @@ first_time_bootstrap() {
     fix_hostname
 
     echo ""
-    bash "$SCRIPT_DIR/credentials.sh"
-
-    echo ""
-    sync_vault
+    sync_vault "$persistent_root"
 
     echo "════════════════════════════════════════════════════════════════"
     echo "  ✅ Container initialization complete"
@@ -176,9 +184,14 @@ first_time_bootstrap() {
 # Each step must early-return quickly when there is nothing to do, and stay
 # silent on the no-op path so repeat container starts don't spam.
 runtime_patches() {
+    local persistent_root
+    persistent_root=$(find_persistent_root)
+    if [ -n "$persistent_root" ] && [ -d "$persistent_root/vault" ]; then
+        QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
+    fi
+    bash "$SCRIPT_DIR/credentials.sh"
     bash "$SCRIPT_DIR/claude.sh" --patch-only
     bash "$SCRIPT_DIR/codex.sh"  --patch-only
-    bash "$SCRIPT_DIR/gh.sh"     --patch-only
 }
 
 main() {
