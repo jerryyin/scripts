@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude.sh - Install Claude Code CLI and configure credentials
+# claude.sh - Install Claude Code CLI and patch its vault-managed config
 #
 # Modes:
 #   claude.sh                # Full setup: install CLI + patch subscription key
@@ -7,10 +7,8 @@
 #                            # (priv.sh): fast, no network, no dependency install,
 #                            # silent on no-op.
 #
-# The config file (~/.claude.json) is generated from the template
-# (~/.claude.json.template, deployed by rc_files/install.sh via stow).
-# On first run (or when the template is newer), the template is copied
-# and the __CLAUDE_SUB_KEY__ placeholder is substituted from vault.
+# Config patching is handled by vault-config.sh, which shares the same
+# template + vault placeholder flow used for Docker auth.
 #
 # Model selection is left to Claude Code's built-in defaults (latest at
 # each release). No ANTHROPIC_MODEL or ANTHROPIC_DEFAULT_*_MODEL env
@@ -24,9 +22,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KEY_FILE="${KEY_FILE:-$HOME/vault/claude_key.txt}"
-CLAUDE_CONFIG="$HOME/.claude.json"
-CLAUDE_TEMPLATE="$HOME/.claude.json.template"
 
 install_claude_cli() {
     # Always install to ~/.local to avoid /usr/local being overridden
@@ -63,41 +58,6 @@ install_claude_cli() {
     return 1
 }
 
-patch_claude_config() {
-    if [ ! -f "$CLAUDE_TEMPLATE" ]; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CLAUDE_TEMPLATE not found — run rc_files/install.sh first"
-        return 0
-    fi
-
-    # Copy template if the config is missing or still unpatched. An mtime
-    # guard is unreliable since Claude Code rewrites ~/.claude.json on every run.
-    if [ ! -f "$CLAUDE_CONFIG" ] || grep -q "__CLAUDE_SUB_KEY__" "$CLAUDE_CONFIG"; then
-        cp "$CLAUDE_TEMPLATE" "$CLAUDE_CONFIG"
-        echo "✓ Copied $CLAUDE_TEMPLATE → $CLAUDE_CONFIG"
-    fi
-
-    # Substitute subscription key
-    if grep -q "__CLAUDE_SUB_KEY__" "$CLAUDE_CONFIG"; then
-        if [ ! -f "$KEY_FILE" ]; then
-            [ "${QUIET_NOOP:-0}" = "1" ] || {
-                echo "⚠️  $KEY_FILE not found — vault not synced yet"
-                echo "   Run priv.sh to clone the vault, then re-run this script."
-            }
-            return 0
-        fi
-
-        local sub_key
-        sub_key=$(tr -d '[:space:]' < "$KEY_FILE")
-        if [ -z "$sub_key" ]; then
-            echo "⚠️  $KEY_FILE is empty"
-            return 0
-        fi
-
-        sed -i "s/__CLAUDE_SUB_KEY__/${sub_key}/" "$CLAUDE_CONFIG"
-        echo "✓ Subscription key patched into $CLAUDE_CONFIG"
-    fi
-}
-
 main() {
     local skip_install=false
     case "${1:-}" in
@@ -112,7 +72,7 @@ main() {
     esac
 
     if [ "$skip_install" = true ]; then
-        QUIET_NOOP=1 patch_claude_config
+        bash "$SCRIPT_DIR/vault-config.sh" claude --patch-only
         return
     fi
 
@@ -120,7 +80,7 @@ main() {
     echo "🤖 Claude Code Setup"
     echo "────────────────────"
     install_claude_cli
-    patch_claude_config
+    bash "$SCRIPT_DIR/vault-config.sh" claude
     echo ""
 }
 

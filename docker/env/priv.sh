@@ -11,8 +11,8 @@
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
-#        - claude.sh --patch-only (read ~/vault/claude_key.txt -> ~/.claude.json)
-#        - docker-auth.sh --patch-only (read ~/vault/docker_mkmhub_auth.txt -> ~/.docker/config.json)
+#        - vault-config.sh claude --patch-only (vault -> ~/.claude.json)
+#        - vault-config.sh docker --patch-only (vault -> ~/.docker/config.json)
 #        - codex.sh  --patch-only (copy ~/.codex.config.toml.template -> ~/.codex/config.toml)
 #
 # Works with:
@@ -131,7 +131,7 @@ sync_vault() {
         echo "✓ vault cloned to $VAULT_DIR"
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
-        echo "   (claude.sh patches will be skipped until the vault is present)"
+        echo "   (vault-config.sh patches will be skipped until the vault is present)"
     fi
 }
 
@@ -192,8 +192,8 @@ runtime_patches() {
         QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
     fi
     bash "$SCRIPT_DIR/credentials.sh"
-    bash "$SCRIPT_DIR/claude.sh" --patch-only
-    bash "$SCRIPT_DIR/docker-auth.sh" --patch-only
+    bash "$SCRIPT_DIR/vault-config.sh" claude --patch-only
+    bash "$SCRIPT_DIR/vault-config.sh" docker --patch-only
     bash "$SCRIPT_DIR/codex.sh"  --patch-only
 }
 
