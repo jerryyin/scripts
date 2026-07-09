@@ -1,9 +1,9 @@
 #!/bin/bash
-# vault-config.sh - Patch local config files from vault-managed placeholders.
+# vault.sh - Patch local config files from vault-managed placeholders.
 #
 # Usage:
-#   vault-config.sh claude [--patch-only|--status]
-#   vault-config.sh docker [--patch-only|--save|--status]
+#   vault.sh claude [--patch-only|--status]
+#   vault.sh docker [--patch-only|--save|--status]
 #
 # Each profile has the same shape:
 #   config.template in rc_files -> config file in $HOME -> placeholder replaced
@@ -21,7 +21,7 @@ if [ -n "$MODE" ]; then
 fi
 
 usage() {
-    echo "Usage: vault-config.sh <claude|docker> [--patch-only|--save|--status]"
+    echo "Usage: vault.sh <claude|docker> [--patch-only|--save|--status]"
     echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
     echo "  --patch-only       Patch config, quiet when there is nothing to do"

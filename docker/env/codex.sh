@@ -1,11 +1,8 @@
 #!/bin/bash
 # codex.sh - Install OpenAI Codex CLI and configure local defaults
 #
-# Modes:
-#   codex.sh                # Full setup: install CLI + copy config template
-#   codex.sh --patch-only   # Patch config only (no npm install). Use this at
-#                            # runtime (priv.sh): fast, no network, no
-#                            # dependency install, silent on no-op.
+# Usage:
+#   codex.sh                # Install CLI + copy config template
 #
 # Credentials are managed by credentials.sh (symlinks ~/.codex from persistent
 # storage). Unlike Claude/gh whose secrets live in vault, Codex uses OAuth with
@@ -75,22 +72,14 @@ patch_codex_config() {
 }
 
 main() {
-    local skip_install=false
     case "${1:-}" in
-        --patch-only) skip_install=true ;;
         "") ;;
         *)
-            echo "Usage: codex.sh [--patch-only]"
-            echo "  (no args)      Install Codex CLI + copy config template (build time)"
-            echo "  --patch-only   Copy config template only, skip CLI install (runtime)"
+            echo "Usage: codex.sh"
+            echo "  Install Codex CLI + copy config template"
             exit 1
             ;;
     esac
-
-    if [ "$skip_install" = true ]; then
-        QUIET_NOOP=1 patch_codex_config
-        return
-    fi
 
     echo ""
     echo "🤖 Codex CLI Setup"

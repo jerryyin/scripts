@@ -11,9 +11,8 @@
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
-#        - vault-config.sh claude --patch-only (vault -> ~/.claude.json)
-#        - vault-config.sh docker --patch-only (vault -> ~/.docker/config.json)
-#        - codex.sh  --patch-only (copy ~/.codex.config.toml.template -> ~/.codex/config.toml)
+#        - vault.sh claude --patch-only (vault -> ~/.claude.json)
+#        - vault.sh docker --patch-only (vault -> ~/.docker/config.json)
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -131,7 +130,7 @@ sync_vault() {
         echo "✓ vault cloned to $VAULT_DIR"
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
-        echo "   (vault-config.sh patches will be skipped until the vault is present)"
+        echo "   (vault.sh patches will be skipped until the vault is present)"
     fi
 }
 
@@ -192,9 +191,8 @@ runtime_patches() {
         QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
     fi
     bash "$SCRIPT_DIR/credentials.sh"
-    bash "$SCRIPT_DIR/vault-config.sh" claude --patch-only
-    bash "$SCRIPT_DIR/vault-config.sh" docker --patch-only
-    bash "$SCRIPT_DIR/codex.sh"  --patch-only
+    bash "$SCRIPT_DIR/vault.sh" claude --patch-only
+    bash "$SCRIPT_DIR/vault.sh" docker --patch-only
 }
 
 main() {

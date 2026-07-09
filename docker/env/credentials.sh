@@ -41,7 +41,7 @@ CREDENTIAL_PATHS=(
     ".netrc"                     # HTTP basic auth
     ".npmrc"                     # NPM registry auth
     ".codex"                     # OpenAI Codex CLI state (OAuth tokens, auto-refreshed;
-                                 # config.toml is patched afterward by codex.sh)
+                                 # config.toml is copied by codex.sh during setup)
 )
 
 # Find the persistent storage root (mounted host home or PVC)
