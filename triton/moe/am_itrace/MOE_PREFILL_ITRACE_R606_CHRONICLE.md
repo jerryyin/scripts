@@ -100,7 +100,7 @@ Notes:
 The image ships **no usable triton** (the dockerfile `pip uninstall`s it and
 leaves an upstream `triton-lang` checkout at `/root/triton` that is *not built*).
 Build the fork from source:
-- `git clone -b shared/gfx1250 git@github.com:AMD-Triton/triton-mi450.git`
+- `git clone -b shared/gfx1250 git@github-e:AMD-Triton/triton-mi450.git`
   — needs the **enterprise** identity `id_enterprise` (= `zhuoryin_amdeng`); the
   personal `id_rsa`/`jerryyin` gets "Repository not found" on the private org.
 - The pinned LLVM is a **private GitHub release asset** → plain curl 404s. The
@@ -135,7 +135,7 @@ Build the fork from source:
 - `import aiter` **segfaults** on a bare shell (real-gfx950 HIP init) but is fine
   **under the AM/FFM env** (DTIF redirects HIP to the model). `GPU_ARCHS=gfx1250`
   skips aiter's `rocminfo` arch probe, which also segfaults (Gotcha 3).
-- ItraceViz: `git clone git@github.com:AMD-Triton/ItraceViz.git /root/ItraceViz`
+- ItraceViz: `git clone git@github-e:AMD-Triton/ItraceViz.git /root/ItraceViz`
   (also via the enterprise identity).
 
 ### 4e. ROCm version MUST match the AM package (the core blocker)

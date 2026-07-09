@@ -198,7 +198,7 @@ New-tip triton (`shared/gfx1250 @ 3068565`, 3-arg TDM API) must be built. Its
 LLVM is the internal `llvm-838ea2e6` build, fetched from a private release:
 
 ```bash
-gh auth login -h github.com      # need a valid token with AMD-Triton access
+gh auth login -h github.com -p https -s repo,read:org,gist
 gh release download llvm-build-838ea2e6 -R AMD-Triton/triton-mi450 \
     -p 'llvm-838ea2e6-ubuntu-x64-1.tar.gz' -D ~/.triton/archives/
 tar xzf ~/.triton/archives/llvm-838ea2e6-ubuntu-x64-1.tar.gz -C ~/.triton/llvm/

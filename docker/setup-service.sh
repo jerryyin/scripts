@@ -10,9 +10,9 @@
 #
 # Runs the full setup sequence (all steps idempotent):
 #   1. env/min.sh          - Base packages, dotfiles, rc_files
-#   2. env/<service>.sh    - Service-specific dependencies (if exists)
-#   3. workspace/<svc>.sh  - Clone repos, setup workspace (if exists)
-#   4. env/priv.sh         - SSH keys, credentials from persistent storage
+#   2. env/priv.sh         - SSH keys, credentials from persistent storage
+#   3. env/<service>.sh    - Service-specific dependencies (if exists)
+#   4. workspace/<svc>.sh  - Clone repos, setup workspace (if exists)
 #
 # Adding a new service: just create env/<name>.sh and/or workspace/<name>.sh
 
@@ -25,20 +25,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "📦 Base packages (env/min.sh)..."
 bash "$SCRIPT_DIR/env/min.sh"
 
-# 2. Service-specific dependencies
+# 2. Runtime init. Run before workspace setup so private repo clones have SSH keys.
+if [[ -f "$SCRIPT_DIR/env/priv.sh" ]]; then
+    echo "🔧 Container init (env/priv.sh)..."
+    bash "$SCRIPT_DIR/env/priv.sh"
+fi
+
+# 3. Service-specific dependencies
 if [[ -f "$SCRIPT_DIR/env/${SERVICE}.sh" ]]; then
     echo "📦 Service dependencies (env/${SERVICE}.sh)..."
     bash "$SCRIPT_DIR/env/${SERVICE}.sh"
 fi
 
-# 3. Workspace setup
+# 4. Workspace setup
 if [[ -f "$SCRIPT_DIR/workspace/${SERVICE}.sh" ]]; then
     echo "📦 Workspace setup (workspace/${SERVICE}.sh)..."
     bash "$SCRIPT_DIR/workspace/${SERVICE}.sh"
-fi
-
-# 4. Runtime init (SSH keys, credentials) — no-op if no persistent storage
-if [[ -f "$SCRIPT_DIR/env/priv.sh" ]]; then
-    echo "🔧 Container init (env/priv.sh)..."
-    bash "$SCRIPT_DIR/env/priv.sh"
 fi

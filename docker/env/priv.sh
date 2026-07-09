@@ -95,9 +95,10 @@ setup_ssh() {
     cp -r "$persistent_root/.ssh" ~/.ssh
     chmod 700 ~/.ssh 2>/dev/null || true
     # Lock down private keys; public pairs (*.pub) stay world-readable.
-    chmod 600 ~/.ssh/id_rsa ~/.ssh/id_ed25519 2>/dev/null || true
-    chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/id_ed25519.pub 2>/dev/null || true
+    chmod 600 ~/.ssh/id_* 2>/dev/null || true
+    chmod 644 ~/.ssh/id_*.pub 2>/dev/null || true
     ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+    ssh-keyscan -p 443 -t rsa,ed25519 ssh.github.com >> ~/.ssh/known_hosts 2>/dev/null || true
     echo "✓ SSH keys configured"
 }
 
