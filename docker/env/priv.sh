@@ -12,6 +12,7 @@
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
 #        - claude.sh --patch-only (read ~/vault/claude_key.txt -> ~/.claude.json)
+#        - docker-auth.sh --patch-only (read ~/vault/docker_mkmhub_auth.txt -> ~/.docker/config.json)
 #        - codex.sh  --patch-only (copy ~/.codex.config.toml.template -> ~/.codex/config.toml)
 #
 # Works with:
@@ -192,6 +193,7 @@ runtime_patches() {
     fi
     bash "$SCRIPT_DIR/credentials.sh"
     bash "$SCRIPT_DIR/claude.sh" --patch-only
+    bash "$SCRIPT_DIR/docker-auth.sh" --patch-only
     bash "$SCRIPT_DIR/codex.sh"  --patch-only
 }
 
