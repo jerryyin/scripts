@@ -2,8 +2,8 @@
 # vault.sh - Patch local config files from vault-managed placeholders.
 #
 # Usage:
-#   vault.sh claude [--patch-only|--status]
-#   vault.sh docker [--patch-only|--save|--status]
+#   vault.sh claude [--status]
+#   vault.sh docker [--status]
 #
 # Each profile has the same shape:
 #   config.template in rc_files -> config file in $HOME -> placeholder replaced
@@ -21,11 +21,9 @@ if [ -n "$MODE" ]; then
 fi
 
 usage() {
-    echo "Usage: vault.sh <claude|docker> [--patch-only|--save|--status]"
+    echo "Usage: vault.sh <claude|docker> [--status]"
     echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
-    echo "  --patch-only       Patch config, quiet when there is nothing to do"
-    echo "  --save             Docker only: save current login auth to vault"
     echo "  --status           Show non-secret status"
 }
 
@@ -81,7 +79,7 @@ validate_secret() {
 
 patch_config() {
     if [ ! -f "$TEMPLATE_FILE" ]; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || echo "Warning: $TEMPLATE_FILE not found; run rc_files/install.sh first"
+        echo "Warning: $TEMPLATE_FILE not found; run rc_files/install.sh first"
         return 0
     fi
 
@@ -95,10 +93,8 @@ patch_config() {
 
     if grep -Fq "$PLACEHOLDER" "$CONFIG_FILE"; then
         if [ ! -f "$SECRET_FILE" ]; then
-            [ "${QUIET_NOOP:-0}" = "1" ] || {
-                echo "Warning: $SECRET_FILE not found; vault not synced yet"
-                echo "Run priv.sh to sync vault, then re-run this script."
-            }
+            echo "Warning: $SECRET_FILE not found; vault not synced yet"
+            echo "Run priv.sh to sync vault, then re-run this script."
             return 0
         fi
 
@@ -114,38 +110,6 @@ patch_config() {
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
         echo "Patched $DESCRIPTION into $CONFIG_FILE"
     fi
-}
-
-save_secret() {
-    if [ "$PROFILE" != "docker" ]; then
-        echo "--save is only supported for docker"
-        return 1
-    fi
-    if ! have_jq; then
-        echo "jq is required to save Docker auth"
-        return 1
-    fi
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "$CONFIG_FILE not found; run docker login $DOCKER_REGISTRY first"
-        return 1
-    fi
-
-    local secret
-    secret=$(jq -r --arg registry "$DOCKER_REGISTRY" '.auths[$registry].auth // empty' "$CONFIG_FILE")
-    if [ -z "$secret" ]; then
-        echo "No auth entry for $DOCKER_REGISTRY in $CONFIG_FILE"
-        return 1
-    fi
-    if ! validate_secret "$secret"; then
-        echo "Auth entry for $DOCKER_REGISTRY is not a valid Docker auth value"
-        return 1
-    fi
-
-    mkdir -p "$(dirname "$SECRET_FILE")"
-    umask 077
-    printf '%s\n' "$secret" > "$SECRET_FILE"
-    chmod 600 "$SECRET_FILE" 2>/dev/null || true
-    echo "Saved $DESCRIPTION to $SECRET_FILE"
 }
 
 show_status() {
@@ -182,12 +146,6 @@ configure_profile
 case "$MODE" in
     "")
         patch_config
-        ;;
-    --patch-only)
-        QUIET_NOOP=1 patch_config
-        ;;
-    --save)
-        save_secret
         ;;
     --status)
         show_status

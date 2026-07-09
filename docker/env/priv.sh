@@ -11,8 +11,8 @@
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
-#        - vault.sh claude --patch-only (vault -> ~/.claude.json)
-#        - vault.sh docker --patch-only (vault -> ~/.docker/config.json)
+#        - vault.sh claude (vault -> ~/.claude.json)
+#        - vault.sh docker (vault -> ~/.docker/config.json)
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -191,8 +191,8 @@ runtime_patches() {
         QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
     fi
     bash "$SCRIPT_DIR/credentials.sh"
-    bash "$SCRIPT_DIR/vault.sh" claude --patch-only
-    bash "$SCRIPT_DIR/vault.sh" docker --patch-only
+    bash "$SCRIPT_DIR/vault.sh" claude
+    bash "$SCRIPT_DIR/vault.sh" docker
 }
 
 main() {
