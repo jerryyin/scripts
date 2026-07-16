@@ -64,8 +64,82 @@ Mechanism, same source line before/after (moe_gfx1250.py:264 `gl.load(GatherIndx
 - Stock LLVM prebuilts: `/root/.triton/llvm/llvm-{62b7cf96,56421f92}-*`; patched
   (MachineLICM hoist) tree: `/root/llvm-project` → `install/`.
 
+## End-to-end micro-benchmark (runtime / TFLOPS + ATT)
+
+Measures how much the contract changes *runtime*, on the tdm-fusion MoE GEMM, plus
+ATT traces. Lives in `scripts/` + `results/`.
+
+### Result (gfx1250, sliceNK, 5-rep medians)
+
+| BN | baseline | PR (noalias) | speedup | codegen (`_matmul.amdgcn`) |
+|----|----------|--------------|---------|----------------------------|
+| 256 | 4.404 ms / 1975 TFLOPS | 4.358 ms / 1996 TFLOPS | **+1.06 %** | v_readfirstlane 75→44, s_load 10→14 |
+| 512 | 4.123 ms / 2109 TFLOPS | 4.050 ms / 2148 TFLOPS | **+1.78 %** | (same kernel) |
+
+Raw reps in `results/perf_reps.md`; driver snapshots in `results/{pr,baseline}_results.csv`
+(cold-start, provenance only — use `perf_reps.md` medians). The −31 `v_readfirstlane`
+is the same mechanism as the asm study above, seen end-to-end in the tdm moe kernel.
+
+### Key decisions (why this config)
+- **PR grafted onto tdm-fusion, not built standalone.** The benchmark config comes from
+  `amd/kylewng/moe_shared_tdm_fusion` (tip `f6077ab09a`). baseline = tip; PR = tip + the
+  2 PR commits cherry-picked. Net delta = exactly the noalias contract
+  (`scripts/02_pr_noalias_contract.patch`). PR's own base (`ba4fd67b`) can't build here —
+  its LLVM `56421f92` prebuilt 404s; the tdm tip pins the available `850a2b1b`.
+- **`sliceNK`, not `sliceMNK`.** `run_moe_microbench.sh` uses `sliceMNK` +
+  `partial_tdm/tdm_split/resolve`, but those knobs are sliceMNK-only and **`sliceMNK`
+  GPU-faults in the tdm branch's own `test_matmul`** (WIP tip). `sliceNK` is stable
+  (`validate_moe.py` → rel_err 0.0). The gather `s_load` is schedule-independent, so the
+  delta is representative; absolute TFLOPS are sliceNK.
+- **Harness forward-port** (`scripts/01_harness_intermediate_out_dtype.patch`): the tdm moe
+  example predates the `intermediate_out_dtype` threading its `triton_kernels` now needs.
+  Applied identically to both branches (dead for split_k==1), so it doesn't affect the delta.
+
+### Exact bench command (per BN ∈ {256, 512})
+```
+python3 third_party/amd/python/examples/gluon/moe_gfx1250.py \
+    -b 2048 -d1 2880 -d2 5760 -et 128 -ea 4 --x_dtype fp8 --w_dtype mx4 \
+    --num_buffers 3 -a dispatch --num_warps 4 -bm 128 -bn <BN> -bk 256 \
+    --schedule sliceNK --benchmark-mode eager --benchmark-num-iters 200
+```
+`-a dispatch` (gather) is required for the PR effect. GEMM shape M=262144 N=5760 K=2880.
+Env (both configs): `HSA_ENABLE_SDMA=1 HSA_USE_SVM=1 HSA_XNACK=1
+TRITON_HIP_USE_EXPERT_SCHEDULING=1 TRITON_HIP_USE_COEXEC_SCHEDULER=1`.
+
+### Reproduce (turn-key; some manual steps)
+Prereqs: Triton at `~/triton`, AMD remote fetched, gfx1250, `~/.triton/llvm/llvm-850a2b1b-*`,
+`rocprofv3` on PATH, ATT decoder lib (default `/root/rocm-systems/projects/rocprof-trace-decoder/build/lib`;
+override `ATT_LIB` in `scripts/run_moe_att_bench.sh`), and `~/scripts/tools/gpu-lock`
+(lock file `/data/lock/amd-gpu.lock`).
+```bash
+cd ~/triton
+REPRO=~/scripts/triton/reproducers/issue-1885-moe-gather-noalias
+# 1) build both bench branches (cherry-pick approach; handles the moe decorator conflict)
+"$REPRO"/scripts/setup_branches.sh ~/triton
+# 2) stage rocprofv3 ATT config at a results root
+RESULTS=~/bench_moe_pr_vs_base; mkdir -p "$RESULTS"; cp "$REPRO"/scripts/att.json "$RESULTS"/
+# 3) baseline: build + bench (perf run for TFLOPS + single-launch rocprofv3 ATT)
+git checkout users/jerryyin/bench-tdmfusion-baseline && pip install -e . --no-build-isolation
+"$REPRO"/scripts/run_moe_att_bench.sh baseline "$RESULTS"
+# 4) PR: rebuild (only noalias C++ differs → fast) + bench
+git checkout users/jerryyin/bench-tdmfusion-pr && pip install -e . --no-build-isolation
+"$REPRO"/scripts/run_moe_att_bench.sh pr "$RESULTS"
+# 5) stable perf: 5 reps/config/BN, take medians (see results/perf_reps.md for the loop)
+# 6) correctness: cd third_party/amd/python/examples/gluon &&
+#    PYTHONPATH=$PWD gpu-lock python3 "$REPRO"/scripts/validate_moe.py sliceNK None   # rel_err 0.0
+# 7) mechanism: TRITON_KERNEL_DUMP=1 TRITON_DUMP_DIR=/tmp/ir <bench cmd w/o --benchmark-mode>;
+#    grep -c v_readfirstlane and -cE '\ss_load' the dumped _matmul.amdgcn per config
+```
+ATT traces (raw `*.att` + decoded `ui_output_*`) land under `$RESULTS/{pr,baseline}_bn*/att/`.
+They are **not** committed (large, regenerable) — scp them off the host as needed.
+
 ## Files here
 
+- `scripts/` — the runtime/ATT benchmark: `setup_branches.sh` (construct the two bench
+  branches via cherry-pick), `run_moe_att_bench.sh` (driver: perf + rocprofv3 ATT, under
+  `gpu-lock`), `validate_moe.py` (assert_close vs torch ref), `att.json` (ATT config),
+  `01_harness_intermediate_out_dtype.patch` + `02_pr_noalias_contract.patch`.
+- `results/` — `perf_reps.md` (the record), `{pr,baseline}_results.csv` (driver snapshots).
 - `gen_before_after.sh` — regenerate the BEFORE/AFTER assembly for both kernels
   into `asm/` on demand (toggles the aiter/example `noalias_args`, stock `llc`,
   reports in-loop rfl + hot-loop bounds). The raw `.s`/`.llir` dumps are not

@@ -1,0 +1,3 @@
+config,BN,time_ms,tflops,att_dir
+baseline,256,4.4026705529954695,1975.46,/root/bench_moe_pr_vs_base/baseline_bn256/att
+baseline,512,4.6976837657746815,1851.40,/root/bench_moe_pr_vs_base/baseline_bn512/att
