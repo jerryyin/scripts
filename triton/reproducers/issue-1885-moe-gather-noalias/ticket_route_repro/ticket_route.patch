@@ -1,0 +1,131 @@
+diff --git a/third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp b/third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp
+index 459083497a..463d1cd9f6 100644
+--- a/third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp
++++ b/third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp
+@@ -205,6 +205,93 @@ bool isRedundantThreadPredWarpUniform(
+          masks.lookup(StringAttr::get(ctx, "reg")) == 0;
+ }
+ 
++// ==== ticket #1885 route (adapted for independent verification) ==============
++// Faithful to AMD-Triton/triton-tickets#1885 sload_uniform_main.patch:
++// env-gated (TRITON_AMD_UNIFORM_SLOAD), NO readonly/noalias contract check.
++// readfirstlane the address + !invariant.load so ISel selects s_load.
++// Adaptations: inline lookThroughExtractValue (ticket used mlir::triton::AMD::
++// which isn't in this fork), ROCDL::ReadfirstlaneOp instead of
++// createLLVMIntrinsicCallOp (same IR).
++static bool tv_isWaveUniformLoad(Type ty, int warpSize) {
++  auto tensorTy = dyn_cast<RankedTensorType>(ty);
++  if (!tensorTy || !tensorTy.getEncoding())
++    return false;
++  auto *ctx = tensorTy.getContext();
++  auto ll = triton::gpu::toLinearLayout(tensorTy);
++  auto masks = ll.getFreeVariableMasks();
++  return masks.lookup(StringAttr::get(ctx, "lane")) == (warpSize - 1);
++}
++static Value tv_rfl(RewriterBase &rewriter, Location loc, Value v) {
++  return ROCDL::ReadfirstlaneOp::create(rewriter, loc, v.getType(), v);
++}
++static Value tv_readFirstLanePtr(RewriterBase &rewriter, Location loc,
++                                 Value ptr) {
++  auto b = TritonLLVMOpBuilder(loc, rewriter);
++  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
++  Value asInt = b.ptrtoint(i64, ptr);
++  Value lo = tv_rfl(rewriter, loc, b.trunc(i32, asInt));
++  Value hi = tv_rfl(rewriter, loc, b.trunc(i32, b.lshr(asInt, b.i64_val(32))));
++  Value comb = b.or_(b.zext(i64, lo), b.shl(b.zext(i64, hi), b.i64_val(32)));
++  return b.inttoptr(ptr.getType(), comb);
++}
++static Value tv_readFirstLaneInt(RewriterBase &rewriter, Location loc,
++                                 Value v) {
++  auto b = TritonLLVMOpBuilder(loc, rewriter);
++  Type ty = v.getType();
++  unsigned bw = ty.getIntOrFloatBitWidth();
++  Type i32 = rewriter.getI32Type();
++  if (bw == 32)
++    return tv_rfl(rewriter, loc, v);
++  if (bw < 32)
++    return b.trunc(ty, tv_rfl(rewriter, loc, b.zext(i32, v)));
++  Value lo = tv_rfl(rewriter, loc, b.trunc(i32, v));
++  Value hi = tv_rfl(rewriter, loc, b.trunc(i32, b.lshr(v, b.i64_val(32))));
++  return b.or_(b.zext(ty, lo), b.shl(b.zext(ty, hi), b.i64_val(32)));
++}
++// Peel extractvalue(insertvalue-chain, idx) -> the inserted GEP.
++static Value tv_lookThroughExtractValue(Value v) {
++  auto ev = v.getDefiningOp<LLVM::ExtractValueOp>();
++  if (!ev || ev.getPosition().size() != 1)
++    return v;
++  int64_t idx = ev.getPosition()[0];
++  Value container = ev.getContainer();
++  while (auto iv = container.getDefiningOp<LLVM::InsertValueOp>()) {
++    if (iv.getPosition().size() == 1 && iv.getPosition()[0] == idx)
++      return iv.getValue();
++    container = iv.getContainer();
++  }
++  return v;
++}
++static Value tv_uniformizeAddr(RewriterBase &rewriter, Location loc, Value ptr,
++                               Type elemTy,
++                               llvm::DenseMap<Value, Value> &baseCache) {
++  auto b = TritonLLVMOpBuilder(loc, rewriter);
++  Value peeled = tv_lookThroughExtractValue(ptr);
++  auto gep = peeled.getDefiningOp<LLVM::GEPOp>();
++  if (!gep || gep.getDynamicIndices().size() != 1)
++    return tv_readFirstLanePtr(rewriter, loc, ptr);
++  Value base = gep.getBase();
++  Value &uBase = baseCache[base];
++  if (!uBase)
++    uBase = tv_readFirstLanePtr(rewriter, loc, base);
++  Value idx = gep.getDynamicIndices()[0];
++  Value src = idx;
++  bool sext = false, zext = false;
++  if (auto s = idx.getDefiningOp<LLVM::SExtOp>()) {
++    src = s.getArg();
++    sext = true;
++  } else if (auto z = idx.getDefiningOp<LLVM::ZExtOp>()) {
++    src = z.getArg();
++    zext = true;
++  }
++  Value uSrc = tv_readFirstLaneInt(rewriter, loc, src);
++  Value uIdx = sext   ? b.sext(idx.getType(), uSrc)
++               : zext ? b.zext(idx.getType(), uSrc)
++                      : uSrc;
++  return b.gep(ptr.getType(), elemTy, uBase, uIdx);
++}
++// ============================================================================
++
+ Value selectLdsAddressForPredicate(TritonLLVMOpBuilder &b, Value pred,
+                                    Value shmemAddr) {
+   Value outOfRangeAddress =
+@@ -600,6 +687,11 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
+     const int numVecs = numElems / vec;
+ 
+     auto cacheMod = op.getCache();
++    // [ticket #1885] scalar-load path for wave-uniform, unmasked loads (gated).
++    bool tryUniformSLoad =
++        ::getenv("TRITON_AMD_UNIFORM_SLOAD") && !mask &&
++        tv_isWaveUniformLoad(op.getType(), targetInfo.getWarpSize());
++    llvm::DenseMap<Value, Value> uBaseCache;
+     SmallVector<Value> loadedVals;
+     Type vecTy = LLVM::getVectorType(valueElemTy, vec);
+     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
+@@ -620,8 +712,18 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
+             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
+             otherElems, vecStart);
+ 
+-      Value loadVal = llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
+-                             multicastMask, cacheMod);
++      Value loadVal;
++      if (tryUniformSLoad) {
++        Value uAddr =
++            tv_uniformizeAddr(rewriter, loc, ptr, valueElemTy, uBaseCache);
++        auto ld = LLVM::LoadOp::create(rewriter, loc, vecTy, uAddr,
++                                       /*alignment=*/0);
++        ld.setInvariant(true);
++        loadVal = ld.getResult();
++      } else {
++        loadVal = llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
++                         multicastMask, cacheMod);
++      }
+       for (size_t ii = 0; ii < vec; ++ii) {
+         Value vecIdx = createIndexAttrConstant(
+             rewriter, loc, getTypeConverter()->getIndexType(), ii);
