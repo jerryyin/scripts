@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# gpu-lock — cooperative, trust-based GPU serialization for shared systems.
+#
+# Serializes GPU access across users/processes using an exclusive flock on a
+# shared lock file. Only one wrapped application runs at a time; others block
+# until it exits. The kernel releases the lock automatically on exit, crash, or
+# reboot — no manual unlock. This is cooperative, not a security boundary:
+# applications launched directly (without the wrapper) bypass the lock.
+#
+# Usage:
+#   gpu-lock python app.py
+#   gpu-lock env AMD_SERIALIZE_KERNEL=3 python app.py
+#   gpu-lock torchrun --nproc_per_node=4 train.py
+#
+# Apply to the top-level launcher (python, torchrun, ...), not worker processes.
+set -euo pipefail
+
+LOCK=${GPU_LOCK_FILE:-/data/lock/amd-gpu.lock}
+
+if [ "$#" -eq 0 ]; then
+    echo "Usage: gpu-lock <command> [args...]" >&2
+    exit 1
+fi
+
+if [ ! -f "$LOCK" ]; then
+    echo "lock file '$LOCK' does not exist, creating..." >&2
+    sudo mkdir -p "$(dirname "$LOCK")"
+    sudo touch "$LOCK"
+    sudo chmod 666 "$LOCK"
+    exit 2
+fi
+
+exec flock -x "$LOCK" "$@"
