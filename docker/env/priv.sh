@@ -28,11 +28,29 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# First-time bootstrap is gated on the SSH private key: once any supported key
-# (id_rsa or id_ed25519) exists, we assume the heavy one-time setup is done and
-# skip straight to runtime patches.
+# First-time bootstrap is gated on two artifacts, so a partial prior setup
+# self-heals instead of getting stuck:
+#   1. SSH private key (id_rsa or id_ed25519) — the heavy one-time setup marker.
+#   2. The vault (~/vault). SSH keys can be present (e.g. restored from
+#      persistent storage on a prior start) while the vault was never synced,
+#      which would otherwise leave vault.sh patches permanently warning
+#      "vault not synced yet". Missing either one re-runs the (idempotent)
+#      bootstrap.
 needs_first_time_bootstrap() {
-    [ ! -f ~/.ssh/id_rsa ] && [ ! -f ~/.ssh/id_ed25519 ]
+    if [ ! -f ~/.ssh/id_rsa ] && [ ! -f ~/.ssh/id_ed25519 ]; then
+        return 0
+    fi
+    if ! vault_available; then
+        return 0
+    fi
+    return 1
+}
+
+# Vault is usable once ~/vault resolves to a populated directory — either a
+# symlink to persistent storage or a cloned repo. A dangling symlink, a missing
+# path, or an empty dir (partial clone) all count as unavailable so we retry.
+vault_available() {
+    [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]
 }
 
 # Find the persistent storage root (same logic as credentials.sh)

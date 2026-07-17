@@ -46,12 +46,15 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
 # "auto-installed" and apt autoremove will purge it. Mark it manual.
 sudo apt-mark manual nodejs
 
-# rc files
+# rc files. Clone once, but ALWAYS re-run install.sh: it is idempotent (stow -R,
+# backs up real-file conflicts) and is what re-heals a partial prior setup — e.g.
+# a pod reusing persistent $HOME where rc_files/ exists but a previous install.sh
+# died midway. Gating install.sh on the directory would skip that repair forever.
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
-    bash rc_files/install.sh
 fi
+bash rc_files/install.sh
 
 # Clone scripts
 if [ ! -d scripts ]; then

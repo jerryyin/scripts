@@ -6,7 +6,17 @@ sudo apt update
 sudo apt install hipblas-common-dev liblapack-dev libblas-dev gfortran libgtest-dev libboost-filesystem-dev libmsgpack-cxx-dev libgtest-dev google-mock
 
 cd ~
-git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-libraries.git
+# Clone only when absent. Never rm -rf here: ~/rocm-libraries can hold un-pushed
+# work. A dir without .git is an anomaly (failed clone or corruption) — surface it
+# for manual cleanup instead of silently destroying a possible repo.
+if [ -d ~/rocm-libraries/.git ]; then
+    :  # already present
+elif [ ! -e ~/rocm-libraries ]; then
+    git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-libraries.git
+else
+    echo "⚠️  ~/rocm-libraries exists but has no .git; refusing to touch it. Inspect and remove manually, then re-run." >&2
+    exit 1
+fi
 cd ~/rocm-libraries
 git sparse-checkout init --cone
 git sparse-checkout set projects/hipblaslt shared

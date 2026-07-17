@@ -51,29 +51,37 @@ dockerInstall clang-10 lld-10 clang-tidy-10 clang-format-10 cmake ninja-build
 
 sudo apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# install tmux plugin manager
-if [ ! -d .tmux/plugins/tpm ]; then
+# install tmux plugin manager. Guard on tpm's entrypoint, not the directory: an
+# interrupted clone leaves an empty ~/.tmux/plugins/tpm that a dir check treats
+# as installed forever. Safe to wipe+reclone: tpm is an upstream tool clone with
+# no user data (unlike a source checkout, which we must never rm -rf).
+if [ ! -f ~/.tmux/plugins/tpm/tpm ]; then
+    rm -rf ~/.tmux/plugins/tpm
     git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 fi
 
 # Make zsh default shell
 sudo chsh -s $(which zsh)
 
-# rc files
+# rc files. Clone + clear first-time conflicts once, but always (re)stow so a pod
+# reusing persistent $HOME re-links dotfiles even when rc_files/ already exists.
 if [ ! -d rc_files ]; then
     git clone https://github.com/jerryyin/rc_files.git
+    git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
+    # First-time only: remove real dotfiles in $HOME that would block stow.
     for dotpath in $(find rc_files -name "\.*"); do
       rm "$(basename -- $dotpath)"
     done
-    for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
-      stow -d ~/rc_files $dir -v -R -t ~
-    done
-    git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
+# stow -R is idempotent (restow), so running it every time safely re-heals links.
+for dir in $(ls -d ~/rc_files/*/ | awk -F "/" "{print \$(NF-1)}"); do
+  stow -d ~/rc_files $dir -v -R -t ~
+done
 
-# Git configurations
-# git default user, password, ignore file
-if [ ! -d .git ]; then
+# Git configurations. Precise guard on the actual config value: a double-run is a
+# no-op, but a missing/wrong config still self-heals. (The old `[ ! -d .git ]`
+# keyed on whether $HOME was a git repo — unrelated to global config.)
+if [ "$(git config --global user.email 2>/dev/null)" != "zhuoryin@amd.com" ]; then
     git config --global user.email "zhuoryin@amd.com"
     git config --global user.name "jerryyin"
     git config --global pager.branch false
