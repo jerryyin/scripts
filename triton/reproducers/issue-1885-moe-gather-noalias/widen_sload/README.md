@@ -34,21 +34,30 @@ This corrected an earlier wrong conclusion ("contiguity → VMEM"): contiguity a
 load-kind are independent for dword; the coupling is sub-dword-specific. See
 `ledger.md` (iteration 7) for the refutation trail.
 
-## Widening path (grounded, but a real change — not a free lever)
+## Widening path (PROPOSED — not implemented end-to-end)
 
-Load the index **dword-granular and contiguous** → wide SMEM:
-1. **Contiguity:** drop `% M` and **host-pad `GatherIndx`** to a `BLOCK_M` multiple so
-   the over-read is in-bounds (the kernel's existing `where(mask_idx, …, oob_idx)`
-   already discards the padding entries → still correct).
-2. **Dword granularity:** bitcast/load two adjacent `uint16` as one `i32`, unpack the
-   pair after the load.
+To get wide SMEM the index load must be **dword-granular AND contiguous**. Three
+steps; only step 1 has been run:
 
-Then contiguous `i32` → `s_load_b*` (wide SMEM), 0 churn — grounded by `@t32` and
-moe's real `s_load_b512`. Cost: kernel change (bitcast+unpack) + host padding.
+1. **Contiguity — drop `% M`.** [DONE / MEASURED, `measure_a8w4.sh`] On its own this
+   is a **regression**: the uint16 index coalesces but into VMEM (`global_load_b128`)
+   and the 16 in-loop readfirstlane come back. Shown here precisely to prove step 1
+   alone is *not* the fix.
+2. **Host-pad `GatherIndx`** to a `BLOCK_M` multiple so the now-contiguous over-read
+   is in-bounds (the kernel's `where(mask_idx, …, oob_idx)` already discards padding).
+   [NOT DONE — proposal. It's a safety prerequisite for step 1, not a widening lever.]
+3. **Dword granularity — load two adjacent `uint16` as one `i32`, unpack the pair.**
+   [NOT DONE on a8w4 — proposal.] This is the step that actually buys wide SMEM.
 
-**LLVM alternative:** teach AMDGPU to form wide sub-dword SMEM loads (or coalesce
-contiguous scalar `s_load_u16` → `s_load_b*` + unpack). Then a8w4 widens with no
-kernel/host change.
+What is actually verified: step 1's regression (`measure_a8w4.sh`); the *mechanism*
+that steps 2+3 rely on, in isolation only — `subdword.ll` `@t32` (contiguous i32 →
+`s_load_b*`) and moe_gfx1250's real `s_load_b512`. The combined a8w4 change
+(drop %M + pad + i32-pack + unpack) has **not** been written or measured; there is no
+kernel diff for steps 2/3 here.
+
+**LLVM alternative (also not implemented):** teach AMDGPU to form wide sub-dword SMEM
+loads (or coalesce contiguous scalar `s_load_u16` → `s_load_b*` + unpack). Then step 3
+is unnecessary and a8w4 would widen with just steps 1+2.
 
 ## Files
 - `subdword.ll` — `@t16` (contiguous i16) + `@t32` (contiguous i32), isolated.

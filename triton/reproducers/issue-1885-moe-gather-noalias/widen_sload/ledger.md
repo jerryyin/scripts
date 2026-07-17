@@ -121,14 +121,15 @@
 - a8w4 index is uint16 (sub-dword). Wide SMEM for sub-dword doesn't exist in AMDGPU.
   => narrow s_load_u16 is forced UNLESS the index is loaded dword-granular (i32).
 
-## WIDENING PATH (grounded, positive result)
+## WIDENING PATH (PROPOSED — mechanism-verified only, NOT implemented on a8w4)
 - Load the index DWORD-granular + contiguous -> wide SMEM. Concretely:
-  (a) make addresses contiguous: drop %M + host-pad GatherIndx to BLOCK_M multiple so
-      the over-read is safe (existing where(mask_idx) already discards the padding), and
-  (b) bitcast/load 2 adjacent uint16 as one i32 (unpack the pair after).
-  Then contiguous i32 -> s_load_b* (wide SMEM), 0 churn. Grounded by @t32 + moe.
-- Cost: kernel change (bitcast+unpack) + host padding. Not a free lever, but a concrete
-  mechanism-backed path (corrects the earlier "impossible").
+  (1) drop %M for contiguity                     [DONE/MEASURED -> regresses to VMEM+churn]
+  (2) host-pad GatherIndx to BLOCK_M multiple    [NOT DONE - safety prereq for (1)]
+  (3) bitcast/load 2 adjacent uint16 as one i32, unpack  [NOT DONE - the step that buys SMEM]
+- VERIFIED: (1)'s regression (measure_a8w4.sh); the mechanism (3) relies on, in
+  ISOLATION only -> @t32 (contiguous i32 -> s_load_b*) + moe's real s_load_b512.
+- NOT verified: the combined a8w4 change (drop %M + pad + i32-pack). No kernel diff for
+  (2)/(3) exists; end-to-end wide-SMEM on a8w4 is unproven, just mechanism-backed.
 
 ## Dead ends
 - Drop `% M` alone: contiguous i16 -> VMEM global_load + 16 churn (sub-dword, no wide SMEM).
