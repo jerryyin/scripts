@@ -150,6 +150,10 @@ They are **not** committed (large, regenerable) — scp them off the host as nee
 - `ticket_route_repro/` — independent reproduction of the ticket's `uniformizeAddr`
   + `!invariant.load` route (`ticket_route.patch` + `verify.sh`): confirms it is a
   valid alternate route to the noalias contract (16→0 in-loop), not a false claim.
+- `widen_sload/` — can the (now-`s_load`) gather-index loads be made wider? Root
+  cause = AMDGPU has no wide sub-dword (i16) SMEM load (`subdword.ll` + `reproduce.sh`),
+  so a8w4's uint16 index stays narrow; wide SMEM needs dword granularity. Includes the
+  end-to-end `measure_a8w4.sh` and the full investigation `ledger.md`.
 
 ## Related tooling (elsewhere in ~/scripts/triton)
 
