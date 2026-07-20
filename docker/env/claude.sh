@@ -11,6 +11,9 @@
 #   - nodejs + npm installed (handled by min.sh)
 
 set -e
+# Without pipefail, `npm install ... | tail -1` always reports tail's exit
+# code (0), so a real npm failure would be silently treated as success.
+set -o pipefail
 
 install_claude_cli() {
     # Always install to ~/.local to avoid /usr/local being overridden
@@ -18,8 +21,18 @@ install_claude_cli() {
     mkdir -p "$HOME/.local"
     npm config set prefix "$HOME/.local" 2>/dev/null || true
 
+    # Some environments (corporate proxies, WSL) present a TLS chain npm
+    # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
+    # configured CA bundle (see rc_files/zsh/.zshrc) so npm can verify the
+    # proxy's cert instead of failing closed (or silently serving a stale
+    # cached version).
+    local -a NPM_TLS_FLAGS=()
+    if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f "${NODE_EXTRA_CA_CERTS}" ]; then
+        NPM_TLS_FLAGS+=(--cafile "${NODE_EXTRA_CA_CERTS}")
+    fi
+
     local latest
-    latest=$(npm view @anthropic-ai/claude-code version 2>/dev/null || echo "")
+    latest=$(npm view "${NPM_TLS_FLAGS[@]}" @anthropic-ai/claude-code version 2>/dev/null || echo "")
     if [ -z "$latest" ]; then
         echo "⚠️  Could not fetch latest version from npm — check network"
         return 1
@@ -27,7 +40,7 @@ install_claude_cli() {
 
     if command -v claude &>/dev/null; then
         local current
-        current=$(claude --version 2>/dev/null || echo "")
+        current=$(claude --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "")
         if [ "$current" = "$latest" ]; then
             echo "✓ Claude Code CLI already at latest ($current)"
             return 0
@@ -37,9 +50,35 @@ install_claude_cli() {
         echo "📦 Installing Claude Code CLI v${latest}..."
     fi
 
-    npm install -g "@anthropic-ai/claude-code@latest" 2>&1 | tail -1
+    # A prior native (non-npm) install manages ~/.local/bin/claude as a
+    # symlink into ~/.local/share/claude/versions/<ver> (see ~/.claude.json's
+    # "installMethod": "native"). npm's bin-linker refuses to clobber a link
+    # it doesn't own, failing with EEXIST. Since this script manages the CLI
+    # via npm, clear a foreign link so npm can (re)create its own.
+    if [ -L "$HOME/.local/bin/claude" ]; then
+        local link_target
+        link_target=$(readlink -f "$HOME/.local/bin/claude" 2>/dev/null || echo "")
+        case "$link_target" in
+            "$HOME"/.local/lib/node_modules/*) ;;
+            *)
+                echo "ℹ️  Removing non-npm claude link ($HOME/.local/bin/claude → $link_target)"
+                rm -f "$HOME/.local/bin/claude"
+                ;;
+        esac
+    fi
+
+    if ! npm install -g "${NPM_TLS_FLAGS[@]}" "@anthropic-ai/claude-code@latest" 2>&1 | tail -1; then
+        echo "⚠️  npm install failed — see above"
+        return 1
+    fi
 
     if [ -x "$HOME/.local/bin/claude" ]; then
+        local installed
+        installed=$(claude --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "")
+        if [ "$installed" != "$latest" ]; then
+            echo "⚠️  Claude CLI at ~/.local/bin/claude is still $installed, not $latest — install may have silently failed"
+            return 1
+        fi
         echo "✓ Claude Code CLI $(claude --version 2>/dev/null) installed at ~/.local/bin/claude"
         return 0
     fi

@@ -18,6 +18,9 @@
 #   - ~/.codex.config.toml.template deployed by rc_files/install.sh (stow)
 
 set -e
+# Without pipefail, `npm install ... | tail -1` always reports tail's exit
+# code (0), so a real npm failure would be silently treated as success.
+set -o pipefail
 
 CODEX_CONFIG="$HOME/.codex/config.toml"
 CODEX_TEMPLATE="$HOME/.codex.config.toml.template"
@@ -26,8 +29,17 @@ install_codex_cli() {
     mkdir -p "$HOME/.local"
     npm config set prefix "$HOME/.local" 2>/dev/null || true
 
+    # Some environments (corporate proxies, WSL) present a TLS chain npm
+    # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
+    # configured CA bundle (see rc_files/zsh/.zshrc) so npm can verify the
+    # proxy's cert instead of failing closed.
+    local -a NPM_TLS_FLAGS=()
+    if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f "${NODE_EXTRA_CA_CERTS}" ]; then
+        NPM_TLS_FLAGS+=(--cafile "${NODE_EXTRA_CA_CERTS}")
+    fi
+
     local latest
-    latest=$(npm view @openai/codex version 2>/dev/null || echo "")
+    latest=$(npm view "${NPM_TLS_FLAGS[@]}" @openai/codex version 2>/dev/null || echo "")
     if [ -z "$latest" ]; then
         echo "⚠️  Could not fetch latest version from npm — check network"
         return 1
@@ -45,10 +57,19 @@ install_codex_cli() {
         echo "📦 Installing Codex CLI v${latest}..."
     fi
 
-    npm install -g "@openai/codex@latest" 2>&1 | tail -1
+    if ! npm install -g "${NPM_TLS_FLAGS[@]}" "@openai/codex@latest" 2>&1 | tail -1; then
+        echo "⚠️  npm install failed — see above"
+        return 1
+    fi
 
     if [ -x "$HOME/.local/bin/codex" ]; then
-        echo "✓ Codex CLI $(codex --version 2>/dev/null) installed at ~/.local/bin/codex"
+        local installed
+        installed=$(codex --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "")
+        if [ "$installed" != "$latest" ]; then
+            echo "⚠️  Codex CLI at ~/.local/bin/codex is still $installed, not $latest — install may have silently failed"
+            return 1
+        fi
+        echo "✓ Codex CLI $installed installed at ~/.local/bin/codex"
         return 0
     fi
     echo "⚠️  Codex CLI not found after install — check npm prefix"
