@@ -89,7 +89,10 @@ find_persistent_root() {
     echo ""
 }
 
-# Setup SSH keys from persistent storage
+# Setup SSH keys from persistent storage. GitHub host-key trust (the
+# ssh.github.com:443 redirect this network needs) is handled declaratively by
+# rc_files' ~/.ssh/config (StrictHostKeyChecking accept-new on the github.com
+# block) once it's stowed, so it doesn't need any imperative setup here.
 setup_ssh() {
     local persistent_root="$1"
 
@@ -115,8 +118,6 @@ setup_ssh() {
     # Lock down private keys; public pairs (*.pub) stay world-readable.
     chmod 600 ~/.ssh/id_* 2>/dev/null || true
     chmod 644 ~/.ssh/id_*.pub 2>/dev/null || true
-    ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
-    ssh-keyscan -p 443 -t rsa,ed25519 ssh.github.com >> ~/.ssh/known_hosts 2>/dev/null || true
     echo "✓ SSH keys configured"
 }
 
@@ -166,7 +167,7 @@ fix_hostname() {
     local ip
     ip=$(hostname -I 2>/dev/null | cut -d' ' -f1)
     if [ -n "$ip" ]; then
-        echo "$ip $HOSTNAME" | sudo -h 127.0.0.1 tee -a /etc/hosts >/dev/null 2>&1 || true
+        echo "$ip $HOSTNAME" | sudo tee -a /etc/hosts >/dev/null 2>&1 || true
     fi
 }
 
