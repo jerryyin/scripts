@@ -96,6 +96,12 @@ if [ ! -d rc_files ]; then
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
 
+# Node.js bundles its own CA store and ignores the system one, so it can't
+# verify TLS through a corporate TLS-inspecting proxy even after
+# update-ca-certificates trusts it system-wide (see lib/ for why). Needed
+# below for install.sh's coc.nvim npm install and claude.sh/codex.sh; sourced
+# from rc_files (just cloned above) rather than duplicated here.
+. rc_files/lib/node-ca-cert.sh
 bash rc_files/install.sh
 
 # Clone scripts
