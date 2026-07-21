@@ -66,9 +66,16 @@ setup_workspace() {
     if [ -z "$PERSISTENT_ROOT" ]; then
         echo "   No persistent storage found - cloning from GitHub..."
         cd "$HOME"
-        git clone "$GITHUB_URL" "$PROJECT_NAME"
+        # No persistent storage means no SSH keys either (priv.sh, which
+        # syncs them, only has something to sync when persistent storage is
+        # present). rc_files' ~/.gitconfig rewrites every https://github.com/
+        # URL to SSH (so an interactive container automatically uses the
+        # synced personal key), which would otherwise defeat this exact
+        # fallback. Bypass the global gitconfig for just this clone so the
+        # plain-HTTPS path actually stays HTTPS.
+        GIT_CONFIG_GLOBAL=/dev/null git clone "$GITHUB_URL" "$PROJECT_NAME"
         cd "$PROJECT_NAME"
-        [ -n "$USE_SUBMODULES" ] && git submodule update --init
+        [ -n "$USE_SUBMODULES" ] && GIT_CONFIG_GLOBAL=/dev/null git submodule update --init
         git remote set-url origin "$SSH_URL"
 
     # Case 2: Persistent storage exists - use reference clone
