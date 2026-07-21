@@ -1,50 +1,25 @@
 #!/bin/bash
-# Generic workspace setup for ephemeral pods
+# git_workspace.sh - Generic ephemeral workspace cloning, shared by
+# workspace/triton.sh and workspace/iree.sh
 #
-# Usage: setup_workspace <project_name> <github_url> [--submodules]
+# Library only: source this, then call setup_workspace. Not meant to be run
+# directly -- see workspace/triton.sh, workspace/iree.sh for real usage.
+#
+# setup_workspace <project_name> <github_url> [--submodules]
 #   project_name: Name of the project (e.g., "iree", "triton")
 #   github_url:   GitHub clone URL (e.g., "https://github.com/iree-org/iree.git")
 #   --submodules: Optional flag to initialize git submodules
 #
 # Purely handles cloning (with persistent-reference reuse when available).
 # Anything project-specific is the wrapper script's job, added after calling
-# setup_workspace (see workspace/triton.sh, workspace/iree.sh).
+# setup_workspace.
 
 set -e
 
-# Find persistent storage root if available
-# Looks for a mounted home directory at the root level by detecting home-like markers
-find_persistent_root() {
-    # Strategy 1: Try username-based paths first
-    local username
-    username=$(id -un 2>/dev/null || whoami 2>/dev/null || echo "")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    if [ -n "$username" ] && [ -d "/$username" ] && [ "/$username" != "/root" ] && [ "/$username" != "/home" ]; then
-        echo "/$username"
-        return 0
-    fi
-
-    # Strategy 2: Scan root-level directories for home-like markers
-    # (mounted home dirs typically have .bashrc, .ssh, rc_files, scripts, etc.)
-    for candidate in /*/; do
-        candidate="${candidate%/}"  # Remove trailing slash
-
-        # Skip system directories
-        case "$candidate" in
-            /bin|/boot|/dev|/etc|/home|/lib*|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/data|/ffm|/tools|/snap)
-                continue
-                ;;
-        esac
-
-        # Check for home directory markers
-        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ] || [ -d "$candidate/scripts" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    echo ""
-}
+# Find the persistent storage root (mounted host home or PVC)
+. "$SCRIPT_DIR/find_persistent_root.sh"
 
 # Convert HTTPS URL to SSH URL
 https_to_ssh() {
@@ -154,8 +129,3 @@ setup_workspace() {
     echo "     the pod stops. Commit and push your changes regularly!"
     echo "════════════════════════════════════════════════════════════════"
 }
-
-# If script is executed directly (not sourced), run with provided arguments
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    setup_workspace "$@"
-fi

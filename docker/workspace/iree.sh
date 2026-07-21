@@ -8,7 +8,7 @@ if [ -d "$HOME/iree" ]; then
     exit 0
 fi
 
-source "$HOME/scripts/docker/workspace/base.sh"
+source "$HOME/scripts/docker/lib/git_workspace.sh"
 setup_workspace "iree" "https://github.com/iree-org/iree.git" --submodules
 
 # IREE-specific setup (runs after clone, in $HOME/iree)
