@@ -13,6 +13,7 @@
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
 #        - vault.sh claude (vault -> ~/.claude.json)
 #        - vault.sh docker (vault -> ~/.docker/config.json)
+#        - vault.sh atlartifactory (vault -> ~/.netrc)
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -212,6 +213,7 @@ runtime_patches() {
     bash "$SCRIPT_DIR/credentials.sh"
     bash "$SCRIPT_DIR/vault.sh" claude
     bash "$SCRIPT_DIR/vault.sh" docker
+    bash "$SCRIPT_DIR/vault.sh" atlartifactory
 }
 
 main() {

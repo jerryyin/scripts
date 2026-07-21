@@ -1,13 +1,15 @@
 #!/bin/bash
-# vault.sh - Patch local config files from vault-managed placeholders.
+# vault.sh - Patch local config files from vault-managed secrets.
 #
 # Usage:
 #   vault.sh claude [--status]
 #   vault.sh docker [--status]
+#   vault.sh atlartifactory [--status]
 #
-# Each profile has the same shape:
-#   config.template in rc_files -> config file in $HOME -> placeholder replaced
-#   by the matching plaintext secret from ~/vault.
+# claude/docker share one shape: config.template in rc_files -> config file in
+# $HOME -> placeholder replaced by the matching plaintext secret from ~/vault.
+# atlartifactory instead patches a marker-delimited block into ~/.netrc (see
+# patch_netrc), since there's no rc_files template for that file.
 
 set -e
 
@@ -21,9 +23,10 @@ if [ -n "$MODE" ]; then
 fi
 
 usage() {
-    echo "Usage: vault.sh <claude|docker> [--status]"
+    echo "Usage: vault.sh <claude|docker|atlartifactory> [--status]"
     echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
+    echo "  atlartifactory     Patch ~/.netrc with an atlartifactory.amd.com entry"
     echo "  --status           Show non-secret status"
 }
 
@@ -49,6 +52,17 @@ configure_profile() {
             PLACEHOLDER="${DOCKER_PLACEHOLDER:-__DOCKER_KEY__}"
             DESCRIPTION="Docker auth for $DOCKER_REGISTRY"
             ;;
+        atlartifactory)
+            NETRC_HOST="${NETRC_HOST:-atlartifactory.amd.com}"
+            # The token authenticates via Basic auth regardless of username
+            # (it's a JFrog identity token, not a password tied to an
+            # account), but curl/wget's .netrc parsing still requires some
+            # login value to be present.
+            NETRC_LOGIN="${NETRC_LOGIN:-$(id -un 2>/dev/null || whoami)}"
+            CONFIG_FILE="$HOME/.netrc"
+            SECRET_FILE="${ARTIFACTORY_KEY_FILE:-$HOME/vault/atlartifactory_token.txt}"
+            DESCRIPTION="Artifactory identity token for $NETRC_HOST"
+            ;;
         *)
             usage
             exit 1
@@ -61,7 +75,7 @@ validate_secret() {
     local decoded username password
 
     case "$PROFILE" in
-        claude)
+        claude|atlartifactory)
             [ -n "$secret" ]
             ;;
         docker)
@@ -112,11 +126,56 @@ patch_config() {
     fi
 }
 
+# Unlike patch_config's claude/docker profiles, there's no rc_files template
+# to seed from -- ~/.netrc is a plain credential file a user may already
+# have entries in for other hosts, so this only ever touches its own
+# marker-delimited block (safe to re-run on secret rotation).
+patch_netrc() {
+    if [ ! -f "$SECRET_FILE" ]; then
+        echo "Warning: $SECRET_FILE not found; vault not synced yet"
+        echo "Run priv.sh to sync vault, then re-run this script."
+        return 0
+    fi
+
+    local secret
+    secret=$(tr -d '[:space:]' < "$SECRET_FILE")
+    if ! validate_secret "$secret"; then
+        echo "Warning: $SECRET_FILE is not a valid $DESCRIPTION value"
+        return 0
+    fi
+
+    local marker_begin="# >>> vault: $NETRC_HOST >>>"
+    local marker_end="# <<< vault: $NETRC_HOST <<<"
+
+    touch "$CONFIG_FILE"
+    awk -v b="$marker_begin" -v e="$marker_end" '
+        $0 == b { skip=1; next }
+        $0 == e { skip=0; next }
+        !skip { print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+
+    {
+        cat "$CONFIG_FILE.tmp"
+        echo "$marker_begin"
+        echo "machine $NETRC_HOST"
+        echo "login $NETRC_LOGIN"
+        echo "password $secret"
+        echo "$marker_end"
+    } > "$CONFIG_FILE"
+    rm -f "$CONFIG_FILE.tmp"
+    chmod 600 "$CONFIG_FILE"
+    echo "Patched $DESCRIPTION into $CONFIG_FILE"
+}
+
 show_status() {
     local config_state="missing"
     local secret_state="missing"
 
-    if [ -f "$CONFIG_FILE" ]; then
+    if [ "$PROFILE" = "atlartifactory" ]; then
+        if [ -f "$CONFIG_FILE" ] && grep -qF "machine $NETRC_HOST" "$CONFIG_FILE" 2>/dev/null; then
+            config_state="configured"
+        fi
+    elif [ -f "$CONFIG_FILE" ]; then
         if grep -Fq "$PLACEHOLDER" "$CONFIG_FILE"; then
             config_state="template-placeholder"
         elif [ "$PROFILE" = "docker" ] && have_jq \
@@ -132,7 +191,7 @@ show_status() {
 
     echo "Profile:      $PROFILE"
     echo "Config file:  $CONFIG_FILE ($config_state)"
-    echo "Template:     $TEMPLATE_FILE"
+    [ "$PROFILE" = "atlartifactory" ] || echo "Template:     $TEMPLATE_FILE"
     echo "Vault secret: $SECRET_FILE ($secret_state)"
 }
 
@@ -145,7 +204,11 @@ configure_profile
 
 case "$MODE" in
     "")
-        patch_config
+        if [ "$PROFILE" = "atlartifactory" ]; then
+            patch_netrc
+        else
+            patch_config
+        fi
         ;;
     --status)
         show_status
