@@ -54,41 +54,8 @@ vault_available() {
     [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]
 }
 
-# Find the persistent storage root (same logic as credentials.sh)
-find_persistent_root() {
-    local username
-    username=$(id -un 2>/dev/null || whoami 2>/dev/null || echo "")
-
-    # Strategy 1: Try username-based paths (Kubernetes pattern: /{username})
-    if [ -n "$username" ] && [ -d "/$username" ] && [ "/$username" != "/root" ] && [ "/$username" != "/home" ]; then
-        echo "/$username"
-        return 0
-    fi
-
-    # Strategy 2: Check for common Docker mount patterns
-    for candidate in /zyin /host_home /persistent; do
-        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    # Strategy 3: Scan root-level directories for home-like markers
-    for candidate in /*/; do
-        candidate="${candidate%/}"
-        case "$candidate" in
-            /bin|/boot|/dev|/etc|/home|/lib*|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/data|/ffm|/tools|/snap)
-                continue
-                ;;
-        esac
-        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ] || [ -d "$candidate/scripts" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    echo ""
-}
+# Find the persistent storage root (mounted host home or PVC)
+. "$SCRIPT_DIR/../lib/find_persistent_root.sh"
 
 # Setup SSH keys from persistent storage. GitHub host-key trust (the
 # ssh.github.com:443 redirect this network needs) is handled declaratively by

@@ -28,6 +28,8 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Credential paths relative to home directory.
 #
 # This list is for runtime-authenticated SECRETS (OAuth / login tokens that are
@@ -45,40 +47,7 @@ CREDENTIAL_PATHS=(
 )
 
 # Find the persistent storage root (mounted host home or PVC)
-find_persistent_root() {
-    local username
-    username=$(id -un 2>/dev/null || whoami 2>/dev/null || echo "")
-
-    # Strategy 1: Try username-based paths (Kubernetes pattern: /{username})
-    if [ -n "$username" ] && [ -d "/$username" ] && [ "/$username" != "/root" ] && [ "/$username" != "/home" ]; then
-        echo "/$username"
-        return 0
-    fi
-
-    # Strategy 2: Check for common Docker mount patterns
-    for candidate in /zyin /host_home /persistent; do
-        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    # Strategy 3: Scan root-level directories for home-like markers
-    for candidate in /*/; do
-        candidate="${candidate%/}"
-        case "$candidate" in
-            /bin|/boot|/dev|/etc|/home|/lib*|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/data|/ffm|/tools|/snap)
-                continue
-                ;;
-        esac
-        if [ -d "$candidate/.ssh" ] || [ -d "$candidate/rc_files" ] || [ -d "$candidate/scripts" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    echo ""
-}
+. "$SCRIPT_DIR/../lib/find_persistent_root.sh"
 
 # Check if a credential exists at a path (file or non-empty directory)
 credential_exists() {
