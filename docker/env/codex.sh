@@ -32,7 +32,12 @@ install_codex_cli() {
     # Some environments (corporate proxies, WSL) present a TLS chain npm
     # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
     # configured CA bundle (see rc_files/zsh/.zshrc) so npm can verify the
-    # proxy's cert instead of failing closed.
+    # proxy's cert instead of failing closed. Self-sufficient here (doesn't
+    # assume min.sh already set this) since this script can run standalone;
+    # no-ops if rc_files hasn't been cloned yet.
+    if [ -f "$HOME/rc_files/lib/node-ca-cert.sh" ]; then
+        . "$HOME/rc_files/lib/node-ca-cert.sh"
+    fi
     local -a NPM_TLS_FLAGS=()
     if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f "${NODE_EXTRA_CA_CERTS}" ]; then
         NPM_TLS_FLAGS+=(--cafile "${NODE_EXTRA_CA_CERTS}")

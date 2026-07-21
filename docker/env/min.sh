@@ -1,6 +1,8 @@
 #!/bin/bash
 set -x
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # On a freshly-imaged/rebooted bare-metal host, systemd's automatic update
 # timers (unattended-upgrades, apt-daily) can be mid-run and hold the dpkg
 # lock for a long time. apt-get's own "Waiting for cache lock" retry is easy
@@ -36,10 +38,21 @@ wait_for_dpkg_lock() {
 # Delete rocm sources if any, they tend to cause problem with apt update
 #find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
 # Re-import gpg key to not have warnings all over the place
-curl -fsSL --max-time 30 https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/rocm.gpg
+# --batch --no-tty: non-interactive invocations (e.g. this script run from an
+# IDE/CI agent with no controlling terminal) otherwise hit
+# "gpg: cannot open '/dev/tty': No such device or address" as gpg tries to
+# open a tty for its default (interactive) status/prompt path.
+curl -fsSL --max-time 30 https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --batch --yes --no-tty --dearmor -o /etc/apt/trusted.gpg.d/rocm.gpg
 
 wait_for_dpkg_lock
-sudo apt-get update && sudo apt-get -y install sudo software-properties-common apt-utils curl
+# Deliberately not `update && install`: a fetch error from some unrelated
+# repo (e.g. a stale AMD mirror pin) can make `apt-get update` exit non-zero
+# even though the indices this install actually needs are fine. Chaining on
+# that exit code would silently skip installing sudo/curl/etc. Run update
+# best-effort, then always attempt the install against whatever cache we do
+# have -- same pattern as every other apt call below.
+sudo apt-get update
+sudo apt-get -y install sudo software-properties-common apt-utils curl
 
 # Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
 if ! grep -q "$HOSTNAME" /etc/hosts; then
@@ -69,23 +82,12 @@ CODENAME=$(lsb_release -sc 2>/dev/null || . /etc/os-release && echo "$VERSION_CO
 
 add_ppa_if_available ppa:jonathonf/vim
 add_ppa_if_available ppa:neovim-ppa/stable
-# setup nodejs. The NodeSource script runs its own internal apt-get update,
-# which is exactly the kind of step that can hang on a lock held by a
-# concurrent background process -- wait for the lock first, then bound the
-# whole thing so a genuine network stall fails loud instead of hanging
-# forever.
-wait_for_dpkg_lock
-curl -fsSL --max-time 30 https://deb.nodesource.com/setup_current.x | timeout 300 sudo -E bash -
 
 wait_for_dpkg_lock
 # Install misc pkgs (For macos: the_silver_searcher)
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow nodejs neovim vim wget \
+     git zsh fonts-powerline tmux silversearcher-ag less stow neovim vim wget \
      python-is-python3 gdb gist openssh-client
-# NodeSource nodejs replaces Ubuntu's nodejs+libnode+node-* ecosystem in a single
-# transaction, leaving nodejs with zero reverse-deps. apt then considers it
-# "auto-installed" and apt autoremove will purge it. Mark it manual.
-sudo apt-mark manual nodejs
 
 # rc files. Clone once, but ALWAYS re-run install.sh: it is idempotent (stow -R,
 # backs up real-file conflicts) and is what re-heals a partial prior setup — e.g.
@@ -96,12 +98,17 @@ if [ ! -d rc_files ]; then
     git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
 
-# Node.js bundles its own CA store and ignores the system one, so it can't
-# verify TLS through a corporate TLS-inspecting proxy even after
-# update-ca-certificates trusts it system-wide (see lib/ for why). Needed
-# below for install.sh's coc.nvim npm install and claude.sh/codex.sh; sourced
-# from rc_files (just cloned above) rather than duplicated here.
-. rc_files/lib/node-ca-cert.sh
+# Everything Node-related (NodeSource repo setup, version guard, the
+# apt-fetch-error shielding workaround, and the final version verification)
+# lives in node.sh so it can be reasoned about/tested on its own. Must run
+# before rc_files/install.sh below: its coc.nvim extensions step checks
+# `command -v npm` and silently skips (soft warning, not a failure) if node
+# isn't installed yet.
+bash "$SCRIPT_DIR/node.sh"
+
+# install.sh, claude.sh, and codex.sh each self-sufficiently source
+# rc_files/lib/node-ca-cert.sh (Node's corporate-TLS-proxy CA workaround)
+# right before they run npm, so nothing needs to be pre-sourced here.
 bash rc_files/install.sh
 
 # Clone scripts
@@ -123,9 +130,9 @@ fi
 wait_for_dpkg_lock
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
-# Sibling scripts in the same env/ dir: install CLIs and best-effort config.
-# priv.sh handles runtime credential/config sync once host storage is mounted.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Sibling scripts in the same env/ dir (SCRIPT_DIR set above): install CLIs
+# and best-effort config. priv.sh handles runtime credential/config sync
+# once host storage is mounted.
 bash "$SCRIPT_DIR/claude.sh"
 bash "$SCRIPT_DIR/codex.sh"
 bash "$SCRIPT_DIR/gh.sh"
