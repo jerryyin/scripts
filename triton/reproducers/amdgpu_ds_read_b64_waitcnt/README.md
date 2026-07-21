@@ -1,8 +1,18 @@
-# gfx950 `ds_read_b64` LDS/MFMA race — backend handoff
+# gfx950 `ds_read_b64` LDS/MFMA race — ROOT CAUSE CONFIRMED
 
 A gfx950 (CDNA4) `convert_layout` through LDS produces run-to-run nondeterministic
 output when its reads are lowered to contiguous **`ds_read_b64`** and compiled at
 `-O3`. The micro-dot kernel reproduces this in ~600 lines.
+
+**Root cause is confirmed, not open — see [`ROOT_CAUSE.md`](ROOT_CAUSE.md).**
+It is a silicon defect: an MFMA source-operand cache-hit wrongly suppresses a
+*co-executing* `v_pk_*`'s own VGPR read (stale operand), not a `ds_read_b64`
+LDS-read race as originally suspected. Localized in software to the exact
+victim instruction (oracle-free, no RTL/chicken-bit access) and independently
+confirmed with the `SQ_CONFIG1.DISABLE_SP_MFMA_SRCAB_VGPR_READ_SKIP` hardware
+chicken bit. The reusable methodology is distilled in the `hw-rtl-root-cause`
+Claude Code skill (`~/rc_files/claude/.claude/skills/hw-rtl-root-cause/SKILL.md`
+— tracked in the dotfiles repo, not here).
 
 Paste-ready ticket: [`ISSUE.md`](ISSUE.md).
 
@@ -47,6 +57,12 @@ A pure read-only asm edit (changing only the read instruction, leaving the write
 layout) still races — i.e. the read mnemonic alone is not the variable; the
 contiguous access pattern with its matching write layout is.
 
+**Update:** this correlation (which read lowering/opt-level triggers it) is a
+*symptom*, not the mechanism — see [`ROOT_CAUSE.md`](ROOT_CAUSE.md) for why: the
+actual defect fires on an MFMA operand-cache hit corrupting a co-executing
+`v_pk`, and the `-O3`/`ds_read_b64` codegen shape is simply what puts the two
+close enough together to co-execute at full occupancy.
+
 ## Files
 
 ```text
@@ -63,11 +79,17 @@ asm/B_racy_O3.s                 inspection intermediate (races)
 asm/C_stable_O3.s               inspection intermediate (stable)
 asm/knob.s                      compiled knob
 archive/                        history (older drafts, notes)
+ROOT_CAUSE.md                   the confirmed root cause: localization method + chicken-bit confirmation
+sq_config1_mfma_srcab_read_skip.py   SQ_CONFIG1 chicken-bit read/toggle/restore tool used for confirmation
 ```
 
-## Attention knob (optional, de-emphasized)
+## The flash-attention repro (no longer a "knob" — this is where root cause was found)
 
-A flash-attention kernel is kept only as a private knob to test — not part of the
-base case. `./reproduce.sh attn` builds `ir/attn_fwd.ll` / `ir/attn_fwd_strided.ll`
-and runs the pair. Files: `ir/attn_fwd*.ll`, `ir/attn_fwd.ttgir`,
-`asm/attn_fwd.*.s`, `driver_attn.cpp`.
+The micro-dot above is minimal but its race is *fragile*: 2 added instructions
+mask it, which makes it useless for black-box software isolation (only good
+for handing to an RTL owner). The real flash-attention kernel's race is
+*robust* (survives 16 injected `v_nop`s), which is what let root-cause
+localization happen without RTL/chicken-bit access — see
+[`ROOT_CAUSE.md`](ROOT_CAUSE.md). `./reproduce.sh attn` builds
+`ir/attn_fwd.ll` / `ir/attn_fwd_strided.ll` and runs the pair; files:
+`ir/attn_fwd*.ll`, `ir/attn_fwd.ttgir`, `asm/attn_fwd.*.s`, `driver_attn.cpp`.
