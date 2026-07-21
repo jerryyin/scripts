@@ -7,7 +7,11 @@
 # driver in one pass:
 #
 #   1. Seed a GitHub/vault-capable SSH keypair on the target, copied from a
-#      known-good source host (default: smci355).
+#      known-good source host (default: smci355). If that source host also
+#      has an id_enterprise keypair (Enterprise GitHub identity, used as
+#      `github-e` in ~/.ssh/config for private AMD-Triton repos etc.), it's
+#      seeded too. Everything comes from the one source host, so all targets
+#      end up with a consistent, uniform set of keys.
 #   2. Clone rc_files + scripts on the target over SSH (using that seeded
 #      key) -- or pull latest if they're already there from a prior run.
 #   3. Run env/min.sh: installs base packages, stows rc_files (dotfiles),
@@ -99,14 +103,30 @@ if [[ -z "$KEY_NAME" ]]; then
     exit 1
 fi
 
+# KEY_NAMES holds base names (no .pub) of every keypair to seed on targets.
+# KEY_NAME (the git-capable key) is always first/required; id_enterprise is
+# appended too if the source host happens to have it.
+KEY_NAMES=("$KEY_NAME")
+if ssh "${SSH_OPTS[@]}" "$SOURCE_KEY_HOST" "test -f ~/.ssh/id_enterprise && test -f ~/.ssh/id_enterprise.pub" 2>/dev/null; then
+    KEY_NAMES+=("id_enterprise")
+else
+    echo "⚠️  No id_enterprise(.pub) on $SOURCE_KEY_HOST — skipping enterprise-key seeding"
+fi
+
 TMP_KEY_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_KEY_DIR"' EXIT
-if ! scp "${SSH_OPTS[@]}" "$SOURCE_KEY_HOST:~/.ssh/$KEY_NAME" "$SOURCE_KEY_HOST:~/.ssh/$KEY_NAME.pub" "$TMP_KEY_DIR/" >/dev/null; then
-    echo "❌ Failed to copy $KEY_NAME(.pub) from $SOURCE_KEY_HOST" >&2
+SRC_FILES=()
+for name in "${KEY_NAMES[@]}"; do
+    SRC_FILES+=("$SOURCE_KEY_HOST:~/.ssh/$name" "$SOURCE_KEY_HOST:~/.ssh/$name.pub")
+done
+if ! scp "${SSH_OPTS[@]}" "${SRC_FILES[@]}" "$TMP_KEY_DIR/" >/dev/null; then
+    echo "❌ Failed to copy ${KEY_NAMES[*]} from $SOURCE_KEY_HOST" >&2
     exit 1
 fi
-chmod 600 "$TMP_KEY_DIR/$KEY_NAME"
-echo "✓ Got $KEY_NAME from $SOURCE_KEY_HOST"
+for name in "${KEY_NAMES[@]}"; do
+    chmod 600 "$TMP_KEY_DIR/$name"
+done
+echo "✓ Got ${KEY_NAMES[*]} from $SOURCE_KEY_HOST"
 
 FAILED=()
 OK=()
@@ -123,23 +143,38 @@ for host in "${HOSTS[@]}"; do
         continue
     fi
 
-    echo "📤 Seeding SSH keypair ($KEY_NAME)..."
+    echo "📤 Seeding SSH keypair(s): ${KEY_NAMES[*]}..."
+    SEED_FILES=""
+    for name in "${KEY_NAMES[@]}"; do
+        SEED_FILES+="$name $name.pub "
+    done
     ssh "${SSH_OPTS[@]}" "$host" '
         set -e
         mkdir -p ~/.ssh && chmod 700 ~/.ssh
-        for f in "'"$KEY_NAME"'" "'"$KEY_NAME"'.pub"; do
+        for f in '"$SEED_FILES"'; do
             if [ -f "$HOME/.ssh/$f" ] && [ ! -L "$HOME/.ssh/$f" ]; then
                 mv "$HOME/.ssh/$f" "$HOME/.ssh/$f.bak.$(date +%s)"
             fi
         done
     '
-    if ! scp "${SSH_OPTS[@]}" "$TMP_KEY_DIR/$KEY_NAME" "$TMP_KEY_DIR/$KEY_NAME.pub" "$host:~/.ssh/" >/dev/null; then
-        echo "❌ Failed to copy keypair to $host"
+    SCP_FILES=()
+    for name in "${KEY_NAMES[@]}"; do
+        SCP_FILES+=("$TMP_KEY_DIR/$name" "$TMP_KEY_DIR/$name.pub")
+    done
+    if ! scp "${SSH_OPTS[@]}" "${SCP_FILES[@]}" "$host:~/.ssh/" >/dev/null; then
+        echo "❌ Failed to copy keypair(s) to $host"
         FAILED+=("$host")
         continue
     fi
-    ssh "${SSH_OPTS[@]}" "$host" "chmod 600 ~/.ssh/$KEY_NAME && chmod 644 ~/.ssh/$KEY_NAME.pub"
-    echo "✓ Keypair in place on $host"
+    ssh "${SSH_OPTS[@]}" "$host" '
+        for f in '"$SEED_FILES"'; do
+            case "$f" in
+                *.pub) chmod 644 "$HOME/.ssh/$f" ;;
+                *) chmod 600 "$HOME/.ssh/$f" ;;
+            esac
+        done
+    '
+    echo "✓ Keypair(s) in place on $host"
 
     # rc_files' own ~/.ssh/config (which sets StrictHostKeyChecking accept-new
     # for github.com) doesn't exist on the host until rc_files itself is
