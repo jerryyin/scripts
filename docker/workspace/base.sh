@@ -6,60 +6,11 @@
 #   github_url:   GitHub clone URL (e.g., "https://github.com/iree-org/iree.git")
 #   --submodules: Optional flag to initialize git submodules
 #
-# Project-specific setup should be added after calling setup_workspace in the wrapper script.
+# Purely handles cloning (with persistent-reference reuse when available).
+# Anything project-specific is the wrapper script's job, added after calling
+# setup_workspace (see workspace/triton.sh, workspace/iree.sh).
 
 set -e
-
-CURSOR_RULES_SOURCE="$HOME/rc_files/cursor/.cursor/rules"
-
-# Setup Cursor AI assistant rules for a workspace
-# Links rules based on their globs pattern: **/* = universal, otherwise match project name
-# Uses hardlinks for better compatibility with Cursor's file watching
-setup_cursor_rules() {
-    local pattern="$1"
-    local workspace_dir="$2"
-
-    if [ -z "$pattern" ] || [ -z "$workspace_dir" ]; then
-        return 1
-    fi
-
-    if [ ! -d "$CURSOR_RULES_SOURCE" ]; then
-        echo "   ℹ️  No Cursor rules source found"
-        return 0
-    fi
-
-    local rules_dest="$workspace_dir/.cursor/rules"
-    mkdir -p "$rules_dest"
-
-    # Extract base project name (first segment before hyphen)
-    # e.g., "triton-mi450" -> "triton", "iree-turbine" -> "iree"
-    local base_pattern="${pattern%%-*}"
-
-    local count=0
-    for rule in "$CURSOR_RULES_SOURCE"/*.mdc; do
-        [ -e "$rule" ] || continue
-        local rulename
-        rulename=$(basename "$rule")
-
-        # Check if rule applies:
-        # 1. Universal glob (**/*) matches all projects
-        # 2. Rule filename contains project name (e.g., "iree" in "iree-turbine.mdc")
-        # 3. Rule filename contains base project name (e.g., "triton" matches "triton-ffm-development.mdc")
-        if grep -q '^globs:.*\*\*/\*' "$rule" || \
-           [[ "$rulename" == *"$pattern"* ]] || \
-           [[ "$rulename" == *"$base_pattern"* ]]; then
-            # Use hardlink for better Cursor compatibility (removes existing first)
-            rm -f "$rules_dest/$rulename"
-            ln "$rule" "$rules_dest/$rulename"
-            echo "   Linked Cursor rule: $rulename"
-            count=$((count + 1))
-        fi
-    done
-
-    if [ "$count" -eq 0 ]; then
-        echo "   ℹ️  No applicable Cursor rules found for '$pattern'"
-    fi
-}
 
 # Find persistent storage root if available
 # Looks for a mounted home directory at the root level by detecting home-like markers
@@ -184,10 +135,6 @@ setup_workspace() {
 
     # Common setup
     cd "$WORKSPACE_DIR"
-
-    # Hardlink Cursor rules (better Cursor compatibility than symlinks)
-    echo "   Linking Cursor rules..."
-    setup_cursor_rules "$PROJECT_NAME" "$WORKSPACE_DIR"
 
     # Print summary
     echo "✅ Ephemeral workspace created at ~/$PROJECT_NAME"

@@ -136,3 +136,8 @@ sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 bash "$SCRIPT_DIR/claude.sh"
 bash "$SCRIPT_DIR/codex.sh"
 bash "$SCRIPT_DIR/gh.sh"
+
+# Refresh Cursor AI assistant rules for any project workspaces that already
+# exist under $HOME (e.g. reused persistent storage). min.sh is the only
+# caller of cursor.sh -- see env/cursor.sh for why.
+bash "$SCRIPT_DIR/cursor.sh"
