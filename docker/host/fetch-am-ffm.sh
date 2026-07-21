@@ -28,7 +28,7 @@ TARBALL="$CACHE_DIR/${TARBALL_NAME}"
 
 if [ ! -f "$HOME/.netrc" ] || ! grep -q "machine atlartifactory.amd.com" "$HOME/.netrc" 2>/dev/null; then
     echo "❌ No atlartifactory.amd.com credentials in ~/.netrc." >&2
-    echo "   Run: bash $SCRIPT_DIR/env/vault.sh atlartifactory" >&2
+    echo "   Run: bash $SCRIPT_DIR/../env/vault.sh atlartifactory" >&2
     exit 1
 fi
 
