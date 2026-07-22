@@ -4,20 +4,48 @@
 # Conductor (https://conductor.amd.com) hands out bare-metal machines from a
 # pool; whichever one you land on next has none of your dotfiles, packages,
 # or credentials. This script makes any target host as ready as your daily
-# driver in one pass:
+# driver -- and it provisions every target HOST in parallel: each host's
+# work is one call to provision_host(), backgrounded, so N hosts take about
+# as long as one (instead of the orchestrator dictating each step to each
+# host in turn). Per-host output is prefixed "[host] " and also captured to
+# its own log file for later inspection.
 #
-#   1. Seed a GitHub/vault-capable SSH keypair on the target, copied from a
-#      known-good source host (default: smci355). If that source host also
-#      has an id_enterprise keypair (Enterprise GitHub identity, used as
-#      `github-e` in ~/.ssh/config for private AMD-Triton repos etc.), it's
-#      seeded too. Everything comes from the one source host, so all targets
-#      end up with a consistent, uniform set of keys.
-#   2. Clone rc_files + scripts on the target over SSH (using that seeded
-#      key) -- or pull latest if they're already there from a prior run.
-#   3. Run env/min.sh: installs base packages, stows rc_files (dotfiles),
-#      installs the AMD CA cert, and installs the Claude/Codex CLIs.
-#   4. Run env/priv.sh --force: SSH key + vault bootstrap, then
-#      credential/config runtime patches (vault.sh claude/docker).
+# Per host, provision_host() does 3 round trips total:
+#   1. ssh an inline one-liner that backs up ~/.ssh (whole dir, if it's
+#      there -- most freshly-reserved Conductor hosts have nothing to back
+#      up at all) and creates a fresh one. Also doubles as the reachability
+#      check.
+#   2. scp a GitHub/vault-capable SSH keypair in, copied from a known-good
+#      source host (default: smci355). If that source host also has an
+#      id_enterprise keypair (Enterprise GitHub identity, used as `github-e`
+#      in ~/.ssh/config for private AMD-Triton repos etc.), it's seeded too.
+#      Everything comes from the one source host, fetched once up front and
+#      reused for every target, so all targets end up with a consistent,
+#      uniform set of keys.
+#   3. scp remote-provision-host.sh over and ssh-run it, which chmod's the
+#      seeded keys, clones/updates rc_files + scripts, runs env/min.sh,
+#      env/priv.sh --force, and pulls Docker base images -- see that script
+#      for the full logic (including why the key backup above hands it an
+#      HTTPS-only bootstrap-clone problem to solve).
+#
+#   remote-provision-host.sh is a real, standalone script, not a heredoc
+#   string embedded in here, so it gets its own syntax highlighting/linting
+#   and can be tested/run independently. Self-deletes off the target host
+#   once it's run.
+#
+# Pulling base images (part of step 3) grabs the images the triton and triton-mi450
+# services build FROM (BASE_IMAGE build arg in rc_files' docker-compose.yml)
+# -- e.g. rocm/pytorch:latest and the mkmhub.amd.com gfx1250 image. This does
+# NOT build the jeryin/dev:triton(-mi450) service images themselves (those
+# are local-only tags built via `dbuild`/`docker compose build`, never
+# pushed to a registry) -- just pre-pulls what they'd build FROM, which is
+# the expensive, cacheable part. Requires env/priv.sh to have already
+# patched ~/.docker/config.json with mkmhub credentials. Resolved via
+# `docker compose config --format json` + python3's json module (real
+# structured parsing, not YAML text-scraping) -- there's no `docker compose`
+# subcommand that pulls a service's Dockerfile FROM image while skipping
+# the build; `compose pull` only pulls a service's tagged `image:`, which
+# for jeryin/dev:* is a local-only tag that's never been pushed anywhere.
 #
 # This assumes you can ALREADY `ssh user@target` once (i.e. your own key is
 # already registered in Conductor's key management for that reservation) --
@@ -37,11 +65,12 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REMOTE_PROVISION_SCRIPT="$SCRIPT_DIR/remote-provision-host.sh"
+
 SOURCE_KEY_HOST="smci355"
 HOSTS=()
 HOSTS_FILE=""
-RC_FILES_REPO="git@github.com:jerryyin/rc_files.git"
-SCRIPTS_REPO="git@github.com:jerryyin/scripts.git"
 
 usage() {
     cat <<'EOF'
@@ -88,6 +117,11 @@ if [[ ${#HOSTS[@]} -eq 0 ]]; then
     usage
 fi
 
+if [[ ! -f "$REMOTE_PROVISION_SCRIPT" ]]; then
+    echo "❌ Missing companion script: $REMOTE_PROVISION_SCRIPT" >&2
+    exit 1
+fi
+
 SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
 
 echo "🔑 Reading SSH keypair from $SOURCE_KEY_HOST..."
@@ -128,102 +162,108 @@ for name in "${KEY_NAMES[@]}"; do
 done
 echo "✓ Got ${KEY_NAMES[*]} from $SOURCE_KEY_HOST"
 
-FAILED=()
-OK=()
+SCP_FILES=()
+for name in "${KEY_NAMES[@]}"; do
+    SCP_FILES+=("$TMP_KEY_DIR/$name" "$TMP_KEY_DIR/$name.pub")
+done
 
-for host in "${HOSTS[@]}"; do
-    echo ""
+# Backs up ~/.ssh wholesale (not per-key-name) if it's there at all, then
+# creates a fresh one. Simple enough to be an inline ssh command rather
+# than its own file -- no arguments, nothing host-specific to interpolate.
+# Uses a single fixed backup name (~/.ssh.bak), not a timestamped one: most
+# provisioned machines start clean so this rarely even triggers, and a
+# host that gets re-provisioned repeatedly should still only ever keep the
+# one most-recent pre-provision snapshot, not pile up a new directory
+# every run.
+REMOTE_KEY_BACKUP_CMD='
+if [ -d ~/.ssh ] && [ ! -L ~/.ssh ]; then
+    rm -rf ~/.ssh.bak
+    mv ~/.ssh ~/.ssh.bak
+fi
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+'
+
+# Provisions a single host end to end. Meant to be run backgrounded (see the
+# launch loop below) so every host provisions concurrently; reads the
+# SSH_OPTS/KEY_NAMES/SCP_FILES/REMOTE_KEY_BACKUP_CMD/REMOTE_PROVISION_SCRIPT
+# globals set up above (shared, read-only from here on -- safe for
+# parallel subshells to read).
+#
+# The heavier remote-side logic lives in a real, standalone,
+# shellcheck-able file (remote-provision-host.sh) alongside this script,
+# not as a heredoc string embedded in here -- it gets scp'd over and run
+# with normal command-line arguments, same as running any other script.
+# Self-deletes (via its own EXIT trap) once it's run.
+provision_host() {
+    local host="$1"
+
     echo "════════════════════════════════════════════════════════════════"
     echo "  Provisioning: $host"
     echo "════════════════════════════════════════════════════════════════"
 
-    if ! ssh "${SSH_OPTS[@]}" "$host" "exit 0" 2>/dev/null; then
-        echo "❌ Cannot SSH to $host — skipping (check Conductor reservation/key)"
-        FAILED+=("$host")
-        continue
+    # Round trip 1: back up ~/.ssh if it's there, create a fresh one. Also
+    # doubles as the reachability check -- if ssh can't even connect, this
+    # fails fast.
+    if ! ssh "${SSH_OPTS[@]}" "$host" "$REMOTE_KEY_BACKUP_CMD"; then
+        echo "❌ Cannot reach/prepare $host — skipping (check Conductor reservation/key)"
+        return 1
     fi
 
-    echo "📤 Seeding SSH keypair(s): ${KEY_NAMES[*]}..."
-    SEED_FILES=""
-    for name in "${KEY_NAMES[@]}"; do
-        SEED_FILES+="$name $name.pub "
-    done
-    ssh "${SSH_OPTS[@]}" "$host" '
-        set -e
-        mkdir -p ~/.ssh && chmod 700 ~/.ssh
-        for f in '"$SEED_FILES"'; do
-            if [ -f "$HOME/.ssh/$f" ] && [ ! -L "$HOME/.ssh/$f" ]; then
-                mv "$HOME/.ssh/$f" "$HOME/.ssh/$f.bak.$(date +%s)"
-            fi
-        done
-    '
-    SCP_FILES=()
-    for name in "${KEY_NAMES[@]}"; do
-        SCP_FILES+=("$TMP_KEY_DIR/$name" "$TMP_KEY_DIR/$name.pub")
-    done
+    # Round trip 2: the actual key copy (scp, not ssh -- key material has to
+    # leave this machine, so it can't be folded into a remote-only script).
     if ! scp "${SSH_OPTS[@]}" "${SCP_FILES[@]}" "$host:~/.ssh/" >/dev/null; then
         echo "❌ Failed to copy keypair(s) to $host"
-        FAILED+=("$host")
-        continue
+        return 1
     fi
-    ssh "${SSH_OPTS[@]}" "$host" '
-        for f in '"$SEED_FILES"'; do
-            case "$f" in
-                *.pub) chmod 644 "$HOME/.ssh/$f" ;;
-                *) chmod 600 "$HOME/.ssh/$f" ;;
-            esac
-        done
-    '
-    echo "✓ Keypair(s) in place on $host"
+    echo "✓ Keypair(s) copied to $host"
 
-    # rc_files' own ~/.ssh/config (which sets StrictHostKeyChecking accept-new
-    # for github.com) doesn't exist on the host until rc_files itself is
-    # cloned -- chicken-and-egg -- so this bootstrap clone needs its own
-    # accept-new override. Every git/ssh call after this point (including
-    # priv.sh's vault clone) picks up accept-new for free once rc_files/install.sh
-    # stows that config below.
-    echo "📥 Cloning/updating rc_files + scripts on $host (via $KEY_NAME)..."
-    if ! ssh "${SSH_OPTS[@]}" "$host" '
-        set -e
-        export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/'"$KEY_NAME"' -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-        if [ -d "$HOME/rc_files/.git" ]; then
-            echo "  rc_files already present, pulling latest..."
-            git -C "$HOME/rc_files" pull --ff-only
-        else
-            echo "  cloning rc_files..."
-            git clone "'"$RC_FILES_REPO"'" "$HOME/rc_files"
-        fi
-        if [ -d "$HOME/scripts/.git" ]; then
-            echo "  scripts already present, pulling latest..."
-            git -C "$HOME/scripts" pull --ff-only
-        else
-            echo "  cloning scripts..."
-            git clone "'"$SCRIPTS_REPO"'" "$HOME/scripts"
-        fi
-    '; then
-        echo "❌ Failed to clone/update rc_files or scripts on $host"
-        FAILED+=("$host")
-        continue
+    # Round trip 3: ship remote-provision-host.sh over, then run it. It
+    # chmod's the keys, clones/updates rc_files + scripts, runs env/min.sh,
+    # env/priv.sh --force, and pulls base images -- see that script. -tt
+    # forces a real remote pty for min.sh/priv.sh even though this whole
+    # function's stdout is piped (not a terminal) on our end, since it's
+    # backgrounded for parallel execution.
+    if ! scp "${SSH_OPTS[@]}" "$REMOTE_PROVISION_SCRIPT" "$host:~/" >/dev/null; then
+        echo "❌ Failed to copy remote-provision-host.sh to $host"
+        return 1
     fi
-    echo "✓ rc_files + scripts up to date on $host"
-
-    echo "🚀 Running env/min.sh on $host (base packages, dotfiles, CLIs)..."
-    echo "────────────────────────────────────────────────────────────────"
-    if ! ssh -t "${SSH_OPTS[@]}" "$host" "cd ~ && bash ~/scripts/docker/env/min.sh"; then
-        echo "────────────────────────────────────────────────────────────────"
-        echo "❌ min.sh failed on $host"
-        FAILED+=("$host")
-        continue
-    fi
-    echo "────────────────────────────────────────────────────────────────"
-
-    echo "🔧 Running env/priv.sh --force on $host (SSH/vault bootstrap + credential sync)..."
-    if ! ssh -t "${SSH_OPTS[@]}" "$host" "bash ~/scripts/docker/env/priv.sh --force"; then
-        echo "⚠️  priv.sh reported an issue on $host (continuing; re-run manually if needed)"
+    if ! ssh -tt "${SSH_OPTS[@]}" "$host" bash ~/remote-provision-host.sh "${KEY_NAMES[@]}"; then
+        echo "❌ Provisioning steps failed on $host"
+        return 1
     fi
 
     echo "✅ $host ready"
-    OK+=("$host")
+    return 0
+}
+
+LOG_DIR=$(mktemp -d)
+echo ""
+echo "🚀 Provisioning ${#HOSTS[@]} host(s) in parallel — full per-host logs: $LOG_DIR"
+echo ""
+
+declare -A PIDS
+for host in "${HOSTS[@]}"; do
+    logfile="$LOG_DIR/$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '_').log"
+    (
+        # Each backgrounded subshell inherits the EXIT trap above and would
+        # otherwise independently delete the shared TMP_KEY_DIR the moment
+        # ITS work finishes -- while sibling hosts still mid-flight need it.
+        # Only the main script's own exit should clean it up.
+        trap - EXIT
+        provision_host "$host" 2>&1 | sed -u "s/^/[$host] /" | tee -a "$logfile"
+        exit "${PIPESTATUS[0]}"
+    ) &
+    PIDS["$host"]=$!
+done
+
+FAILED=()
+OK=()
+for host in "${HOSTS[@]}"; do
+    if wait "${PIDS[$host]}"; then
+        OK+=("$host")
+    else
+        FAILED+=("$host")
+    fi
 done
 
 echo ""
@@ -234,6 +274,7 @@ echo "  Ready:  ${#OK[@]}/${#HOSTS[@]}  ${OK[*]:-}"
 if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo "  Failed: ${#FAILED[@]}/${#HOSTS[@]}  ${FAILED[*]}"
 fi
+echo "  Full per-host logs: $LOG_DIR"
 echo "════════════════════════════════════════════════════════════════"
 
 [[ ${#FAILED[@]} -eq 0 ]]
