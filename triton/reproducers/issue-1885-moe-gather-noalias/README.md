@@ -29,10 +29,16 @@ caller contract**; the backend lowering is redundant.
 4. **`noalias_args` had a propagation bug** (`JITFunction.__init__` never stored
    `self.noalias_args`), so `triton_kernels.specialize` silently dropped it for
    activation-fused kernels (`_matmul` → `_matmul_swiglu_fn`). Fixed by storing it.
-5. **Decode residual (8 in-loop rfl) is a separate, LLVM-side problem** — the
-   descriptor lift there IS loop-invariant but MachineLICM won't hoist a convergent
-   `readfirstlane`. Needs the LLVM patch, see
-   `../reproducers/amdgpu_readfirstlane_licm/`.
+5. **Decode residual — RESOLVED, and the MachineLICM route was dropped.** The decode
+   `v_readfirstlane` are fixed by *expanding the frontend contract* to the uniform
+   read-only expert-metadata args (`noalias_args=["GatherIndx","ExptData","ExptHist",
+   "ExptOffs"]`) → 8→0 on stock LLVM (no MachineLICM patch). Studying that further
+   uncovered a general **AMDGPU backend** missed-optimization (`isReallyAClobber` skips
+   the AA check for non-atomic clobbers) — see the sub-ticket
+   **[`isreallyaclobber-ldsload/`](isreallyaclobber-ldsload/)** (self-contained repro +
+   fix, pushed to `llvm/llvm-project` as `users/jerryyin/amdgpu-isreallyaclobber-aa`). The
+   earlier `DECODE_TICKET_DRAFT.md` (MachineLICM-hoist proposal) turned out unnecessary and
+   was removed; the investigation record is in the noalias-contract ledgers (S10b/S10c).
 
 ## Prefill results (stock LLVM 56421f92), before/after noalias
 
@@ -159,7 +165,12 @@ They are **not** committed (large, regenerable) — scp them off the host as nee
 
 - `moe/ffm_verification/run_moe_gemm_ffm.py` — the FFM correctness/kernel runner
   (`--kernel {a4w4,a8w4} --backend {gluon,triton} --phase {prefill,decode}`).
-- `reproducers/amdgpu_readfirstlane_licm/` — standalone LLVM reproducer for the
-  decode residual (MachineLICM won't hoist convergent readfirstlane).
+- `isreallyaclobber-ldsload/` — **the decode fix (sub-ticket).** Self-contained AMDGPU
+  backend repro + fix for the `isReallyAClobber` AA-blind clobber check (the real cause of
+  the decode `v_readfirstlane`); pushed to `llvm/llvm-project` as
+  `users/jerryyin/amdgpu-isreallyaclobber-aa`.
+- `reproducers/amdgpu_readfirstlane_licm/` — **secondary/superseded**: the earlier
+  MachineLICM-hoist route. Kept only as a general backstop; the decode story is now closed
+  by the sub-ticket above + the expanded frontend contract, not this.
 - `../compare_uniform_sload.sh` — **STALE**: uses the removed
   `TRITON_AMD_DISABLE_UNIFORM_SLOAD` kill switch. Superseded by `gen_before_after.sh`.

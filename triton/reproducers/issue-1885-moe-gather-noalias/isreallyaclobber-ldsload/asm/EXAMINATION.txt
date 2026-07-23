@@ -1,0 +1,17 @@
+Examination of the effect on the real MoE MLA-decode kernel (ir/mla_decode.ll).
+Single input delta: the isReallyAClobber patch (../fix.patch). Same llc otherwise.
+
+annotate-uniform (opt -passes=amdgpu-annotate-uniform -mcpu=gfx1250):
+  !amdgpu.noclobber count   BEFORE = 4     AFTER = 5
+  The one added tag is on the software-pipelined block-table prefetch load
+  (physical_block_idx = load(block_tables + ...), mla.py:847, inlined @1875).
+  Its two out-of-loop sibling block-table loads already had noclobber in both.
+
+llc asm — the block-table prefetch inside the K-loop (.loc mla.py:847:30):
+  BEFORE:  global_load_b32 v253, v4, s[10:11] scale_offset      ; VMEM, VGPR result
+           ...
+           v_readfirstlane_b32 s25, v253                        ; VGPR->SGPR round-trip
+  AFTER:   s_load_b32 s78, s[54:55], 0x0                        ; SMEM, SGPR result
+
+  whole-fn:  global_load_b32 1->0,  s_load_b32 5->6,  in-loop v_readfirstlane 1->0
+  FFM numerics unchanged (the load is read-only; noclobber is AA-proven sound).

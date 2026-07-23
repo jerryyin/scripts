@@ -1,0 +1,110 @@
+From 2958d9f07c54726c5e2c8bfd5ca4f38e7de91499 Mon Sep 17 00:00:00 2001
+From: Jerry Yin <jerry.yin@amd.com>
+Date: Thu, 23 Jul 2026 15:09:58 +0000
+Subject: [PATCH] [AMDGPU] Consult AA for non-atomic clobbers in
+ isReallyAClobber
+
+isReallyAClobber (used by AMDGPUAnnotateUniformValues to decide whether a uniform
+load may be marked !amdgpu.noclobber) only queried alias analysis for atomics;
+every other memory-writing MemoryDef (plain stores, memory intrinsics, calls)
+fell through to an unconditional "return true", declaring it a clobber without
+asking AA.
+
+As a result a uniform, read-only load is denied !amdgpu.noclobber whenever
+MemorySSA's clobber walk surfaces such a def through a loop MemoryPhi, even when
+AA can trivially prove NoAlias (e.g. an LDS/addrspace(3) write vs a
+global/addrspace(1) load). Without noclobber the load is selected as a vector
+GLOBAL_LOAD instead of a scalar s_load, adding a v_readfirstlane round-trip when
+the value feeds a scalar operand.
+
+Query AA generally via getModRefInfo for the fall-through case, while keeping the
+fence/barrier whitelist and the pointer-level atomic special case (getModRefInfo
+over-reports Mod for an atomic's ordering effects). The load's MemoryLocation is
+threaded through so addressing/size precision applies.
+---
+ llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.cpp | 21 ++++++++++++++------
+ llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.h   |  9 +++++----
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.cpp b/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.cpp
+index eacce0d52..ef5cd258f 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.cpp
+@@ -364,7 +364,8 @@ void removeFnAttrFromReachable(CallGraph &CG, Function *KernelRoot,
+   }
+ }
+ 
+-bool isReallyAClobber(const Value *Ptr, MemoryDef *Def, AAResults *AA) {
++bool isReallyAClobber(const MemoryLocation &Loc, MemoryDef *Def,
++                      AAResults *AA) {
+   Instruction *DefInst = Def->getMemoryInst();
+ 
+   if (isa<FenceInst>(DefInst))
+@@ -394,16 +395,24 @@ bool isReallyAClobber(const Value *Ptr, MemoryDef *Def, AAResults *AA) {
+   }
+ 
+   // Ignore atomics not aliasing with the original load, any atomic is a
+-  // universal MemoryDef from MSSA's point of view too, just like a fence.
+-  const auto checkNoAlias = [AA, Ptr](auto I) -> bool {
+-    return I && AA->isNoAlias(I->getPointerOperand(), Ptr);
++  // universal MemoryDef from MSSA's point of view too, just like a fence. Use a
++  // pointer-level no-alias check so a synchronizing atomic on unrelated memory
++  // is not treated as a clobber (getModRefInfo would conservatively report Mod
++  // for its ordering effects).
++  const auto checkNoAlias = [AA, &Loc](auto I) -> bool {
++    return I && AA->isNoAlias(I->getPointerOperand(), Loc.Ptr);
+   };
+ 
+   if (checkNoAlias(dyn_cast<AtomicCmpXchgInst>(DefInst)) ||
+       checkNoAlias(dyn_cast<AtomicRMWInst>(DefInst)))
+     return false;
+ 
+-  return true;
++  // For any other memory-writing def (plain stores, memory intrinsics such as
++  // the TDM tensor_load_to_lds, calls), it is only a real clobber if alias
++  // analysis says it can modify the loaded location. This lets e.g. an
++  // LDS/addrspace(3) write not clobber a global/addrspace(1) load, instead of
++  // conservatively treating every such def as a clobber.
++  return isModSet(AA->getModRefInfo(DefInst, Loc));
+ }
+ 
+ bool isClobberedInFunction(const LoadInst *Load, MemorySSA *MSSA,
+@@ -434,7 +443,7 @@ bool isClobberedInFunction(const LoadInst *Load, MemorySSA *MSSA,
+     if (MemoryDef *Def = dyn_cast<MemoryDef>(MA)) {
+       LLVM_DEBUG(dbgs() << "  Def: " << *Def->getMemoryInst() << '\n');
+ 
+-      if (isReallyAClobber(Load->getPointerOperand(), Def, AA)) {
++      if (isReallyAClobber(Loc, Def, AA)) {
+         LLVM_DEBUG(dbgs() << "      -> load is clobbered\n");
+         return true;
+       }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.h b/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.h
+index 4e164d085..8a5e03e61 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.h
++++ b/llvm/lib/Target/AMDGPU/AMDGPUMemoryUtils.h
+@@ -21,6 +21,7 @@ class DataLayout;
+ class GlobalVariable;
+ class LoadInst;
+ class MemoryDef;
++class MemoryLocation;
+ class MemorySSA;
+ class Value;
+ class Function;
+@@ -93,10 +94,10 @@ GVUsesInfoTy getTransitiveUsesOfLDSForLowering(const CallGraph &CG, Module &M);
+ void removeFnAttrFromReachable(CallGraph &CG, Function *KernelRoot,
+                                ArrayRef<StringRef> FnAttrs);
+ 
+-/// Given a \p Def clobbering a load from \p Ptr according to the MSSA check
+-/// if this is actually a memory update or an artificial clobber to facilitate
+-/// ordering constraints.
+-bool isReallyAClobber(const Value *Ptr, MemoryDef *Def, AAResults *AA);
++/// Given a \p Def clobbering a load at \p Loc according to the MSSA, check if
++/// this is actually a memory update (as determined by alias analysis) or an
++/// artificial clobber to facilitate ordering constraints.
++bool isReallyAClobber(const MemoryLocation &Loc, MemoryDef *Def, AAResults *AA);
+ 
+ /// Check is a \p Load is clobbered in its function.
+ bool isClobberedInFunction(const LoadInst *Load, MemorySSA *MSSA,
+-- 
+2.43.0
+
