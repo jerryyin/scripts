@@ -172,5 +172,3 @@ They are **not** committed (large, regenerable) — scp them off the host as nee
 - `reproducers/amdgpu_readfirstlane_licm/` — **secondary/superseded**: the earlier
   MachineLICM-hoist route. Kept only as a general backstop; the decode story is now closed
   by the sub-ticket above + the expanded frontend contract, not this.
-- `../compare_uniform_sload.sh` — **STALE**: uses the removed
-  `TRITON_AMD_DISABLE_UNIFORM_SLOAD` kill switch. Superseded by `gen_before_after.sh`.
