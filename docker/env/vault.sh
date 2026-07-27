@@ -61,11 +61,11 @@ configure_profile() {
             # same index.
             SECRET_FILES=(
                 "${GH_JERRYYIN_KEY_FILE:-$HOME/vault/gh_token_jerryyin.txt}"
-                "${GH_AMDMENG_KEY_FILE:-$HOME/vault/gh_token_amdmeng.txt}"
+                "${GH_AMDENG_KEY_FILE:-$HOME/vault/gh_token_amdeng.txt}"
             )
             PLACEHOLDERS=(
                 "${GH_JERRYYIN_PLACEHOLDER:-__GH_TOKEN_JERRYYIN__}"
-                "${GH_AMDMENG_PLACEHOLDER:-__GH_TOKEN_AMDMENG__}"
+                "${GH_AMDENG_PLACEHOLDER:-__GH_TOKEN_AMDENG__}"
             )
             DESCRIPTION="GitHub CLI tokens"
             ;;

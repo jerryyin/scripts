@@ -5,7 +5,7 @@
 #   gh.sh                # Full setup: install gh CLI + check existing auth
 #
 # Source of truth for GitHub CLI auth is ~/.config/gh/hosts.yml, templated from
-# vault tokens by `vault.sh gh` (two accounts: jerryyin + zhuoryin_amdmeng).
+# vault tokens by `vault.sh gh` (two accounts: jerryyin + zhuoryin_amdeng).
 #
 # Prerequisites:
 #   - apt + curl + sudo  -- for the full-setup path that installs gh
@@ -62,9 +62,9 @@ check_gh_auth() {
     echo "⚠️  gh is installed but not authenticated for $GH_HOST"
     echo "   Put classic PATs (scopes: repo,read:org,gist) in the vault:"
     echo "     ~/vault/gh_token_jerryyin.txt"
-    echo "     ~/vault/gh_token_amdmeng.txt"
+    echo "     ~/vault/gh_token_amdeng.txt"
     echo "   then apply them with: vault.sh gh"
-    echo "   Switch accounts with:  gh auth switch -u <jerryyin|zhuoryin_amdmeng>"
+    echo "   Switch accounts with:  gh auth switch -u <jerryyin|zhuoryin_amdeng>"
 }
 
 main() {
