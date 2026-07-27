@@ -23,10 +23,11 @@ if [ -n "$MODE" ]; then
 fi
 
 usage() {
-    echo "Usage: vault.sh <claude|docker|gh|atlartifactory> [--status]"
+    echo "Usage: vault.sh <claude|docker|gh|gist|atlartifactory> [--status]"
     echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
     echo "  gh                 Patch ~/.config/gh/hosts.yml from its template (two account tokens)"
+    echo "  gist               Write ~/.gist (reuses the gh jerryyin PAT; needs gist scope)"
     echo "  atlartifactory     Patch ~/.netrc with an atlartifactory.amd.com entry"
     echo "  --status           Show non-secret status"
 }
@@ -69,6 +70,15 @@ configure_profile() {
             )
             DESCRIPTION="GitHub CLI tokens"
             ;;
+        gist)
+            # gist-paste reads a bare token from ~/.gist. Reuse the gh jerryyin
+            # PAT (it carries the `gist` scope), so there's no separate secret
+            # file to maintain. No template/placeholder -- written raw by
+            # patch_rawfile. Gists are created under the jerryyin identity.
+            CONFIG_FILE="${GIST_CONFIG:-$HOME/.gist}"
+            SECRET_FILES=("${GIST_KEY_FILE:-${GH_JERRYYIN_KEY_FILE:-$HOME/vault/gh_token_jerryyin.txt}}")
+            DESCRIPTION="gist-paste token (gh jerryyin PAT)"
+            ;;
         atlartifactory)
             NETRC_HOST="${NETRC_HOST:-atlartifactory.amd.com}"
             # The token authenticates via Basic auth regardless of username
@@ -92,7 +102,7 @@ validate_secret() {
     local decoded username password
 
     case "$PROFILE" in
-        claude|gh|atlartifactory)
+        claude|gh|gist|atlartifactory)
             [ -n "$secret" ]
             ;;
         docker)
@@ -207,10 +217,40 @@ patch_netrc() {
     echo "Patched $DESCRIPTION into $CONFIG_FILE"
 }
 
+# Write a secret verbatim into CONFIG_FILE (no template, no placeholder). Used
+# by the gist profile: ~/.gist is just a bare token. Idempotent -- skips the
+# write (and its log line) when the file already matches.
+patch_rawfile() {
+    local secret_file="${SECRET_FILES[0]}"
+    if [ ! -f "$secret_file" ]; then
+        echo "Warning: $secret_file not found; vault not synced yet"
+        echo "Run priv.sh to sync vault, then re-run this script."
+        return 0
+    fi
+
+    local secret
+    secret=$(tr -d '[:space:]' < "$secret_file")
+    if ! validate_secret "$secret"; then
+        echo "Warning: $secret_file is not a valid $DESCRIPTION value"
+        return 0
+    fi
+
+    if [ -f "$CONFIG_FILE" ] && [ "$(tr -d '[:space:]' < "$CONFIG_FILE")" = "$secret" ]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    printf '%s\n' "$secret" > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    echo "Wrote $DESCRIPTION to $CONFIG_FILE"
+}
+
 show_status() {
     local config_state="missing"
 
-    if [ "$PROFILE" = "atlartifactory" ]; then
+    if [ "$PROFILE" = "gist" ]; then
+        [ -f "$CONFIG_FILE" ] && config_state="configured"
+    elif [ "$PROFILE" = "atlartifactory" ]; then
         if [ -f "$CONFIG_FILE" ] && grep -qF "machine $NETRC_HOST" "$CONFIG_FILE" 2>/dev/null; then
             config_state="configured"
         fi
@@ -227,7 +267,7 @@ show_status() {
 
     echo "Profile:      $PROFILE"
     echo "Config file:  $CONFIG_FILE ($config_state)"
-    [ "$PROFILE" = "atlartifactory" ] || echo "Template:     $TEMPLATE_FILE"
+    case "$PROFILE" in atlartifactory|gist) ;; *) echo "Template:     $TEMPLATE_FILE" ;; esac
     local secret_file
     for secret_file in "${SECRET_FILES[@]}"; do
         if [ -f "$secret_file" ]; then
@@ -247,11 +287,11 @@ configure_profile
 
 case "$MODE" in
     "")
-        if [ "$PROFILE" = "atlartifactory" ]; then
-            patch_netrc
-        else
-            patch_config
-        fi
+        case "$PROFILE" in
+            atlartifactory) patch_netrc ;;
+            gist) patch_rawfile ;;
+            *) patch_config ;;
+        esac
         ;;
     --status)
         show_status
