@@ -23,24 +23,25 @@ if [ -n "$MODE" ]; then
 fi
 
 usage() {
-    echo "Usage: vault.sh <claude|docker|atlartifactory> [--status]"
+    echo "Usage: vault.sh <claude|docker|gh|atlartifactory> [--status]"
     echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
+    echo "  gh                 Patch ~/.config/gh/hosts.yml from its template (two account tokens)"
     echo "  atlartifactory     Patch ~/.netrc with an atlartifactory.amd.com entry"
     echo "  --status           Show non-secret status"
 }
 
-have_jq() {
-    command -v jq >/dev/null 2>&1
-}
-
+# claude/docker/gh share the template+placeholder shape and use parallel
+# PLACEHOLDERS/SECRET_FILES arrays so one config file can carry more than one
+# secret (gh holds two account tokens). atlartifactory is handled separately by
+# patch_netrc and uses only SECRET_FILES[0].
 configure_profile() {
     case "$PROFILE" in
         claude)
             CONFIG_FILE="${CLAUDE_CONFIG:-$HOME/.claude.json}"
             TEMPLATE_FILE="${CLAUDE_TEMPLATE:-$HOME/.claude.json.template}"
-            SECRET_FILE="${KEY_FILE:-${CLAUDE_KEY_FILE:-$HOME/vault/claude_key.txt}}"
-            PLACEHOLDER="${CLAUDE_PLACEHOLDER:-__CLAUDE_SUB_KEY__}"
+            SECRET_FILES=("${KEY_FILE:-${CLAUDE_KEY_FILE:-$HOME/vault/claude_key.txt}}")
+            PLACEHOLDERS=("${CLAUDE_PLACEHOLDER:-__CLAUDE_SUB_KEY__}")
             DESCRIPTION="Claude subscription key"
             ;;
         docker)
@@ -48,9 +49,25 @@ configure_profile() {
             DOCKER_CONFIG_DIR="${DOCKER_CONFIG:-$HOME/.docker}"
             CONFIG_FILE="$DOCKER_CONFIG_DIR/config.json"
             TEMPLATE_FILE="$DOCKER_CONFIG_DIR/config.json.template"
-            SECRET_FILE="${DOCKER_AUTH_FILE:-$HOME/vault/docker_mkmhub_auth.txt}"
-            PLACEHOLDER="${DOCKER_PLACEHOLDER:-__DOCKER_KEY__}"
+            SECRET_FILES=("${DOCKER_AUTH_FILE:-$HOME/vault/docker_mkmhub_auth.txt}")
+            PLACEHOLDERS=("${DOCKER_PLACEHOLDER:-__DOCKER_KEY__}")
             DESCRIPTION="Docker auth for $DOCKER_REGISTRY"
+            ;;
+        gh)
+            GH_CONFIG_DIR="${GH_CONFIG_DIR:-$HOME/.config/gh}"
+            CONFIG_FILE="$GH_CONFIG_DIR/hosts.yml"
+            TEMPLATE_FILE="$GH_CONFIG_DIR/hosts.yml.template"
+            # Order matters: each secret file pairs with the placeholder at the
+            # same index.
+            SECRET_FILES=(
+                "${GH_JERRYYIN_KEY_FILE:-$HOME/vault/gh_token_jerryyin.txt}"
+                "${GH_AMDMENG_KEY_FILE:-$HOME/vault/gh_token_amdmeng.txt}"
+            )
+            PLACEHOLDERS=(
+                "${GH_JERRYYIN_PLACEHOLDER:-__GH_TOKEN_JERRYYIN__}"
+                "${GH_AMDMENG_PLACEHOLDER:-__GH_TOKEN_AMDMENG__}"
+            )
+            DESCRIPTION="GitHub CLI tokens"
             ;;
         atlartifactory)
             NETRC_HOST="${NETRC_HOST:-atlartifactory.amd.com}"
@@ -60,7 +77,7 @@ configure_profile() {
             # login value to be present.
             NETRC_LOGIN="${NETRC_LOGIN:-$(id -un 2>/dev/null || whoami)}"
             CONFIG_FILE="$HOME/.netrc"
-            SECRET_FILE="${ARTIFACTORY_KEY_FILE:-$HOME/vault/atlartifactory_token.txt}"
+            SECRET_FILES=("${ARTIFACTORY_KEY_FILE:-$HOME/vault/atlartifactory_token.txt}")
             DESCRIPTION="Artifactory identity token for $NETRC_HOST"
             ;;
         *)
@@ -75,7 +92,7 @@ validate_secret() {
     local decoded username password
 
     case "$PROFILE" in
-        claude|atlartifactory)
+        claude|gh|atlartifactory)
             [ -n "$secret" ]
             ;;
         docker)
@@ -99,28 +116,50 @@ patch_config() {
 
     mkdir -p "$(dirname "$CONFIG_FILE")"
 
-    if [ ! -f "$CONFIG_FILE" ] || grep -Fq "$PLACEHOLDER" "$CONFIG_FILE"; then
+    # Seed from the template when the config is missing or still carries any
+    # placeholder from a prior (partial) run. Once every placeholder has been
+    # substituted the config is owned by the tool (e.g. gh rewrites hosts.yml on
+    # `gh auth switch`) and is left untouched across restarts.
+    local seed=0 placeholder secret_file secret
+    if [ ! -f "$CONFIG_FILE" ]; then
+        seed=1
+    else
+        for placeholder in "${PLACEHOLDERS[@]}"; do
+            if grep -Fq "$placeholder" "$CONFIG_FILE"; then
+                seed=1
+                break
+            fi
+        done
+    fi
+    if [ "$seed" = 1 ]; then
         cp "$TEMPLATE_FILE" "$CONFIG_FILE"
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
         echo "Copied $TEMPLATE_FILE -> $CONFIG_FILE"
     fi
 
-    if grep -Fq "$PLACEHOLDER" "$CONFIG_FILE"; then
-        if [ ! -f "$SECRET_FILE" ]; then
-            echo "Warning: $SECRET_FILE not found; vault not synced yet"
+    # Substitute each placeholder independently so a missing/invalid secret for
+    # one account doesn't block patching the others.
+    local i patched=0
+    for i in "${!PLACEHOLDERS[@]}"; do
+        placeholder="${PLACEHOLDERS[$i]}"
+        secret_file="${SECRET_FILES[$i]}"
+        grep -Fq "$placeholder" "$CONFIG_FILE" || continue
+        if [ ! -f "$secret_file" ]; then
+            echo "Warning: $secret_file not found; vault not synced yet"
             echo "Run priv.sh to sync vault, then re-run this script."
-            return 0
+            continue
         fi
-
-        local secret
-        secret=$(tr -d '[:space:]' < "$SECRET_FILE")
+        secret=$(tr -d '[:space:]' < "$secret_file")
         if ! validate_secret "$secret"; then
-            echo "Warning: $SECRET_FILE is not a valid $DESCRIPTION value"
-            return 0
+            echo "Warning: $secret_file is not a valid $DESCRIPTION value"
+            continue
         fi
-
-        SECRET_VALUE="$secret" PLACEHOLDER="$PLACEHOLDER" \
+        SECRET_VALUE="$secret" PLACEHOLDER="$placeholder" \
             perl -0pi -e 'BEGIN { $p = $ENV{PLACEHOLDER}; $v = $ENV{SECRET_VALUE}; } s/\Q$p\E/$v/g' "$CONFIG_FILE"
+        patched=1
+    done
+
+    if [ "$patched" = 1 ]; then
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
         echo "Patched $DESCRIPTION into $CONFIG_FILE"
     fi
@@ -131,16 +170,17 @@ patch_config() {
 # have entries in for other hosts, so this only ever touches its own
 # marker-delimited block (safe to re-run on secret rotation).
 patch_netrc() {
-    if [ ! -f "$SECRET_FILE" ]; then
-        echo "Warning: $SECRET_FILE not found; vault not synced yet"
+    local secret_file="${SECRET_FILES[0]}"
+    if [ ! -f "$secret_file" ]; then
+        echo "Warning: $secret_file not found; vault not synced yet"
         echo "Run priv.sh to sync vault, then re-run this script."
         return 0
     fi
 
     local secret
-    secret=$(tr -d '[:space:]' < "$SECRET_FILE")
+    secret=$(tr -d '[:space:]' < "$secret_file")
     if ! validate_secret "$secret"; then
-        echo "Warning: $SECRET_FILE is not a valid $DESCRIPTION value"
+        echo "Warning: $secret_file is not a valid $DESCRIPTION value"
         return 0
     fi
 
@@ -169,30 +209,33 @@ patch_netrc() {
 
 show_status() {
     local config_state="missing"
-    local secret_state="missing"
 
     if [ "$PROFILE" = "atlartifactory" ]; then
         if [ -f "$CONFIG_FILE" ] && grep -qF "machine $NETRC_HOST" "$CONFIG_FILE" 2>/dev/null; then
             config_state="configured"
         fi
     elif [ -f "$CONFIG_FILE" ]; then
-        if grep -Fq "$PLACEHOLDER" "$CONFIG_FILE"; then
-            config_state="template-placeholder"
-        elif [ "$PROFILE" = "docker" ] && have_jq \
-            && jq -e --arg registry "$DOCKER_REGISTRY" '.auths[$registry].auth?' "$CONFIG_FILE" >/dev/null 2>&1; then
-            config_state="configured"
-        else
-            config_state="configured"
-        fi
-    fi
-    if [ -f "$SECRET_FILE" ]; then
-        secret_state="present"
+        config_state="configured"
+        local placeholder
+        for placeholder in "${PLACEHOLDERS[@]}"; do
+            if grep -Fq "$placeholder" "$CONFIG_FILE"; then
+                config_state="template-placeholder"
+                break
+            fi
+        done
     fi
 
     echo "Profile:      $PROFILE"
     echo "Config file:  $CONFIG_FILE ($config_state)"
     [ "$PROFILE" = "atlartifactory" ] || echo "Template:     $TEMPLATE_FILE"
-    echo "Vault secret: $SECRET_FILE ($secret_state)"
+    local secret_file
+    for secret_file in "${SECRET_FILES[@]}"; do
+        if [ -f "$secret_file" ]; then
+            echo "Vault secret: $secret_file (present)"
+        else
+            echo "Vault secret: $secret_file (missing)"
+        fi
+    done
 }
 
 if [ "$#" -ne 0 ]; then

@@ -37,7 +37,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # rc_files (stow) so it stays portable and reviewable in version control.
 CREDENTIAL_PATHS=(
     ".gist"                      # gist-paste token
-    ".config/gh"                 # GitHub CLI auth state, including multi-account hosts.yml
+    # NOTE: .config/gh is intentionally NOT here. gh auth is now sourced from
+    # vault (vault.sh gh -> ~/.config/gh/hosts.yml, two account tokens). Listing
+    # it here would symlink the whole dir to persistent storage and shadow the
+    # templated hosts.yml, so the two strategies would fight over the same path.
     ".config/github-copilot"     # GitHub Copilot (vim/neovim)
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth

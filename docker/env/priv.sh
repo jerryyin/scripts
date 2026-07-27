@@ -180,6 +180,7 @@ runtime_patches() {
     bash "$SCRIPT_DIR/credentials.sh"
     bash "$SCRIPT_DIR/vault.sh" claude
     bash "$SCRIPT_DIR/vault.sh" docker
+    bash "$SCRIPT_DIR/vault.sh" gh
     bash "$SCRIPT_DIR/vault.sh" atlartifactory
 }
 
