@@ -77,9 +77,6 @@ add_ppa_if_available() {
 wait_for_dpkg_lock
 sudo apt-get update --allow-insecure-repositories
 
-# Get Ubuntu codename (focal, jammy, noble, etc.)
-CODENAME=$(lsb_release -sc 2>/dev/null || . /etc/os-release && echo "$VERSION_CODENAME")
-
 add_ppa_if_available ppa:jonathonf/vim
 add_ppa_if_available ppa:neovim-ppa/stable
 
@@ -93,9 +90,14 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
 # backs up real-file conflicts) and is what re-heals a partial prior setup — e.g.
 # a pod reusing persistent $HOME where rc_files/ exists but a previous install.sh
 # died midway. Gating install.sh on the directory would skip that repair forever.
-if [ ! -d rc_files ]; then
-    git clone https://github.com/jerryyin/rc_files.git
-    git -C rc_files remote set-url origin git@github.com:jerryyin/rc_files.git
+#
+# Anchored to $HOME rather than the cwd: install.sh resolves the repo as
+# $HOME/rc_files and clones it itself when missing, so running min.sh from any
+# other directory would leave two divergent checkouts — one here that nothing
+# stows from, and one in $HOME that install.sh silently created.
+if [ ! -d "$HOME/rc_files" ]; then
+    git clone https://github.com/jerryyin/rc_files.git "$HOME/rc_files"
+    git -C "$HOME/rc_files" remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
 
 # Everything Node-related (NodeSource repo setup, version guard, the
@@ -109,12 +111,12 @@ bash "$SCRIPT_DIR/node.sh"
 # install.sh, claude.sh, and codex.sh each self-sufficiently source
 # rc_files/lib/node-ca-cert.sh (Node's corporate-TLS-proxy CA workaround)
 # right before they run npm, so nothing needs to be pre-sourced here.
-bash rc_files/install.sh
+bash "$HOME/rc_files/install.sh"
 
 # Clone scripts
-if [ ! -d scripts ]; then
-    git clone https://github.com/jerryyin/scripts.git
-    git -C scripts remote set-url origin git@github.com:jerryyin/scripts.git
+if [ ! -d "$HOME/scripts" ]; then
+    git clone https://github.com/jerryyin/scripts.git "$HOME/scripts"
+    git -C "$HOME/scripts" remote set-url origin git@github.com:jerryyin/scripts.git
 fi
 
 # Only download AMD_CA.crt if not already present (PVC persists across pods)
