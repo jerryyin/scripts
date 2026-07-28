@@ -24,6 +24,8 @@ set -o pipefail
 
 CODEX_CONFIG="$HOME/.codex/config.toml"
 CODEX_TEMPLATE="$HOME/.codex.config.toml.template"
+CODEX_AGENTS_SOURCE="$HOME/rc_files/claude/.claude/CLAUDE.md"
+CODEX_SKILLS_SOURCE="$HOME/rc_files/claude/.claude/skills"
 
 install_codex_cli() {
     mkdir -p "$HOME/.local"
@@ -97,6 +99,13 @@ patch_codex_config() {
     fi
 }
 
+link_shared_agent_config() {
+    mkdir -p "$HOME/.codex" "$HOME/.agents"
+    ln -sfnT "$CODEX_AGENTS_SOURCE" "$HOME/.codex/AGENTS.md"
+    ln -sfnT "$CODEX_SKILLS_SOURCE" "$HOME/.agents/skills"
+    echo "✓ Linked shared instructions and skills for Codex"
+}
+
 main() {
     case "${1:-}" in
         "") ;;
@@ -112,6 +121,7 @@ main() {
     echo "──────────────────"
     install_codex_cli
     patch_codex_config
+    link_shared_agent_config
     echo ""
 }
 
