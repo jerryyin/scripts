@@ -53,18 +53,16 @@ install_gh_cli() {
     fi
 }
 
+# min.sh runs this before priv.sh applies the vault tokens, and that order is by
+# design -- so being unauthenticated here is the expected state on a fresh setup,
+# not something to act on. Report it, don't warn about it.
 check_gh_auth() {
     if gh auth status -h "$GH_HOST" >/dev/null 2>&1; then
         echo "✓ gh auth configured for $GH_HOST"
         return 0
     fi
 
-    echo "⚠️  gh is installed but not authenticated for $GH_HOST"
-    echo "   Put classic PATs (scopes: repo,read:org,gist) in the vault:"
-    echo "     ~/vault/gh_token_jerryyin.txt"
-    echo "     ~/vault/gh_token_amdeng.txt"
-    echo "   then apply them with: vault.sh gh"
-    echo "   Switch accounts with:  gh auth switch -u <jerryyin|zhuoryin_amdeng>"
+    echo "ℹ️  gh not authenticated for $GH_HOST yet — priv.sh applies the vault tokens (vault.sh gh)"
 }
 
 main() {
