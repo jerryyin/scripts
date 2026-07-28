@@ -56,6 +56,7 @@ vault_available() {
 
 # Find the persistent storage root (mounted host home or PVC)
 . "$SCRIPT_DIR/../lib/find_persistent_root.sh"
+. "$SCRIPT_DIR/../lib/fix_hostname.sh"
 
 # Setup SSH keys from persistent storage. GitHub host-key trust (the
 # ssh.github.com:443 redirect this network needs) is handled declaratively by
@@ -118,24 +119,6 @@ sync_vault() {
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
         echo "   (vault.sh patches will be skipped until the vault is present)"
-    fi
-}
-
-# Fix hostname resolution
-fix_hostname() {
-    if [ -z "${HOSTNAME:-}" ]; then
-        return 0
-    fi
-
-    if grep -q "$HOSTNAME" /etc/hosts 2>/dev/null; then
-        return 0
-    fi
-
-    echo "🔧 Fixing hostname resolution..."
-    local ip
-    ip=$(hostname -I 2>/dev/null | cut -d' ' -f1)
-    if [ -n "$ip" ]; then
-        echo "$ip $HOSTNAME" | sudo tee -a /etc/hosts >/dev/null 2>&1 || true
     fi
 }
 

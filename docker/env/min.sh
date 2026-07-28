@@ -3,6 +3,9 @@ set -x
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+. "$SCRIPT_DIR/../lib/wait_for_dpkg_lock.sh"
+. "$SCRIPT_DIR/../lib/fix_hostname.sh"
+
 # On a freshly-imaged/rebooted bare-metal host, systemd's automatic update
 # timers (unattended-upgrades, apt-daily) can be mid-run and hold the dpkg
 # lock for a long time. apt-get's own "Waiting for cache lock" retry is easy
@@ -15,25 +18,6 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service \
         2>/dev/null || true
 fi
-
-# Wait (with visible progress + a bounded timeout) for any in-progress apt/dpkg
-# run to release the lock, instead of relying on apt-get's own silent,
-# unbounded retry. Safe/instant no-op when nothing holds the lock (the normal
-# case for fresh containers).
-wait_for_dpkg_lock() {
-    local waited=0
-    local max_wait=600
-    while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-        if [ "$waited" -ge "$max_wait" ]; then
-            echo "⚠️  dpkg lock still held after ${max_wait}s -- proceeding anyway, apt may fail" >&2
-            return 1
-        fi
-        echo "⏳ Waiting for dpkg lock (held by another process, e.g. a background apt/unattended-upgrade run)... ${waited}s elapsed"
-        sleep 10
-        waited=$((waited + 10))
-    done
-    return 0
-}
 
 # Delete rocm sources if any, they tend to cause problem with apt update
 #find /etc/apt \( -name "*amdgpu*" -o -name "*rocm*" \) -delete
@@ -54,10 +38,7 @@ wait_for_dpkg_lock
 sudo apt-get update
 sudo apt-get -y install sudo software-properties-common apt-utils curl
 
-# Fixing /etc/host file, refer to https://askubuntu.com/questions/59458/error-message-sudo-unable-to-resolve-host-none
-if ! grep -q "$HOSTNAME" /etc/hosts; then
-    echo $(hostname -I | cut -d\  -f1) $(hostname) | sudo tee -a /etc/hosts
-fi
+fix_hostname
 
 shopt -s expand_aliases
 add_ppa_if_available() {

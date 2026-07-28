@@ -11,27 +11,11 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 NODE_MIN_MAJOR=18
 
-# Wait (with visible progress + a bounded timeout) for any in-progress apt/dpkg
-# run to release the lock, instead of relying on apt-get's own silent,
-# unbounded retry. Safe/instant no-op when nothing holds the lock (the normal
-# case for fresh containers). Duplicated from min.sh rather than shared,
-# since this script also needs to be runnable standalone.
-wait_for_dpkg_lock() {
-    local waited=0
-    local max_wait=600
-    while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-        if [ "$waited" -ge "$max_wait" ]; then
-            echo "⚠️  dpkg lock still held after ${max_wait}s -- proceeding anyway, apt may fail" >&2
-            return 1
-        fi
-        echo "⏳ Waiting for dpkg lock (held by another process, e.g. a background apt/unattended-upgrade run)... ${waited}s elapsed"
-        sleep 10
-        waited=$((waited + 10))
-    done
-    return 0
-}
+. "$SCRIPT_DIR/../lib/wait_for_dpkg_lock.sh"
 
 current_node_major() {
     if command -v node >/dev/null 2>&1; then
