@@ -15,13 +15,44 @@
 #
 # Rules live in rc_files (stow-managed), so the source directory below is
 # populated by rc_files/install.sh, not by this script.
+#
+# Rules are authored in the Claude set (claude/.claude/rules/*.md) now; the old
+# cursor/.cursor/rules/*.mdc tree was migrated into it. Cursor only reads `.mdc`
+# from a project's .cursor/rules/, so rules are linked in under that extension --
+# verbatim, since the frontmatter both tools read (globs / description) already
+# means the same thing to each.
 
 set -e
 
-CURSOR_RULES_SOURCE="$HOME/rc_files/cursor/.cursor/rules"
+CURSOR_RULES_SOURCE="$HOME/rc_files/claude/.claude/rules"
 
-# Link Cursor rules into a workspace based on their globs pattern:
-# **/* = universal, otherwise match project name.
+# Does this rule apply to a workspace? Decided from its frontmatter `globs:`, not
+# its filename. Note the sense is inverted from the old .mdc convention, where
+# "globs: **/*" was what marked a rule universal:
+#   no globs:      general guidance (code review, style, workflow) -> everywhere
+#   file-type glob e.g. "**/*.py" -> Cursor already scopes it per matched file
+#   project glob   e.g. "**/triton*/**" -> only where the directory segment
+#                  matches this workspace (or its base name, so a rule for
+#                  "iree" still reaches the "iree-turbine" workspace)
+rule_applies() {
+    local rule="$1" name="$2" globs core
+
+    globs=$(sed -n '/^---$/,/^---$/s/^globs:[[:space:]]*//p' "$rule" | head -1 | tr -d "\"'")
+    [ -z "$globs" ] && return 0
+
+    core="${globs#\*\*/}"
+    core="${core%/\*\*}"
+
+    # A pattern still carrying an extension is a file-type rule, not a
+    # project-directory rule; let Cursor decide per file.
+    case "$core" in
+        *.*) return 0 ;;
+    esac
+
+    # shellcheck disable=SC2053  # $core is a glob here, intentionally unquoted
+    [[ "$name" == $core || "${name%%-*}" == $core ]]
+}
+
 # Uses hardlinks for better compatibility with Cursor's file watching.
 setup_cursor_rules() {
     local pattern="$1"
@@ -39,29 +70,19 @@ setup_cursor_rules() {
     local rules_dest="$workspace_dir/.cursor/rules"
     mkdir -p "$rules_dest"
 
-    # Extract base project name (first segment before hyphen)
-    # e.g., "triton-mi450" -> "triton", "iree-turbine" -> "iree"
-    local base_pattern="${pattern%%-*}"
-
     local count=0
-    for rule in "$CURSOR_RULES_SOURCE"/*.mdc; do
+    for rule in "$CURSOR_RULES_SOURCE"/*.md; do
         [ -e "$rule" ] || continue
-        local rulename
-        rulename=$(basename "$rule")
+        rule_applies "$rule" "$pattern" || continue
 
-        # Check if rule applies:
-        # 1. Universal glob (**/*) matches all projects
-        # 2. Rule filename contains project name (e.g., "iree" in "iree-turbine.mdc")
-        # 3. Rule filename contains base project name (e.g., "triton" matches "triton-ffm-development.mdc")
-        if grep -q '^globs:.*\*\*/\*' "$rule" || \
-           [[ "$rulename" == *"$pattern"* ]] || \
-           [[ "$rulename" == *"$base_pattern"* ]]; then
-            # Use hardlink for better Cursor compatibility (removes existing first)
-            rm -f "$rules_dest/$rulename"
-            ln "$rule" "$rules_dest/$rulename"
-            echo "   Linked Cursor rule: $rulename"
-            count=$((count + 1))
-        fi
+        local rulename
+        rulename="$(basename "$rule" .md).mdc"
+
+        # Hardlink, so editing either path keeps the rule in sync with rc_files.
+        rm -f "$rules_dest/$rulename"
+        ln "$rule" "$rules_dest/$rulename"
+        echo "   Linked Cursor rule: $rulename"
+        count=$((count + 1))
     done
 
     if [ "$count" -eq 0 ]; then
