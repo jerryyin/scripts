@@ -2,6 +2,8 @@
 
 Status values: `pending` | `in-progress` | `done` | `blocked`. Work only an unblocked row. Agents write their own ledger and do not edit this registry; the coordinator merges status after reviewing the ledger.
 
+For the self-contained-baseline explanation, exact parent→child review graph, and read-only `vimdiff` workflow, see [`REVIEW_GUIDE.md`](REVIEW_GUIDE.md).
+
 All source paths below are relative to `/root/triton-mi450/third_party/amd/python/examples/gluon/moe_a8w4_decode_ablation/`.
 
 | ID | Phase | Parent | Owned source | One idea | Blocked-by | Status | Conclusion | Ledger |
