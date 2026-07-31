@@ -71,6 +71,9 @@ REMOTE_PROVISION_SCRIPT="$SCRIPT_DIR/remote-provision-host.sh"
 SOURCE_KEY_HOST="smci355"
 HOSTS=()
 HOSTS_FILE=""
+# Compose services whose base images to pre-pull on each target; "none"
+# skips pulling entirely (e.g. a B0 box that already has its base on disk).
+PROVISION_SERVICES="triton triton-mi450"
 
 usage() {
     cat <<'EOF'
@@ -79,6 +82,8 @@ Usage: batch-provision.sh [-k SOURCE_KEY_HOST] HOST [HOST ...]
 
   -k HOST   Source machine to copy a working SSH keypair from (default: smci355)
   -f FILE   Read target hosts from FILE (one per line, '#' comments allowed)
+  -s SVCS   Space-separated compose services whose base images to pre-pull
+            (default: "triton triton-mi450"; use "none" to skip pulling)
 
 HOST accepts bare hostnames/FQDNs (uses $USER@HOST) or explicit user@host.
 EOF
@@ -93,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -f)
             HOSTS_FILE="$2"
+            shift 2
+            ;;
+        -s)
+            PROVISION_SERVICES="$2"
             shift 2
             ;;
         -h|--help)
@@ -122,7 +131,22 @@ if [[ ! -f "$REMOTE_PROVISION_SCRIPT" ]]; then
     exit 1
 fi
 
-SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+# ServerAlive*: Conductor links to these SUTs stall mid-transfer often
+# enough to matter -- an scp has been seen to copy 3 of 4 files and then
+# sit forever, because a silently dead peer looks identical to a slow one
+# to a TCP socket with no keepalive. 15s x 4 makes ssh/scp give up after
+# ~60s of no response, turning an indefinite hang into a clean per-host
+# failure the summary can report (and a re-run can fix, since every step
+# is idempotent). ConnectTimeout only covers connection setup, not stalls
+# after the session is established, so it can't cover this on its own.
+SSH_OPTS=(
+    -o ConnectTimeout=10
+    -o ConnectionAttempts=3
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=4
+    -o StrictHostKeyChecking=accept-new
+    -o BatchMode=yes
+)
 
 echo "🔑 Reading SSH keypair from $SOURCE_KEY_HOST..."
 KEY_NAME=""
@@ -219,15 +243,33 @@ provision_host() {
 
     # Round trip 3: ship remote-provision-host.sh over, then run it. It
     # chmod's the keys, clones/updates rc_files + scripts, runs env/min.sh,
-    # env/priv.sh --force, and pulls base images -- see that script. -tt
-    # forces a real remote pty for min.sh/priv.sh even though this whole
-    # function's stdout is piped (not a terminal) on our end, since it's
-    # backgrounded for parallel execution.
+    # env/priv.sh --force, and pulls base images -- see that script.
+    #
+    # Deliberately NO -tt, and stdin from /dev/null. This is an
+    # unattended run with nobody to answer a prompt, and the scripts
+    # downstream already detect that correctly via `[ -t 0 ]` guards --
+    # rc_files' install.sh, for one, only attempts an interactive `chsh`
+    # (which prompts for a password) when stdin is a terminal. Forcing a
+    # pty with -tt makes those guards believe a human is watching, so
+    # install.sh sat on a chsh password prompt forever instead of taking
+    # its non-interactive fallback path. Giving the remote no terminal is
+    # what actually matches reality here.
     if ! scp "${SSH_OPTS[@]}" "$REMOTE_PROVISION_SCRIPT" "$host:~/" >/dev/null; then
         echo "❌ Failed to copy remote-provision-host.sh to $host"
         return 1
     fi
-    if ! ssh -tt "${SSH_OPTS[@]}" "$host" bash ~/remote-provision-host.sh "${KEY_NAMES[@]}"; then
+    # ssh joins its argv with spaces and hands the result to the remote
+    # shell, so PROVISION_SERVICES (which contains spaces) has to arrive
+    # pre-quoted or the remote shell would parse its second word as the
+    # command to run.
+    # '~/...' stays single-quoted so the LOCAL shell leaves the tilde alone
+    # and the remote shell expands it against the remote home. Unquoted, it
+    # would expand here and send the orchestrator's own home path (which
+    # generally doesn't exist on the target, and silently "works" only when
+    # both ends happen to share a home path).
+    if ! ssh "${SSH_OPTS[@]}" "$host" \
+        "PROVISION_SERVICES=$(printf '%q' "$PROVISION_SERVICES")" \
+        bash '~/remote-provision-host.sh' "${KEY_NAMES[@]}" < /dev/null; then
         echo "❌ Provisioning steps failed on $host"
         return 1
     fi

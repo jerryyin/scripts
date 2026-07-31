@@ -24,6 +24,9 @@
 #
 # Usage: remote-provision-host.sh KEY_NAME [KEY_NAME ...]
 #   each KEY_NAME is a base name under ~/.ssh with a matching KEY_NAME.pub
+#
+# Env: PROVISION_SERVICES  space-separated compose services whose base
+#      images to pre-pull (default "triton triton-mi450"; "none" skips).
 
 set -e
 trap 'rm -f -- "$0"' EXIT
@@ -39,23 +42,31 @@ echo "✓ Keypair permissions set"
 # itself will still handle rc_files, and its own already-cloned check for
 # scripts will simply no-op once we've done this).
 #
-# Deliberately HTTPS-only, both branches, never switching to an SSH origin:
-# the key-backup step above just wiped ~/.ssh/known_hosts, and rc_files'
-# own ~/.ssh/config -- which redirects git@github.com through
-# ssh.github.com:443 (for networks that block outbound port 22) and
-# declares StrictHostKeyChecking accept-new -- isn't stowed until min.sh
-# runs, *after* this. An SSH clone/pull here would be racing against its
-# own prerequisite. `git pull <url>` (as opposed to plain `git pull`,
-# which trusts whatever `origin` is already configured to) pins this to
-# HTTPS regardless of what a human may have manually switched the remote
-# to on a prior visit to this host.
+# Deliberately HTTPS-only, both branches, never over SSH. Anything SSH
+# here would be racing its own prerequisite: batch-provision.sh's key
+# backup moves ~/.ssh aside on every run, which takes both known_hosts
+# AND rc_files' stowed ~/.ssh/config with it -- and that config is what
+# makes git@github.com work at all (it redirects to ssh.github.com:443
+# for networks blocking outbound 22, and sets StrictHostKeyChecking
+# accept-new). It isn't re-stowed until min.sh runs, *after* this.
+#
+# Two things are needed to actually stay on HTTPS, and it takes both:
+#   - `git pull <url>` rather than plain `git pull`, so we don't inherit
+#     whatever `origin` happens to point at (min.sh deliberately sets it
+#     to an SSH remote once cloned, and a human may have changed it too).
+#   - GIT_CONFIG_GLOBAL=/dev/null, because rc_files' ~/.gitconfig carries
+#     `url."git@github.com:".insteadOf https://github.com/`, which
+#     silently rewrites this HTTPS URL straight back to SSH. Once
+#     rc_files is stowed (i.e. every re-provision of a host), the URL
+#     alone is not enough. Same bypass lib/git_workspace.sh uses for its
+#     no-SSH clone fallback, for the same reason.
 SCRIPTS_HTTPS_URL="https://github.com/jerryyin/scripts.git"
 if [ -d "$HOME/scripts/.git" ]; then
     echo "📥 scripts already present, pulling latest..."
-    git -C "$HOME/scripts" pull --ff-only "$SCRIPTS_HTTPS_URL"
+    GIT_CONFIG_GLOBAL=/dev/null git -C "$HOME/scripts" pull --ff-only "$SCRIPTS_HTTPS_URL"
 else
     echo "📥 cloning scripts..."
-    git clone "$SCRIPTS_HTTPS_URL" "$HOME/scripts"
+    GIT_CONFIG_GLOBAL=/dev/null git clone "$SCRIPTS_HTTPS_URL" "$HOME/scripts"
 fi
 
 echo "🚀 Running env/min.sh..."
@@ -64,7 +75,18 @@ bash "$HOME/scripts/docker/env/min.sh"
 echo "🔧 Running env/priv.sh --force..."
 bash "$HOME/scripts/docker/env/priv.sh" --force || echo "⚠️  priv.sh reported an issue (continuing)"
 
-echo "🐳 Pulling base images (triton, triton-mi450 services)..."
+# Which services' base images to pre-pull. Defaults to the two general-
+# purpose dev services; override per host via batch-provision.sh -s, e.g.
+# `-s triton-b0` on a real gfx1250 B0 box, or `-s none` when the base image
+# is already on disk and a multi-GB re-pull would be pure waste.
+PROVISION_SERVICES="${PROVISION_SERVICES:-triton triton-mi450}"
+
+if [ "$PROVISION_SERVICES" = "none" ]; then
+    echo "🐳 Base-image pulls skipped (PROVISION_SERVICES=none)"
+    exit 0
+fi
+
+echo "🐳 Pulling base images ($PROVISION_SERVICES)..."
 # `docker compose pull <service>` pulls the service's *tagged* image
 # (jeryin/dev:triton here), not the Dockerfile's `FROM $BASE_IMAGE` --
 # and jeryin/dev:triton is a local-only tag that's never been pushed
@@ -82,8 +104,34 @@ elif ! docker compose version >/dev/null 2>&1; then
 elif ! command -v python3 >/dev/null 2>&1; then
     echo "⚠️  python3 not available — skipping base-image pulls"
 else
-    CONFIG_JSON=$(docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null)
-    for svc in triton triton-mi450; do
+    # Two flags are needed here, and without them this step silently
+    # resolved nothing at all: `config` failed, the 2>/dev/null swallowed
+    # the error, and every host just logged "Could not resolve BASE_IMAGE"
+    # for each service and pulled none of them.
+    #   --profile <svc>   Every dev service is profile-gated, and a service
+    #                     outside the active profile set isn't in the
+    #                     rendered model -- its BASE_IMAGE isn't there to
+    #                     read. So ask for exactly the ones we resolve.
+    #   --no-consistency  Every dev service inherits one shared
+    #                     `container_name: ${COMPOSE_PROJECT_NAME:-dev}`
+    #                     from the x-base-service anchor, by design: only
+    #                     one dev container runs at a time, and it's always
+    #                     called the same thing. But resolving N services
+    #                     means activating N of them at once, and duplicate
+    #                     container names fail whole-file validation
+    #                     ("container name ... is already in use"), so a
+    #                     PROVISION_SERVICES with two entries can't render.
+    #                     The check is irrelevant to reading build args --
+    #                     we never bring these up -- so skip it.
+    # Note `config --services` does NOT run that validation while
+    # `--format json` does, so the failure only shows up in this form.
+    PROFILE_FLAGS=""
+    for svc in $PROVISION_SERVICES; do
+        PROFILE_FLAGS="$PROFILE_FLAGS --profile $svc"
+    done
+    # shellcheck disable=SC2086
+    CONFIG_JSON=$(docker compose -f "$COMPOSE_FILE" $PROFILE_FLAGS config --no-consistency --format json 2>/dev/null)
+    for svc in $PROVISION_SERVICES; do
         IMAGE=$(printf '%s' "$CONFIG_JSON" | python3 -c '
 import json, sys
 cfg = json.load(sys.stdin)
