@@ -59,17 +59,24 @@ Correctness rules:
 - FFM has no meaningful timing. Report no speedup or ranking.
 - Do not start a compiler build. If a build is required, mark the grounded blocker and stop.
 
+Explaining the idea (do this AFTER the kernel is implemented and FFM-verified, but place it FIRST in the ledger, in reading order):
+- Lead for an engineer who has NOT read the code: a one-sentence hook, a before/after data-flow picture, and — where the idea has concrete structure (a layout, a permutation, a packing, a routing transform) — one small worked example.
+- Ground every concrete number. Any index, coordinate, warp/tile-ownership mapping, byte offset, histogram/offset entry, or worked numeric value shown in a diagram or example MUST be either (a) emitted by the kernel's own proof/print, (b) produced by a tool (triton-tensor-layout, an IR/asm dump), or (c) derived step-by-step from a formula you cite to a specific source line. Never hand-assert concrete indices. If you cannot source a number, print it from the kernel or omit it.
+- Schematic diagrams (boxes/arrows, no numbers) are free — prefer them. Reserve concrete-index tables for values you have actually sourced, and state where each came from.
+- The intuition must describe only what the FFM run confirmed — no intended behavior the evidence did not verify.
+
 Before finishing:
 1. Save the parent→child diff and explain why each hunk belongs to the one idea.
 2. Record the FFM command, output shape/dtype, finite fraction, numerical error, and PASS/FAIL.
 3. Record observed / inferred / unknown separately.
 4. Give one accepted case and one rejected or boundary case.
-5. Set the first two ledger lines to:
+5. Write the intuitive front (idea-in-one-breath, before/after picture, worked example, why-it-matters), and verify every concrete value in it against a cited source line or tool output — the same evidence standard as the rigorous record.
+6. Set the first two ledger lines to:
    STATUS: done
    CONCLUSION: <one-line correctness and mechanism conclusion>
    If genuinely blocked, use STATUS: blocked and name the exact blocker.
-6. Do not edit REGISTRY.md.
-7. Do not commit, push, stash, reset, or start another cell.
+7. Do not edit REGISTRY.md.
+8. Do not commit, push, stash, reset, or start another cell.
 ```
 
 ## Ledger body schema
@@ -78,6 +85,14 @@ After the two machine-readable status lines, use:
 
 ```text
 # <CELL-ID> — <idea>
+
+## The idea in one breath        # 1-2 sentence plain-language hook
+## The picture                   # before/after data-flow (schematic); + a worked
+                                 #   example ONLY where the idea has concrete structure,
+                                 #   with every number sourced (see "Explaining the idea")
+## Why it might matter           # intuition; FFM = correctness only, no timing
+
+# Rigorous record               # <- divider; everything below is the rigorous schema
 
 ## Frozen experiment
 ## Parent → child ownership change
@@ -89,3 +104,5 @@ After the two machine-readable status lines, use:
 ## Unknown
 ## Remaining blocker or next dependency
 ```
+
+The intuitive front and the rigorous record are one document, not two stapled together: state the intuition first, then the precise mechanism, with no duplicated diagrams. Concrete numbers in the front carry the same sourcing burden as the rigorous record.
