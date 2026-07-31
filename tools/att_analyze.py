@@ -27,21 +27,37 @@ from collections import defaultdict
 
 def categorize(inst: str) -> str:
     """Classify an instruction into a performance-relevant category."""
-    if "v_mfma" in inst or "v_smfma" in inst:
+    if "v_mfma" in inst or "v_smfma" in inst or "v_wmma" in inst:
         return "mfma"
-    if "buffer_load" in inst and "lds" in inst:
+    if (
+        ("buffer_load" in inst and "lds" in inst)
+        or "global_load_async_to_lds" in inst
+    ):
         return "buffer_load_lds"
     if "buffer_load" in inst:
         return "buffer_load"
+    if "global_load" in inst:
+        return "global_load"
     if "buffer_store" in inst:
         return "buffer_store"
-    if "ds_read" in inst:
+    if "global_store" in inst:
+        return "global_store"
+    if "ds_read" in inst or "ds_load" in inst:
         return "ds_read"
-    if "ds_write" in inst:
+    if "ds_write" in inst or "ds_store" in inst:
         return "ds_write"
     if "s_barrier" in inst:
         return "s_barrier"
-    if "s_waitcnt" in inst:
+    if any(
+        wait in inst
+        for wait in (
+            "s_waitcnt",
+            "s_wait_loadcnt",
+            "s_wait_storecnt",
+            "s_wait_dscnt",
+            "s_wait_kmcnt",
+        )
+    ):
         return "s_waitcnt"
     if "v_perm" in inst:
         return "v_perm"
@@ -63,16 +79,19 @@ def categorize(inst: str) -> str:
 
 
 CATEGORY_ORDER = [
-    "mfma", "buffer_load_lds", "buffer_load", "buffer_store",
+    "mfma", "buffer_load_lds", "buffer_load", "global_load",
+    "buffer_store", "global_store",
     "ds_read", "ds_write", "s_barrier", "s_waitcnt",
     "v_perm", "alu", "branch", "nop", "s_endpgm", "other",
 ]
 
 CATEGORY_LABELS = {
-    "mfma": "MFMA (compute)",
-    "buffer_load_lds": "DMA (buf→LDS)",
+    "mfma": "Matrix (MFMA/WMMA)",
+    "buffer_load_lds": "DMA (global→LDS)",
     "buffer_load": "buffer_load",
+    "global_load": "global_load",
     "buffer_store": "buffer_store",
+    "global_store": "global_store",
     "ds_read": "ds_read (LDS)",
     "ds_write": "ds_write (LDS)",
     "s_barrier": "s_barrier",
