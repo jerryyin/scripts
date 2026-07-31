@@ -16,13 +16,14 @@ Usage:
   # Show per-instruction detail for the loop body:
   att_analyze.py <stats_csv> --detail
 
-  # Filter to specific dispatch (default: highest-hitcount dispatch):
-  att_analyze.py <stats_csv> --dispatch 2
+  # Filter to a code-object load ID and explicitly select a loop hitcount:
+  att_analyze.py <stats_csv> --codeobj 2 --loop-hitcount 200
 """
 import argparse
 import csv
-import sys
+import json
 from collections import defaultdict
+from pathlib import Path
 
 
 def categorize(inst: str) -> str:
@@ -105,30 +106,52 @@ CATEGORY_LABELS = {
 }
 
 
+REQUIRED_COLUMNS = {
+    "codeobj",
+    "vaddr",
+    "instruction",
+    "hitcount",
+    "latency",
+    "stall",
+    "idle",
+}
+
+
+def _column_name(value: str) -> str:
+    return "".join(character for character in value.lower() if character.isalnum())
+
+
 def parse_att_csv(path: str):
     """Parse ATT stats CSV, return list of instruction records."""
     records = []
-    with open(path) as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        for row in reader:
-            if len(row) < 7:
+    with open(path, encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise ValueError(f"{path}: missing ATT CSV header")
+        normalized = {_column_name(name): name for name in reader.fieldnames}
+        missing = sorted(REQUIRED_COLUMNS - set(normalized))
+        if missing:
+            raise ValueError(f"{path}: missing ATT CSV columns: {missing}")
+        for line_number, row in enumerate(reader, start=2):
+            if not any((value or "").strip() for value in row.values()):
                 continue
             try:
                 rec = {
-                    "codeobj": int(row[0]),
-                    "vaddr": int(row[1]),
-                    "inst": row[2].strip(),
-                    "hitcount": int(row[3]),
-                    "latency": int(row[4]),
-                    "stall": int(row[5]),
-                    "idle": int(row[6]),
-                    "source": row[7] if len(row) > 7 else "",
+                    "codeobj": int(row[normalized["codeobj"]]),
+                    "vaddr": int(row[normalized["vaddr"]]),
+                    "inst": row[normalized["instruction"]].strip(),
+                    "hitcount": int(row[normalized["hitcount"]]),
+                    "latency": int(row[normalized["latency"]]),
+                    "stall": int(row[normalized["stall"]]),
+                    "idle": int(row[normalized["idle"]]),
+                    "source": row.get(normalized.get("source", ""), ""),
                 }
                 rec["category"] = categorize(rec["inst"])
                 records.append(rec)
-            except (ValueError, IndexError):
-                continue
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"{path}:{line_number}: malformed ATT instruction row"
+                ) from error
     return records
 
 
@@ -141,6 +164,25 @@ def find_loop_hitcount(records):
     if not counts:
         return 0
     return max(counts, key=lambda h: h * counts[h])
+
+
+def select_code_object(records, requested_code_object_id=None):
+    """Select exactly one code-object load ID and return it with its records."""
+    if requested_code_object_id is not None:
+        records = [
+            record
+            for record in records
+            if record["codeobj"] == requested_code_object_id
+        ]
+    if not records:
+        raise ValueError("no ATT instruction records matched the requested code object")
+    code_object_ids = {record["codeobj"] for record in records}
+    if len(code_object_ids) != 1:
+        raise ValueError(
+            "selected records contain multiple Codeobj load IDs "
+            f"{sorted(code_object_ids)}; select exactly one with --codeobj"
+        )
+    return records, code_object_ids.pop()
 
 
 def analyze(records, loop_hitcount=None):
@@ -158,21 +200,29 @@ def analyze(records, loop_hitcount=None):
         cats[cat]["stall"] += r["stall"]
         cats[cat]["idle"] += r["idle"]
 
-    return dict(cats), loop_hitcount
+    positive_latency = sum(r["latency"] for r in records if r["hitcount"] > 0)
+    selected_latency = sum(c["latency"] for c in cats.values())
+    coverage_pct = 100.0 * selected_latency / positive_latency if positive_latency else 0.0
+    return dict(cats), loop_hitcount, coverage_pct
 
 
-def print_report(cats, loop_hitcount, label=""):
+def print_report(cats, loop_hitcount, coverage_pct, label=""):
     """Print a formatted analysis report."""
-    total_lat = sum(c["latency"] for c in cats.values()) or 1
-    total_stall = sum(c["stall"] for c in cats.values()) or 1
+    total_lat = sum(c["latency"] for c in cats.values())
+    total_stall = sum(c["stall"] for c in cats.values())
     total_idle = sum(c["idle"] for c in cats.values())
     total_count = sum(c["count"] for c in cats.values())
+    latency_denominator = total_lat or 1
+    stall_denominator = total_stall or 1
 
     if label:
         print(f"\n{'=' * 72}")
         print(f"  {label}")
         print(f"{'=' * 72}")
-    print(f"  Loop hitcount: {loop_hitcount}  |  Instructions per iteration: {total_count}")
+    print(
+        f"  Loop hitcount: {loop_hitcount}  |  Instructions per iteration: {total_count}"
+        f"  |  Selected-latency coverage: {coverage_pct:.1f}%"
+    )
     print()
     print(f"  {'Category':<20} {'#':>4} {'Latency':>12} {'Stall':>12} {'Idle':>10}  {'Lat%':>6} {'Stall%':>7}")
     print(f"  {'-' * 20} {'-' * 4} {'-' * 12} {'-' * 12} {'-' * 10}  {'-' * 6} {'-' * 7}")
@@ -181,16 +231,16 @@ def print_report(cats, loop_hitcount, label=""):
         if cat not in cats:
             continue
         c = cats[cat]
-        lat_pct = 100.0 * c["latency"] / total_lat
-        stall_pct = 100.0 * c["stall"] / total_stall
+        lat_pct = 100.0 * c["latency"] / latency_denominator
+        stall_pct = 100.0 * c["stall"] / stall_denominator
         lbl = CATEGORY_LABELS.get(cat, cat)
         print(f"  {lbl:<20} {c['count']:>4} {c['latency']:>12,} {c['stall']:>12,} {c['idle']:>10,}  {lat_pct:>5.1f}% {stall_pct:>6.1f}%")
 
     print(f"  {'-' * 20} {'-' * 4} {'-' * 12} {'-' * 12} {'-' * 10}")
     print(f"  {'TOTAL':<20} {total_count:>4} {total_lat:>12,} {total_stall:>12,} {total_idle:>10,}")
     print()
-    print(f"  Overall stall rate: {100.0 * total_stall / total_lat:.1f}%")
-    print(f"  Overall idle rate:  {100.0 * total_idle / total_lat:.1f}%")
+    print(f"  Overall stall rate: {100.0 * total_stall / latency_denominator:.1f}%")
+    print(f"  Overall idle rate:  {100.0 * total_idle / latency_denominator:.1f}%")
     print()
 
     print("  Top stall sources:")
@@ -199,7 +249,7 @@ def print_report(cats, loop_hitcount, label=""):
         if c["stall"] == 0:
             break
         lbl = CATEGORY_LABELS.get(cat, cat)
-        print(f"    {lbl:<20} {100.0 * c['stall'] / total_stall:>5.1f}%  ({c['stall']:>12,})")
+        print(f"    {lbl:<20} {100.0 * c['stall'] / stall_denominator:>5.1f}%  ({c['stall']:>12,})")
     print()
 
 
@@ -222,10 +272,14 @@ def print_detail(records, loop_hitcount):
 def print_comparison(cats1, hc1, label1, cats2, hc2, label2):
     """Print side-by-side comparison of two runs."""
     all_cats = set(list(cats1.keys()) + list(cats2.keys()))
-    total1 = sum(c["latency"] for c in cats1.values()) or 1
-    total2 = sum(c["latency"] for c in cats2.values()) or 1
-    stall1 = sum(c["stall"] for c in cats1.values()) or 1
-    stall2 = sum(c["stall"] for c in cats2.values()) or 1
+    total1 = sum(c["latency"] for c in cats1.values())
+    total2 = sum(c["latency"] for c in cats2.values())
+    stall1 = sum(c["stall"] for c in cats1.values())
+    stall2 = sum(c["stall"] for c in cats2.values())
+    latency_denominator1 = total1 or 1
+    latency_denominator2 = total2 or 1
+    stall_denominator1 = stall1 or 1
+    stall_denominator2 = stall2 or 1
 
     print(f"\n{'=' * 80}")
     print(f"  Comparison: {label1} vs {label2}")
@@ -239,23 +293,55 @@ def print_comparison(cats1, hc1, label1, cats2, hc2, label2):
             continue
         c1 = cats1.get(cat, {"count": 0, "latency": 0, "stall": 0, "idle": 0})
         c2 = cats2.get(cat, {"count": 0, "latency": 0, "stall": 0, "idle": 0})
-        lp1 = 100.0 * c1["latency"] / total1
-        lp2 = 100.0 * c2["latency"] / total2
-        sp1 = 100.0 * c1["stall"] / stall1
-        sp2 = 100.0 * c2["stall"] / stall2
+        lp1 = 100.0 * c1["latency"] / latency_denominator1
+        lp2 = 100.0 * c2["latency"] / latency_denominator2
+        sp1 = 100.0 * c1["stall"] / stall_denominator1
+        sp2 = 100.0 * c2["stall"] / stall_denominator2
         delta = lp2 - lp1
         lbl = CATEGORY_LABELS.get(cat, cat)
         print(f"  {lbl:<20} {lp1:>6.1f}% {sp1:>6.1f}% {c1['count']:>4}    {lp2:>6.1f}% {sp2:>6.1f}% {c2['count']:>4}  {delta:>+6.1f}%")
 
     cnt1 = sum(c["count"] for c in cats1.values())
     cnt2 = sum(c["count"] for c in cats2.values())
-    sr1 = 100.0 * stall1 / total1
-    sr2 = 100.0 * stall2 / total2
+    sr1 = 100.0 * stall1 / latency_denominator1
+    sr2 = 100.0 * stall2 / latency_denominator2
     print(f"  {'-' * 20}")
     print(f"  Total instructions:  {cnt1:>4}  vs  {cnt2:>4}")
-    print(f"  Total latency:       {total1:>12,}  vs  {total2:>12,}  ({100.0*total2/total1 - 100:>+.1f}%)")
+    norm1 = total1 / hc1
+    norm2 = total2 / hc2
+    print(f"  Raw total latency:   {total1:>12,}  vs  {total2:>12,}")
+    delta = 100.0 * norm2 / norm1 - 100 if norm1 else float("nan")
+    print(f"  Latency / hitcount:  {norm1:>12,.2f}  vs  {norm2:>12,.2f}  ({delta:>+.1f}%)")
     print(f"  Stall rate:          {sr1:>5.1f}%  vs  {sr2:>5.1f}%")
     print()
+
+
+def json_summary(path, label, cats, loop_hitcount, coverage_pct, codeobj):
+    total_latency = sum(category["latency"] for category in cats.values())
+    total_stall = sum(category["stall"] for category in cats.values())
+    total_idle = sum(category["idle"] for category in cats.values())
+    total_count = sum(category["count"] for category in cats.values())
+    return {
+        "schema_version": 1,
+        "path": str(Path(path).resolve()),
+        "label": label,
+        "code_object_id": codeobj,
+        "loop_hitcount": loop_hitcount,
+        "instructions_per_iteration": total_count,
+        "selected_latency_coverage_pct": coverage_pct,
+        "other_latency_pct": (
+            100.0 * cats.get("other", {}).get("latency", 0) / (total_latency or 1)
+        ),
+        "totals": {
+            "latency": total_latency,
+            "stall": total_stall,
+            "idle": total_idle,
+            "latency_per_hitcount": total_latency / loop_hitcount,
+            "stall_rate_pct": 100.0 * total_stall / (total_latency or 1),
+            "idle_rate_pct": 100.0 * total_idle / (total_latency or 1),
+        },
+        "categories": cats,
+    }
 
 
 def main():
@@ -263,41 +349,88 @@ def main():
     parser.add_argument("csv_files", nargs="+", help="ATT stats CSV file(s)")
     parser.add_argument("--labels", nargs="*", help="Labels for each CSV (for comparison)")
     parser.add_argument("--detail", action="store_true", help="Show per-instruction detail")
-    parser.add_argument("--dispatch", type=int, help="Filter to specific dispatch code object ID")
+    parser.add_argument(
+        "--codeobj",
+        type=int,
+        help="filter the CSV Codeobj column (a code-object load ID, not a dispatch ID)",
+    )
+    parser.add_argument("--dispatch", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--loop-hitcount",
+        type=int,
+        action="append",
+        help="explicit hot-loop hitcount; pass once for all CSVs or once per CSV",
+    )
+    parser.add_argument("--json-out", type=Path, help="write the metric vector as JSON")
     args = parser.parse_args()
+    if args.dispatch is not None:
+        parser.error(
+            "--dispatch was incorrect: the CSV column is Codeobj, not Dispatch_Id; "
+            "use --codeobj only when a stats file contains multiple code objects"
+        )
+    if args.loop_hitcount and len(args.loop_hitcount) not in (1, len(args.csv_files)):
+        parser.error("--loop-hitcount must be supplied once or once per CSV")
 
     all_data = []
     for i, path in enumerate(args.csv_files):
-        records = parse_att_csv(path)
-        if args.dispatch is not None:
-            records = [r for r in records if r["codeobj"] == args.dispatch]
-        if not records:
-            parser.error(f"{path}: no ATT instruction records matched the requested dispatch")
-        cats, hc = analyze(records)
+        try:
+            records = parse_att_csv(path)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        try:
+            records, selected_code_object_id = select_code_object(
+                records, args.codeobj
+            )
+        except ValueError as error:
+            parser.error(f"{path}: {error}")
+        requested_hitcount = None
+        if args.loop_hitcount:
+            requested_hitcount = args.loop_hitcount[0 if len(args.loop_hitcount) == 1 else i]
+        cats, hc, coverage_pct = analyze(records, requested_hitcount)
         if hc <= 0 or not cats:
             parser.error(f"{path}: no positive-hitcount loop body was found")
         label = args.labels[i] if args.labels and i < len(args.labels) else path
-        all_data.append((cats, hc, label, records))
+        all_data.append(
+            (cats, hc, coverage_pct, label, records, path, selected_code_object_id)
+        )
 
     if len(all_data) == 1:
-        cats, hc, label, records = all_data[0]
-        print_report(cats, hc, label)
+        cats, hc, coverage_pct, label, records, _, _ = all_data[0]
+        print_report(cats, hc, coverage_pct, label)
         if args.detail:
             print_detail(records, hc)
     elif len(all_data) == 2:
-        cats1, hc1, label1, records1 = all_data[0]
-        cats2, hc2, label2, records2 = all_data[1]
-        print_report(cats1, hc1, label1)
-        print_report(cats2, hc2, label2)
+        cats1, hc1, coverage1, label1, records1, _, _ = all_data[0]
+        cats2, hc2, coverage2, label2, records2, _, _ = all_data[1]
+        print_report(cats1, hc1, coverage1, label1)
+        print_report(cats2, hc2, coverage2, label2)
         print_comparison(cats1, hc1, label1, cats2, hc2, label2)
         if args.detail:
             print_detail(records1, hc1)
             print_detail(records2, hc2)
     else:
-        for cats, hc, label, records in all_data:
-            print_report(cats, hc, label)
+        for cats, hc, coverage_pct, label, records, _, _ in all_data:
+            print_report(cats, hc, coverage_pct, label)
             if args.detail:
                 print_detail(records, hc)
+
+    if args.json_out:
+        summaries = [
+            json_summary(path, label, cats, hc, coverage_pct, code_object_id)
+            for (
+                cats,
+                hc,
+                coverage_pct,
+                label,
+                _records,
+                path,
+                code_object_id,
+            ) in all_data
+        ]
+        args.json_out.write_text(
+            json.dumps({"captures": summaries}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

@@ -99,9 +99,9 @@ att() {
     echo "[HINT] normal ROCm images: run ~/scripts/docker/env/att.sh to install it"
   fi
 
-  # Optional kernel filter: set ATT_KERNEL_REGEX to capture only matching kernels
-  # (e.g. "_matmul_swiglu_fn") instead of every dispatch -- keeps the trace to the
-  # kernel of interest and drops surrounding pytorch/helper kernels. Default: all.
+  # Optional capture overrides.  Kernel iteration selection is important for ATT:
+  # without it rocprofiler normally traces the first matching kernel occurrence,
+  # which may be a cold/warmup dispatch rather than the intended steady-state one.
   local ATT_CFG_SOURCE="${ATT_CONFIG_PATH:-$SCRIPT_DIR/att.json}"
   local ATT_CFG="$ATT_CFG_SOURCE"
   local GENERATED_ATT_CFG=0
@@ -109,7 +109,10 @@ att() {
     echo "Error: ATT config does not exist: $ATT_CFG_SOURCE"
     return 1
   fi
-  if [[ -n "${ATT_KERNEL_REGEX:-}" || -n "${ATT_PERFCOUNTERS+x}" ]]; then
+  if [[ -n "${ATT_KERNEL_REGEX:-}" || -n "${ATT_KERNEL_ITERATION_RANGE:-}" || \
+        -n "${ATT_TARGET_CU:-}" || -n "${ATT_SHADER_ENGINE_MASK:-}" || \
+        -n "${ATT_SIMD_SELECT:-}" || -n "${ATT_PERFCOUNTERS+x}" || \
+        -n "${ATT_PERFCOUNTER_CTRL:-}" ]]; then
     ATT_CFG="$(mktemp --suffix=.att.json)"
     GENERATED_ATT_CFG=1
     python3 - "$ATT_CFG_SOURCE" "$ATT_CFG" <<'PY'
@@ -123,9 +126,21 @@ with open(source, encoding="utf-8") as stream:
 for job in config["jobs"]:
     if os.environ.get("ATT_KERNEL_REGEX"):
         job["kernel_include_regex"] = os.environ["ATT_KERNEL_REGEX"]
+    if os.environ.get("ATT_KERNEL_ITERATION_RANGE"):
+        job["kernel_iteration_range"] = os.environ["ATT_KERNEL_ITERATION_RANGE"]
+    if os.environ.get("ATT_TARGET_CU"):
+        job["att_target_cu"] = int(os.environ["ATT_TARGET_CU"], 0)
+    if os.environ.get("ATT_SHADER_ENGINE_MASK"):
+        job["att_shader_engine_mask"] = os.environ["ATT_SHADER_ENGINE_MASK"]
+    if os.environ.get("ATT_SIMD_SELECT"):
+        job["att_simd_select"] = int(os.environ["ATT_SIMD_SELECT"], 0)
     if "ATT_PERFCOUNTERS" in os.environ:
         counters = [name.strip() for name in os.environ["ATT_PERFCOUNTERS"].split(",") if name.strip()]
         job["att_perfcounters"] = ", ".join(counters)
+        if counters and "ATT_PERFCOUNTER_CTRL" not in os.environ:
+            job["att_perfcounter_ctrl"] = 3
+    if os.environ.get("ATT_PERFCOUNTER_CTRL"):
+        job["att_perfcounter_ctrl"] = int(os.environ["ATT_PERFCOUNTER_CTRL"], 0)
 with open(destination, "w", encoding="utf-8") as stream:
     json.dump(config, stream, indent=2, sort_keys=True)
     stream.write("\n")
@@ -133,6 +148,12 @@ PY
   fi
   if [[ -n "${ATT_KERNEL_REGEX:-}" ]]; then
     echo "[ATT] kernel filter: $ATT_KERNEL_REGEX"
+  fi
+  if [[ -n "${ATT_KERNEL_ITERATION_RANGE:-}" ]]; then
+    echo "[ATT] kernel iteration range: $ATT_KERNEL_ITERATION_RANGE"
+  fi
+  if [[ -n "${ATT_TARGET_CU:-}" || -n "${ATT_SHADER_ENGINE_MASK:-}" || -n "${ATT_SIMD_SELECT:-}" ]]; then
+    echo "[ATT] placement: target_cu=${ATT_TARGET_CU:-config} se_mask=${ATT_SHADER_ENGINE_MASK:-config} simd=${ATT_SIMD_SELECT:-config}"
   fi
   if [[ -n "${ATT_PERFCOUNTERS+x}" ]]; then
     echo "[ATT] performance counters: ${ATT_PERFCOUNTERS:-<none>}"
