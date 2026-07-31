@@ -83,10 +83,11 @@ att() {
   # Ensure output directory's parent exists
   mkdir -p "$(dirname "$OUTBASE")"
 
-  # If output folder exists, move aside
+  # Never rotate or delete trace data implicitly.  The Stage 2 control plane
+  # requires each capture to be archived and hashed before the next one.
   if [[ -d "$OUTBASE" ]]; then
-    rm -rf "${OUTBASE}_bkp"
-    mv "$OUTBASE" "${OUTBASE}_bkp"
+    echo "Error: $OUTBASE already exists; archive it before the next ATT capture"
+    return 1
   fi
 
   # The SQTT trace decoder. On therock it ships in the venv ROCm; on normal images
@@ -101,24 +102,60 @@ att() {
   # Optional kernel filter: set ATT_KERNEL_REGEX to capture only matching kernels
   # (e.g. "_matmul_swiglu_fn") instead of every dispatch -- keeps the trace to the
   # kernel of interest and drops surrounding pytorch/helper kernels. Default: all.
-  local ATT_CFG="$SCRIPT_DIR/att.json"
-  if [[ -n "${ATT_KERNEL_REGEX:-}" ]]; then
+  local ATT_CFG_SOURCE="${ATT_CONFIG_PATH:-$SCRIPT_DIR/att.json}"
+  local ATT_CFG="$ATT_CFG_SOURCE"
+  local GENERATED_ATT_CFG=0
+  if [[ ! -f "$ATT_CFG_SOURCE" ]]; then
+    echo "Error: ATT config does not exist: $ATT_CFG_SOURCE"
+    return 1
+  fi
+  if [[ -n "${ATT_KERNEL_REGEX:-}" || -n "${ATT_PERFCOUNTERS+x}" ]]; then
     ATT_CFG="$(mktemp --suffix=.att.json)"
-    python3 -c "import json,os; d=json.load(open('$SCRIPT_DIR/att.json')); [j.update(kernel_include_regex=os.environ['ATT_KERNEL_REGEX']) for j in d['jobs']]; json.dump(d, open('$ATT_CFG','w'))"
+    GENERATED_ATT_CFG=1
+    python3 - "$ATT_CFG_SOURCE" "$ATT_CFG" <<'PY'
+import json
+import os
+import sys
+
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as stream:
+    config = json.load(stream)
+for job in config["jobs"]:
+    if os.environ.get("ATT_KERNEL_REGEX"):
+        job["kernel_include_regex"] = os.environ["ATT_KERNEL_REGEX"]
+    if "ATT_PERFCOUNTERS" in os.environ:
+        counters = [name.strip() for name in os.environ["ATT_PERFCOUNTERS"].split(",") if name.strip()]
+        job["att_perfcounters"] = ", ".join(counters)
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(config, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+  fi
+  if [[ -n "${ATT_KERNEL_REGEX:-}" ]]; then
     echo "[ATT] kernel filter: $ATT_KERNEL_REGEX"
+  fi
+  if [[ -n "${ATT_PERFCOUNTERS+x}" ]]; then
+    echo "[ATT] performance counters: ${ATT_PERFCOUNTERS:-<none>}"
   fi
 
   echo "[ATT] Profiling: $*"
   echo "[ATT] Output directory: $OUTBASE"
   echo "[ATT] ROCm: $ROCM_DIR"
 
+  local ROCPROF_STATUS=0
   rocprofv3 \
     --att-library-path "$ROCM_DIR/lib" \
     --preload "$ROCM_DIR/lib/libamdhip64.so" \
     -i "$ATT_CFG" \
-    -d "$OUTBASE" -- "$@"
+    -d "$OUTBASE" -- "$@" || ROCPROF_STATUS=$?
 
-  [[ "$ATT_CFG" != "$SCRIPT_DIR/att.json" ]] && rm -f "$ATT_CFG"
+  if [[ -d "$OUTBASE" ]]; then
+    cp "$ATT_CFG" "$OUTBASE/effective_att_config.json"
+  fi
+  [[ $GENERATED_ATT_CFG -eq 1 ]] && rm -f "$ATT_CFG"
+  if [[ $ROCPROF_STATUS -ne 0 ]]; then
+    return "$ROCPROF_STATUS"
+  fi
 
   # Check if output was generated
   if [[ -d "$OUTBASE" ]]; then

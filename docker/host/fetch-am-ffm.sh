@@ -12,8 +12,9 @@
 # Usage:
 #   fetch-am-ffm.sh [version]        # e.g. fetch-am-ffm.sh 7.13-am+ffmlite-mi400-r6.06
 #
-# Auth: reads atlartifactory.amd.com credentials from ~/.netrc (kept in sync
-# from ~/vault/atlartifactory_token.txt by `vault.sh atlartifactory`).
+# Auth: reads the JFrog identity token from ~/vault/atlartifactory_token.txt
+# and sends it as a bearer token.  Basic auth through ~/.netrc is rejected by
+# the current Artifactory deployment even when it carries the same token.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,10 +26,11 @@ URL="${ARTIFACTORY_BASE}/${TARBALL_NAME}"
 DEST_DIR="${AM_FFM_DIR:-$HOME/rocdtif-${VERSION}}"
 CACHE_DIR="$HOME/.cache/am-ffm"
 TARBALL="$CACHE_DIR/${TARBALL_NAME}"
+TOKEN_FILE="${ARTIFACTORY_KEY_FILE:-$HOME/vault/atlartifactory_token.txt}"
 
-if [ ! -f "$HOME/.netrc" ] || ! grep -q "machine atlartifactory.amd.com" "$HOME/.netrc" 2>/dev/null; then
-    echo "❌ No atlartifactory.amd.com credentials in ~/.netrc." >&2
-    echo "   Run: bash $SCRIPT_DIR/../env/vault.sh atlartifactory" >&2
+if [ ! -s "$TOKEN_FILE" ]; then
+    echo "❌ Artifactory token is missing or empty: $TOKEN_FILE" >&2
+    echo "   Sync ~/vault, then retry." >&2
     exit 1
 fi
 
@@ -37,7 +39,10 @@ if [ -f "$TARBALL" ]; then
     echo "✓ Using cached $TARBALL"
 else
     echo "📥 Downloading $URL ..."
-    curl -fL --netrc --max-time 900 -o "$TARBALL.part" "$URL"
+    ARTIFACTORY_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+    printf 'header = "Authorization: Bearer %s"\n' "$ARTIFACTORY_TOKEN" | \
+        curl --config - -fL --max-time 900 -o "$TARBALL.part" "$URL"
+    unset ARTIFACTORY_TOKEN
     mv "$TARBALL.part" "$TARBALL"
 fi
 

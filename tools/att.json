@@ -10,7 +10,7 @@
             "att_simd_select": "0xF",
             "att_buffer_size": "0x60000000",
             "att_perfcounter_ctrl": 3,
-            "att_perfcounters": "SQ_LDS_BANK_CONFLICT, SQ_WAIT_INST_LDS"
+            "att_perfcounters": ""
         }
     ]
 }

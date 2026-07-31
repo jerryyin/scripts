@@ -269,9 +269,13 @@ def main():
     all_data = []
     for i, path in enumerate(args.csv_files):
         records = parse_att_csv(path)
-        if args.dispatch:
+        if args.dispatch is not None:
             records = [r for r in records if r["codeobj"] == args.dispatch]
+        if not records:
+            parser.error(f"{path}: no ATT instruction records matched the requested dispatch")
         cats, hc = analyze(records)
+        if hc <= 0 or not cats:
+            parser.error(f"{path}: no positive-hitcount loop body was found")
         label = args.labels[i] if args.labels and i < len(args.labels) else path
         all_data.append((cats, hc, label, records))
 
