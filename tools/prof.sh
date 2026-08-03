@@ -164,7 +164,12 @@ PY
   echo "[ATT] ROCm: $ROCM_DIR"
 
   local ROCPROF_STATUS=0
+  # rocprofv3 1.2.2 gives the command-line att_serialize_all option an
+  # explicit false default, then rejects a true value from an input file as a
+  # conflict.  Repeat the required true value on the command line so both
+  # sources agree while retaining the archived effective config.
   rocprofv3 \
+    --att-serialize-all true \
     --att-library-path "$ROCM_DIR/lib" \
     --preload "$ROCM_DIR/lib/libamdhip64.so" \
     -i "$ATT_CFG" \
