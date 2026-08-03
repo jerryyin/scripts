@@ -49,10 +49,13 @@ def categorize(inst: str) -> str:
         return "ds_write"
     if "s_barrier" in inst:
         return "s_barrier"
+    if "s_clause" in inst:
+        return "s_clause"
     if any(
         wait in inst
         for wait in (
             "s_waitcnt",
+            "s_wait_xcnt",
             "s_wait_loadcnt",
             "s_wait_storecnt",
             "s_wait_dscnt",
@@ -82,7 +85,7 @@ def categorize(inst: str) -> str:
 CATEGORY_ORDER = [
     "mfma", "buffer_load_lds", "buffer_load", "global_load",
     "buffer_store", "global_store",
-    "ds_read", "ds_write", "s_barrier", "s_waitcnt",
+    "ds_read", "ds_write", "s_barrier", "s_clause", "s_waitcnt",
     "v_perm", "alu", "branch", "nop", "s_endpgm", "other",
 ]
 
@@ -96,6 +99,7 @@ CATEGORY_LABELS = {
     "ds_read": "ds_read (LDS)",
     "ds_write": "ds_write (LDS)",
     "s_barrier": "s_barrier",
+    "s_clause": "s_clause",
     "s_waitcnt": "s_waitcnt",
     "v_perm": "v_perm (swizzle)",
     "alu": "ALU / addr",

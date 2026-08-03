@@ -82,6 +82,19 @@ def test_zero_stall_remains_zero_in_json_summary() -> None:
     assert summary["totals"]["latency_per_hitcount"] == 2.0
 
 
+def test_gfx12_clause_and_wait_xcnt_are_not_other() -> None:
+    path = write_csv(
+        "7,4096,s_clause 0x3,20,200,40,10,kernel.py:10\n"
+        "7,4100,s_wait_xcnt null,20,100,80,5,kernel.py:11\n"
+    )
+    records = att_analyze.parse_att_csv(str(path))
+    categories, hitcount, _coverage = att_analyze.analyze(records, 20)
+    assert hitcount == 20
+    assert categories["s_clause"]["latency"] == 200
+    assert categories["s_waitcnt"]["stall"] == 80
+    assert "other" not in categories
+
+
 def main() -> None:
     tests = sorted(
         (
