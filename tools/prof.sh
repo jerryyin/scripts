@@ -159,6 +159,14 @@ PY
     echo "[ATT] performance counters: ${ATT_PERFCOUNTERS:-<none>}"
   fi
 
+  # rocprofv3 1.2.2 guards the SIMD export with a truthiness check.  The
+  # integer ID 0 therefore falls through to the gfx10+ default (SIMD 3) even
+  # though the effective input config says 0.  Export the runtime parameter
+  # explicitly so the decoded waves match the requested SIMD ID.
+  if [[ -n "${ATT_SIMD_SELECT:-}" ]]; then
+    export ROCPROF_ATT_PARAM_SIMD_SELECT="$ATT_SIMD_SELECT"
+  fi
+
   echo "[ATT] Profiling: $*"
   echo "[ATT] Output directory: $OUTBASE"
   echo "[ATT] ROCm: $ROCM_DIR"
@@ -177,6 +185,17 @@ PY
 
   if [[ -d "$OUTBASE" ]]; then
     cp "$ATT_CFG" "$OUTBASE/effective_att_config.json"
+    {
+      echo "ATT_KERNEL_REGEX=${ATT_KERNEL_REGEX:-}"
+      echo "ATT_KERNEL_ITERATION_RANGE=${ATT_KERNEL_ITERATION_RANGE:-}"
+      echo "ATT_TARGET_CU=${ATT_TARGET_CU:-}"
+      echo "ATT_SHADER_ENGINE_MASK=${ATT_SHADER_ENGINE_MASK:-}"
+      echo "ATT_SIMD_SELECT=${ATT_SIMD_SELECT:-}"
+      echo "ATT_PERFCOUNTERS=${ATT_PERFCOUNTERS:-}"
+      echo "ATT_PERFCOUNTER_CTRL=${ATT_PERFCOUNTER_CTRL:-}"
+      echo "ROCPROF_ATT_PARAM_SIMD_SELECT=${ROCPROF_ATT_PARAM_SIMD_SELECT:-}"
+      echo "ROCM_DIR=$ROCM_DIR"
+    } > "$OUTBASE/effective_att_environment.txt"
   fi
   [[ $GENERATED_ATT_CFG -eq 1 ]] && rm -f "$ATT_CFG"
   if [[ $ROCPROF_STATUS -ne 0 ]]; then
