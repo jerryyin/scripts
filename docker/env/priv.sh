@@ -8,6 +8,7 @@
 #        - SSH keys from persistent storage
 #        - Hostname resolution fix
 #        - sync_vault (link mounted vault, or clone the private vault repo)
+#        - sync_investigations (link or clone the private investigations repo)
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
@@ -122,6 +123,50 @@ sync_vault() {
     fi
 }
 
+# Clone the private investigations repo (~/triton-investigations): GPU kernel
+# investigation records plus the unattended bare-metal campaign harness.
+#
+# This lives here rather than in min.sh — where rc_files and scripts are cloned —
+# because those two are public and clone over https, while this one is private
+# and needs the SSH key that setup_ssh installs just above. Same reason vault is
+# here. A failure is a warning, not an error: plenty of containers never touch a
+# campaign, and the rest of initialization must still finish.
+#
+# Only runs during first-time bootstrap (phase 2 forbids network calls), so use
+# `priv.sh --force` to pick it up on a container that was bootstrapped earlier.
+INVESTIGATIONS_REPO="${INVESTIGATIONS_REPO:-git@github.com:jerryyin/triton-investigations.git}"
+INVESTIGATIONS_DIR="${INVESTIGATIONS_DIR:-$HOME/triton-investigations}"
+sync_investigations() {
+    local persistent_root="${1:-}"
+    local persistent_repo="${persistent_root:+$persistent_root/triton-investigations}"
+
+    # Prefer the copy on mounted host storage so a campaign's uncommitted
+    # results survive the container, exactly as vault does.
+    if [ -n "$persistent_repo" ] && [ -d "$persistent_repo" ] \
+        && [ ! -e "$INVESTIGATIONS_DIR" ] && [ ! -L "$INVESTIGATIONS_DIR" ]; then
+        ln -s "$persistent_repo" "$INVESTIGATIONS_DIR"
+    fi
+    if [ -n "$persistent_repo" ] && [ -d "$persistent_repo" ] \
+        && [ -L "$INVESTIGATIONS_DIR" ] && [ "$(readlink "$INVESTIGATIONS_DIR")" = "$persistent_repo" ]; then
+        echo "✓ investigations linked at $INVESTIGATIONS_DIR -> $persistent_repo"
+        return 0
+    fi
+
+    if [ -d "$INVESTIGATIONS_DIR/.git" ]; then
+        echo "✓ investigations already cloned at $INVESTIGATIONS_DIR (use 'git -C $INVESTIGATIONS_DIR pull' to refresh)"
+        return 0
+    fi
+    echo "📥 Cloning investigations from $INVESTIGATIONS_REPO..."
+    # Full history, not --depth 1: the ledgers are the evidence trail and
+    # `git log --follow` across the stage split has to keep working.
+    if git clone --quiet "$INVESTIGATIONS_REPO" "$INVESTIGATIONS_DIR"; then
+        echo "✓ investigations cloned to $INVESTIGATIONS_DIR"
+    else
+        echo "⚠️  investigations clone failed — make sure your SSH key is added at https://github.com/settings/keys"
+        echo "   (skip this if you are not running a measurement campaign)"
+    fi
+}
+
 # Phase 1: heavy, run once per container.
 first_time_bootstrap() {
     echo "════════════════════════════════════════════════════════════════"
@@ -144,6 +189,9 @@ first_time_bootstrap() {
 
     echo ""
     sync_vault "$persistent_root"
+
+    echo ""
+    sync_investigations "$persistent_root"
 
     echo "════════════════════════════════════════════════════════════════"
     echo "  ✅ Container initialization complete"
