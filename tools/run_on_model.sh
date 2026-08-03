@@ -16,6 +16,9 @@
 # Options:
 #   --backend am|ffm    Which simulator backend. Auto-detected if omitted:
 #                        AM if /am-ffm exists, FFM otherwise.
+#   --am-profile NAME   AM environment: trace (default), profile (1-XCC,
+#                        no trace, per-dispatch counters), or 8xcc-profile
+#                        (8-XCC, no trace, per-dispatch counters).
 #   --capture           Capture an AQL packet trace (.cap file) via roccap.
 #                        Forces FFM backend. Output: roc_capture_<binary>.cap
 #   -- COMMAND [ARGS...] Everything after -- is the command to run.
@@ -23,6 +26,8 @@ set -euo pipefail
 
 BACKEND=""
 CAPTURE=0
+AM_PROFILE="trace"
+AM_PROFILE_SET=0
 
 usage() {
     sed -n '2,/^set /{ /^#/s/^# \?//p }' "$0"
@@ -32,6 +37,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case $1 in
         --backend)  BACKEND="$2"; shift 2 ;;
+        --am-profile) AM_PROFILE="$2"; AM_PROFILE_SET=1; shift 2 ;;
         --capture)  CAPTURE=1; shift ;;
         -h|--help)  usage ;;
         --)         shift; break ;;
@@ -77,6 +83,10 @@ if [[ -z "$BACKEND" ]]; then
         exit 1
     fi
 fi
+if [[ "$BACKEND" != "am" && "$AM_PROFILE_SET" -eq 1 ]]; then
+    echo "Error: --am-profile is valid only with the AM backend" >&2
+    exit 1
+fi
 
 # The vendor env scripts (am_env.sh / ffmlite_env.sh) append to $LD_PRELOAD by
 # reading it. Under `set -u` that aborts ("LD_PRELOAD: unbound variable") if the
@@ -85,11 +95,113 @@ export LD_PRELOAD="${LD_PRELOAD:-}"
 
 case "$BACKEND" in
     am)
-        if [[ ! -f "$PKG_DIR/am_env.sh" ]]; then
-            echo "Error: AM requested but $PKG_DIR/am_env.sh not found" >&2
+        case "$AM_PROFILE" in
+            trace) AM_ENV_FILE="$PKG_DIR/am_env.sh" ;;
+            profile) AM_ENV_FILE="$PKG_DIR/am_profile_env.sh" ;;
+            8xcc-profile) AM_ENV_FILE="$PKG_DIR/am_8xcc_env.sh" ;;
+            *)
+                echo "Error: --am-profile must be trace, profile, or 8xcc-profile; got '$AM_PROFILE'" >&2
+                exit 1
+                ;;
+        esac
+        if [[ ! -f "$AM_ENV_FILE" ]]; then
+            echo "Error: AM profile $AM_PROFILE requires $AM_ENV_FILE" >&2
             exit 1
         fi
-        source "$PKG_DIR/am_env.sh"
+        source "$AM_ENV_FILE"
+
+        # The vendor 8-XCC file enables ttrace and lacks per-dispatch dumps.
+        # Fidelity timing needs the same topology with both instruction/timing
+        # traces disabled and a counter snapshot at every dispatch boundary.
+        if [[ "$AM_PROFILE" == "8xcc-profile" ]]; then
+            export DtifExtraModelArgs="-om=am"
+            export DtifExtraTestArgs="-tg_chunksize=2 -num_xcds=8 -no_itrace"
+            DtifGeneralArgs="${DtifGeneralArgs//test.enable_ttrace=true/test.enable_ttrace=false}"
+            DtifGeneralArgs="${DtifGeneralArgs%\"} monitors.counters.perf.dump_on_draw=true\""
+            export DtifGeneralArgs
+        fi
+
+        case "$AM_PROFILE" in
+            trace)
+                PROFILE_XCC=1
+                PROFILE_CP=1
+                PROFILE_TRACE=1
+                PROFILE_DISPATCH_COUNTERS=0
+                PROFILE_COUNTER_SOURCE="am-log-dispatch-clock"
+                PROFILE_MODEL_CONFIG="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k"
+                ;;
+            profile)
+                PROFILE_XCC=1
+                PROFILE_CP=1
+                PROFILE_TRACE=0
+                PROFILE_DISPATCH_COUNTERS=1
+                PROFILE_COUNTER_SOURCE="am-log-dispatch-clock+per-dispatch-counters"
+                PROFILE_MODEL_CONFIG="make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k"
+                ;;
+            8xcc-profile)
+                PROFILE_XCC=8
+                PROFILE_CP=8
+                PROFILE_TRACE=0
+                PROFILE_DISPATCH_COUNTERS=1
+                PROFILE_COUNTER_SOURCE="am-log-dispatch-clock+per-dispatch-counters"
+                PROFILE_MODEL_CONFIG="make_mi400_16cu_2se_8xcc_8cp_cu_cache_l0_64k_lds_320k"
+                ;;
+        esac
+
+        if [[ "$PROFILE_TRACE" -eq 0 ]]; then
+            [[ "$DtifExtraModelArgs" != *sq_ttrace* ]] || {
+                echo "Error: AM profile $AM_PROFILE unexpectedly enables ttrace" >&2
+                exit 1
+            }
+            [[ "$DtifExtraTestArgs" == *-no_itrace* ]] || {
+                echo "Error: AM profile $AM_PROFILE does not disable itrace" >&2
+                exit 1
+            }
+        fi
+        if [[ "$PROFILE_TRACE" -eq 1 ]]; then
+            [[ "$DtifExtraModelArgs" == *sq_ttrace* && "$DtifGeneralArgs" == *test.enable_ttrace=true* ]] || {
+                echo "Error: AM trace profile does not enable ttrace" >&2
+                exit 1
+            }
+        fi
+        if [[ "$PROFILE_DISPATCH_COUNTERS" -eq 1 ]]; then
+            [[ "$DtifGeneralArgs" == *monitors.counters.perf.dump_on_draw=true* ]] || {
+                echo "Error: AM profile $AM_PROFILE lacks per-dispatch counters" >&2
+                exit 1
+            }
+        fi
+        if [[ "$PROFILE_XCC" -eq 8 ]]; then
+            [[ "${DtifNumXcc:-}" == "8" && "$DtifGeneralArgs" == *make_mi400_16cu_2se_8xcc_8cp_cu_cache_l0_64k_lds_320k* ]] || {
+                echo "Error: AM profile $AM_PROFILE failed its 8-XCC topology validation" >&2
+                exit 1
+            }
+        else
+            [[ -z "${DtifNumXcc:-}" && "$DtifGeneralArgs" == *make_mi400_16cu_2se_1xcc_cu_cache_l0_64k_lds_320k* ]] || {
+                echo "Error: AM profile $AM_PROFILE failed its 1-XCC topology validation" >&2
+                exit 1
+            }
+        fi
+
+        export RUN_ON_MODEL_AM_PROFILE="$AM_PROFILE"
+        export RUN_ON_MODEL_AM_ENV_FILE="$AM_ENV_FILE"
+        export RUN_ON_MODEL_AM_MODEL_CONFIG="$PROFILE_MODEL_CONFIG"
+        export RUN_ON_MODEL_AM_TOPOLOGY_XCC="$PROFILE_XCC"
+        export RUN_ON_MODEL_AM_TOPOLOGY_CP="$PROFILE_CP"
+        export RUN_ON_MODEL_AM_TOPOLOGY_SE_PER_XCC=2
+        export RUN_ON_MODEL_AM_TOPOLOGY_CU_PER_XCC=16
+        # make_mi400_base fixes sclk to 555 ps (documented as 1.8 GHz).
+        export RUN_ON_MODEL_AM_CLOCK_PERIOD_PS=555
+        export RUN_ON_MODEL_AM_COUNTER_SOURCE="$PROFILE_COUNTER_SOURCE"
+        export RUN_ON_MODEL_AM_TRACE_ENABLED="$PROFILE_TRACE"
+        export RUN_ON_MODEL_AM_PER_DISPATCH_COUNTERS="$PROFILE_DISPATCH_COUNTERS"
+        PROFILE_PACKAGE_VERSION=$(sed -n 's/^Package Name[[:space:]]*:[[:space:]]*//p' "$PKG_DIR/VERSION" | head -1)
+        PROFILE_MODEL_VERSION=$(sed -n 's/^Model Version[[:space:]]*:[[:space:]]*//p' "$PKG_DIR/VERSION" | head -1)
+        [[ -n "$PROFILE_PACKAGE_VERSION" && -n "$PROFILE_MODEL_VERSION" ]] || {
+            echo "Error: cannot parse AM package/model version from $PKG_DIR/VERSION" >&2
+            exit 1
+        }
+        export RUN_ON_MODEL_AM_PACKAGE_VERSION="$PROFILE_PACKAGE_VERSION"
+        export RUN_ON_MODEL_AM_MODEL_VERSION="$PROFILE_MODEL_VERSION"
         ;;
     ffm)
         if [[ ! -f "$PKG_DIR/ffmlite_env.sh" ]]; then
@@ -104,7 +216,11 @@ case "$BACKEND" in
         ;;
 esac
 
-echo "[run_on_model] pkg=$PKG_DIR backend=$BACKEND" >&2
+if [[ "$BACKEND" == "am" ]]; then
+    echo "[run_on_model] pkg=$PKG_DIR package_version=$RUN_ON_MODEL_AM_PACKAGE_VERSION model_version=$RUN_ON_MODEL_AM_MODEL_VERSION backend=$BACKEND profile=$RUN_ON_MODEL_AM_PROFILE env=$RUN_ON_MODEL_AM_ENV_FILE topology=${RUN_ON_MODEL_AM_TOPOLOGY_XCC}xcc/${RUN_ON_MODEL_AM_TOPOLOGY_CP}cp/${RUN_ON_MODEL_AM_TOPOLOGY_SE_PER_XCC}se/${RUN_ON_MODEL_AM_TOPOLOGY_CU_PER_XCC}cu clock_period_ps=$RUN_ON_MODEL_AM_CLOCK_PERIOD_PS model_config=$RUN_ON_MODEL_AM_MODEL_CONFIG counter_source=$RUN_ON_MODEL_AM_COUNTER_SOURCE cwd=$PWD" >&2
+else
+    echo "[run_on_model] pkg=$PKG_DIR backend=$BACKEND" >&2
+fi
 
 # ---------- ROCm overlay ----------
 # Symlink bundled ROCm libs, skipping libamd_smi (conflicts with system).
