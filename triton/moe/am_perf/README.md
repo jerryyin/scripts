@@ -33,7 +33,7 @@ MM_M=128 MM_N=128 MM_K=512 timeout 1200 $RUN --backend am -- \
     python3 $AMP/drive_kernel_only.py > run.log 2>&1
 
 # 2. find the kernel's clk window (last/longest grid x=1 dispatch)
-python3 $AMP/dispatch_durations.py run.log        # -> "suggested window: LO HI"
+python3 $AMP/dispatch_durations.py --last run.log # legacy debugging -> "suggested window: LO HI"
 
 # 3. measure the targeted stall (e.g. the bias s_wait_loadcnt)
 python3 $MOE/itrace_analyze.py stall xcc0se0sa0_itrace_emu.mon <LO> <HI>
@@ -57,7 +57,7 @@ grep -E "relative error|DRIVE:" run.log
 |---|---|
 | `drive_kernel_only.py` | **timing** driver: builds inputs + launches ONLY `_matmul` once (grid=1), no routing/reference/assert. Config via `MM_*` env. |
 | `drive_matmul.py` | **correctness** driver: calls in-tree `test_matmul` (build + torch ref + assert). Run under FFM. |
-| `dispatch_durations.py` | parse AM `run.log` → per-dispatch clk durations; prints the target kernel's window. |
+| `dispatch_durations.py` | Parse AM `run.log` and select a dispatch explicitly by marker/grid, ID, or debugging-only `--last`; prints the selected kernel's window. |
 | `../itrace_analyze.py stall` | parse itrace `.mon`, window to the kernel, attribute TS-gap (= stall at occupancy 1) per mnemonic; calls out `s_wait_loadcnt`. (Shared AM itrace analyzer; `mix` mode gives the per-WGP instruction-mix.) |
 | `examples/hoist_bias_load.patch` | worked example (see "Worked example"). |
 
@@ -81,7 +81,9 @@ a single workgroup, a small trace, and a clean per-kernel cycle count.
 
 A few small input-gen kernels still run (random/quant); they are short and are
 the *first* dispatches. The kernel under study is the **last, longest, grid
-`x=1`** dispatch — `dispatch_durations.py` finds it.
+`x=1`** dispatch. This legacy driver does not emit study markers, so inspect it
+with `dispatch_durations.py --last`; `--last` is not admissible for fidelity
+study results.
 
 ---
 
@@ -128,7 +130,7 @@ Pick a **small** config (see "Picking a config"). Run `drive_kernel_only.py`
 under AM. Confirm `matmul done` and `occupancy: 1` in the log.
 
 ### Step 2 — get the window
-`dispatch_durations.py run.log` → note the target dispatch duration and the
+`dispatch_durations.py --last run.log` → note the target dispatch duration and the
 `suggested itrace_analyze stall window: LO HI`.
 
 ### Step 3 — confirm + measure the stall
