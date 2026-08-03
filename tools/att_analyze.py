@@ -28,63 +28,83 @@ from pathlib import Path
 
 def categorize(inst: str) -> str:
     """Classify an instruction into a performance-relevant category."""
-    if "v_mfma" in inst or "v_smfma" in inst or "v_wmma" in inst:
+    mnemonic = inst.lstrip().split(maxsplit=1)[0].lower() if inst.strip() else ""
+    if mnemonic.startswith(("v_mfma", "v_smfma", "v_wmma")):
         return "mfma"
     if (
-        ("buffer_load" in inst and "lds" in inst)
-        or "global_load_async_to_lds" in inst
+        (mnemonic.startswith("buffer_load") and "lds" in mnemonic)
+        or mnemonic.startswith("global_load_async_to_lds")
     ):
         return "buffer_load_lds"
-    if "buffer_load" in inst:
+    if mnemonic.startswith("buffer_load"):
         return "buffer_load"
-    if "global_load" in inst:
+    if mnemonic.startswith("global_load"):
         return "global_load"
-    if "buffer_store" in inst:
+    if mnemonic.startswith("buffer_store"):
         return "buffer_store"
-    if "global_store" in inst:
+    if mnemonic.startswith("global_store"):
         return "global_store"
-    if "ds_read" in inst or "ds_load" in inst:
+    if mnemonic.startswith(("flat_load", "scratch_load", "image_load")):
+        return "flat_load"
+    if mnemonic.startswith(("flat_store", "scratch_store", "image_store")):
+        return "flat_store"
+    if mnemonic.startswith(("s_load", "s_buffer_load")):
+        return "scalar_load"
+    if mnemonic.startswith(("s_store", "s_buffer_store")):
+        return "scalar_store"
+    if mnemonic.startswith(("ds_read", "ds_load")):
         return "ds_read"
-    if "ds_write" in inst or "ds_store" in inst:
+    if mnemonic.startswith(("ds_write", "ds_store")):
         return "ds_write"
-    if "s_barrier" in inst:
+    if mnemonic.startswith("s_barrier"):
         return "s_barrier"
-    if "s_clause" in inst:
+    if mnemonic.startswith("s_clause"):
         return "s_clause"
-    if any(
-        wait in inst
-        for wait in (
-            "s_waitcnt",
-            "s_wait_xcnt",
-            "s_wait_loadcnt",
-            "s_wait_storecnt",
-            "s_wait_dscnt",
-            "s_wait_kmcnt",
-        )
-    ):
+    if mnemonic.startswith((
+        "s_waitcnt",
+        "s_wait_xcnt",
+        "s_wait_loadcnt",
+        "s_wait_storecnt",
+        "s_wait_dscnt",
+        "s_wait_kmcnt",
+    )):
         return "s_waitcnt"
-    if "v_perm" in inst:
+    if mnemonic.startswith((
+        "v_perm", "v_bpermute", "v_readlane", "v_writelane",
+        "ds_bpermute", "ds_permute", "ds_swizzle",
+    )):
         return "v_perm"
-    if "s_endpgm" in inst:
+    if mnemonic.startswith("s_endpgm"):
         return "s_endpgm"
-    if "s_cbranch" in inst or "s_branch" in inst:
+    if mnemonic.startswith(("s_cbranch", "s_branch", "s_call", "s_return")):
         return "branch"
-    if any(k in inst for k in [
-        "v_add", "v_sub", "v_mul", "v_or", "v_and", "v_xor",
-        "v_lshl", "v_lshr", "v_bfe", "v_mov", "v_readfirstlane",
-        "v_cmp", "v_cndmask",
-        "s_add", "s_sub", "s_mul", "s_and", "s_or", "s_lshl", "s_lshr",
-        "s_mov", "s_cmp", "s_brev", "s_bfe",
-    ]):
+    # Keep address arithmetic and data conversion together.  gfx12 adds many
+    # suffixed forms (for example v_mad_nc_i64_i32, v_dual_*, and v_pk_*) that
+    # must not fall into `other` merely because the spelling is new.
+    if mnemonic.startswith((
+        "v_add", "v_sub", "v_mul", "v_mad", "v_fma", "v_mac",
+        "v_dual", "v_pk", "v_cvt", "v_or", "v_and", "v_xor", "v_not",
+        "v_lshl", "v_lshr", "v_ashr", "v_bfe", "v_bfi", "v_mov",
+        "v_readfirstlane", "v_cmp", "v_cndmask", "v_min", "v_max",
+        "v_med", "v_rcp", "v_rsq", "v_sqrt", "v_exp", "v_log",
+        "v_floor", "v_ceil", "v_trunc", "v_fract", "v_pack",
+        "v_accvgpr_read", "v_accvgpr_write",
+        "s_add", "s_sub", "s_mul", "s_mad", "s_and", "s_or", "s_xor",
+        "s_not", "s_lshl", "s_lshr", "s_ashr", "s_mov", "s_cmp",
+        "s_cselect", "s_brev", "s_bfe", "s_bfm", "s_bit", "s_min",
+        "s_max", "s_pack", "s_sext", "s_abs", "s_getreg", "s_setreg",
+        "s_getpc", "s_setpc", "s_swappc",
+    )):
         return "alu"
-    if inst.startswith(";") or "nop" in inst:
+    if inst.lstrip().startswith(";") or mnemonic.endswith("nop"):
         return "nop"
     return "other"
 
 
 CATEGORY_ORDER = [
     "mfma", "buffer_load_lds", "buffer_load", "global_load",
-    "buffer_store", "global_store",
+    "flat_load", "scalar_load", "buffer_store", "global_store",
+    "flat_store", "scalar_store",
     "ds_read", "ds_write", "s_barrier", "s_clause", "s_waitcnt",
     "v_perm", "alu", "branch", "nop", "s_endpgm", "other",
 ]
@@ -94,8 +114,12 @@ CATEGORY_LABELS = {
     "buffer_load_lds": "DMA (global→LDS)",
     "buffer_load": "buffer_load",
     "global_load": "global_load",
+    "flat_load": "flat/scratch/image load",
+    "scalar_load": "scalar load",
     "buffer_store": "buffer_store",
     "global_store": "global_store",
+    "flat_store": "flat/scratch/image store",
+    "scalar_store": "scalar store",
     "ds_read": "ds_read (LDS)",
     "ds_write": "ds_write (LDS)",
     "s_barrier": "s_barrier",

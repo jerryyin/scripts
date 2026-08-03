@@ -95,6 +95,36 @@ def test_gfx12_clause_and_wait_xcnt_are_not_other() -> None:
     assert "other" not in categories
 
 
+def test_gfx12_suffixed_alu_families_are_not_other() -> None:
+    path = write_csv(
+        "7,4096,v_mad_nc_i64_i32,20,200,40,10,kernel.py:10\n"
+        "7,4100,v_dual_lshlrev_b32,20,100,20,5,kernel.py:11\n"
+        "7,4104,v_pk_fma_f32,20,80,10,2,kernel.py:12\n"
+        "7,4108,v_cvt_scale_pk8_f32_fp8,20,60,0,0,kernel.py:13\n"
+        "7,4112,s_cselect_b32,20,40,0,0,kernel.py:14\n"
+    )
+    records = att_analyze.parse_att_csv(str(path))
+    categories, hitcount, _coverage = att_analyze.analyze(records, 20)
+    assert hitcount == 20
+    assert categories["alu"]["latency"] == 480
+    assert "other" not in categories
+
+
+def test_memory_and_lane_families_are_explicit() -> None:
+    path = write_csv(
+        "7,4096,s_load_dword,20,100,90,0,kernel.py:10\n"
+        "7,4100,flat_load_dword,20,80,70,0,kernel.py:11\n"
+        "7,4104,v_readlane_b32,20,40,0,0,kernel.py:12\n"
+    )
+    records = att_analyze.parse_att_csv(str(path))
+    categories, hitcount, _coverage = att_analyze.analyze(records, 20)
+    assert hitcount == 20
+    assert categories["scalar_load"]["latency"] == 100
+    assert categories["flat_load"]["latency"] == 80
+    assert categories["v_perm"]["latency"] == 40
+    assert "other" not in categories
+
+
 def main() -> None:
     tests = sorted(
         (
