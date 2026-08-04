@@ -125,8 +125,10 @@ def categorize_gfx1250(mnemonic: str) -> str:
     # A scheduling hint that occupies an issue slot and does no work.
     if mnemonic.startswith("s_delay_alu"):
         return "nop"
+    # s_set_vgpr_msb joins s_setreg, which the chain above already calls alu:
+    # scalar state-setting rather than arithmetic, but grouped with it there.
     if mnemonic.startswith((
-        "v_div", "v_ldexp", "v_bitop", "v_xad", "v_s_", "s_cvt",
+        "v_div", "v_ldexp", "v_bitop", "v_xad", "v_s_", "s_cvt", "s_set_",
     )):
         return "alu"
     return "other"

@@ -133,6 +133,7 @@ def test_gfx1250_tensor_and_wait_families_are_not_other() -> None:
         "7,4108,s_delay_alu instid0(VALU_DEP_1),20,40,0,0,kernel.py:13\n"
         "7,4112,v_div_scale_f32,20,30,0,0,kernel.py:14\n"
         "7,4116,global_prefetch_b8,20,20,0,0,kernel.py:15\n"
+        "7,4120,s_set_vgpr_msb 0x1,20,10,0,0,kernel.py:16\n"
     )
     records = att_analyze.parse_att_csv(str(path))
     categories, hitcount, _coverage = att_analyze.analyze(records, 20)
@@ -140,7 +141,7 @@ def test_gfx1250_tensor_and_wait_families_are_not_other() -> None:
     assert categories["buffer_load_lds"]["latency"] == 200
     assert categories["s_waitcnt"]["latency"] == 160
     assert categories["nop"]["latency"] == 40
-    assert categories["alu"]["latency"] == 30
+    assert categories["alu"]["latency"] == 40
     assert categories["global_load"]["latency"] == 20
     assert "other" not in categories
 
