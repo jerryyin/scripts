@@ -98,6 +98,37 @@ def categorize(inst: str) -> str:
         return "alu"
     if inst.lstrip().startswith(";") or mnemonic.endswith("nop"):
         return "nop"
+    return categorize_gfx1250(mnemonic)
+
+
+def categorize_gfx1250(mnemonic: str) -> str:
+    """Families gfx1250 introduced, for which the rules above have no answer.
+
+    These sit behind the chain rather than inside it on purpose. Reached only
+    where the original returned "other", the addition cannot move an
+    instruction that was already classified, so reports produced before it --
+    including ATT captures whose raw CSVs are no longer available to re-run --
+    keep every category they had. Any capture reporting no "other" is
+    unaffected by construction.
+    """
+    if mnemonic.startswith("tensor_load"):
+        # Global-to-LDS DMA, the same traffic buffer_load ... lds describes.
+        return "buffer_load_lds"
+    if mnemonic.startswith("tensor_store"):
+        return "global_store"
+    if mnemonic.startswith("global_prefetch"):
+        return "global_load"
+    # gfx12 split s_waitcnt into per-counter waits and gfx1250 kept adding them
+    # (s_wait_alu, s_wait_tensorcnt), so match the family rather than list it.
+    if mnemonic.startswith("s_wait"):
+        return "s_waitcnt"
+    # A scheduling hint that occupies an issue slot and does no work.
+    if mnemonic.startswith("s_delay_alu"):
+        return "nop"
+    if mnemonic.startswith((
+        "v_div", "v_ldexp", "v_bitop", "v_xad", "v_s_", "s_cvt",
+    )):
+        return "alu"
     return "other"
 
 
