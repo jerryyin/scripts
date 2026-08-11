@@ -1,0 +1,140 @@
+diff --git a/llvm/include/llvm/CodeGen/TargetInstrInfo.h b/llvm/include/llvm/CodeGen/TargetInstrInfo.h
+index 12b842ace..016234b76 100644
+--- a/llvm/include/llvm/CodeGen/TargetInstrInfo.h
++++ b/llvm/include/llvm/CodeGen/TargetInstrInfo.h
+@@ -481,6 +481,18 @@ public:
+     return true;
+   }
+ 
++  /// Some convergent instructions (e.g. a cross-lane reduction of a
++  /// wave-uniform value) produce a result that does not actually depend on the
++  /// enclosing control flow, and are therefore safe for MachineLICM to hoist
++  /// even though they are marked convergent -- provided their operands
++  /// (including any implicit control-flow register such as EXEC) are proven
++  /// loop-invariant by the usual analysis. This hook lets a target opt such
++  /// instructions back into hoisting. Defaults to false (preserve the
++  /// conservative "never hoist convergent" behavior).
++  virtual bool isConvergentInstrHoistable(const MachineInstr &MI) const {
++    return false;
++  }
++
+   /// Re-issue the specified 'original' instruction at the
+   /// specific location targeting a new destination register.
+   /// The register in Orig->getOperand(0).getReg() will be substituted by
+diff --git a/llvm/lib/CodeGen/MachineLICM.cpp b/llvm/lib/CodeGen/MachineLICM.cpp
+index 53fbd3bec..81ac41f1e 100644
+--- a/llvm/lib/CodeGen/MachineLICM.cpp
++++ b/llvm/lib/CodeGen/MachineLICM.cpp
+@@ -1099,8 +1099,11 @@ bool MachineLICMImpl::IsLICMCandidate(MachineInstr &I, MachineLoop *CurLoop) {
+   // Convergent attribute has been used on operations that involve inter-thread
+   // communication which results are implicitly affected by the enclosing
+   // control flows. It is not safe to hoist or sink such operations across
+-  // control flow.
+-  if (I.isConvergent())
++  // control flow. A target may opt specific convergent instructions back into
++  // hoisting when their result is control-flow-invariant; IsLoopInvariantInst
++  // still requires every operand (including any implicit control-flow register)
++  // to be loop-invariant, so such a hoist only fires when it is safe.
++  if (I.isConvergent() && !TII->isConvergentInstrHoistable(I))
+     return false;
+ 
+   if (!TII->shouldHoist(I, CurLoop))
+@@ -1364,9 +1367,13 @@ bool MachineLICMImpl::IsProfitableToHoist(MachineInstr &MI,
+   }
+ 
+   // High register pressure situation, only hoist if the instruction is going
+-  // to be remat'ed.
++  // to be remat'ed, or the target has explicitly opted this convergent
++  // instruction into hoisting (e.g. a wave-uniform readfirstlane, where keeping
++  // the scalar result live out of the loop is preferable to re-broadcasting it
++  // every iteration).
+   if (!TII->isTriviallyReMaterializable(MI) &&
+-      !MI.isDereferenceableInvariantLoad()) {
++      !MI.isDereferenceableInvariantLoad() &&
++      !TII->isConvergentInstrHoistable(MI)) {
+     LLVM_DEBUG(dbgs() << "Can't remat / high reg-pressure: " << MI);
+     return false;
+   }
+diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+index b2fb4fa1c..59955a551 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+@@ -88,6 +88,12 @@ static cl::opt<bool> Fix16BitCopies(
+   cl::init(true),
+   cl::ReallyHidden);
+ 
++static cl::opt<bool> HoistUniformReadfirstlane(
++    "amdgpu-hoist-uniform-readfirstlane", cl::init(true), cl::Hidden,
++    cl::desc("Let MachineLICM hoist loop-invariant v_readfirstlane_b32 out of "
++             "uniform loops (its EXEC use keeps this to loops where EXEC is "
++             "loop-invariant, so the result is unchanged)."));
++
+ static cl::opt<SIInstrInfo::DSLatencyMode> DSLatency(
+     "amdgpu-ds-latency-mode",
+     cl::desc("DS load/store latency mode for gfx1250 (models LDS contention)"),
+@@ -216,6 +222,19 @@ bool SIInstrInfo::isIgnorableUse(const MachineOperand &MO) const {
+          !resultDependsOnExec(*MO.getParent());
+ }
+ 
++bool SIInstrInfo::isConvergentInstrHoistable(const MachineInstr &MI) const {
++  if (!HoistUniformReadfirstlane)
++    return false;
++  // v_readfirstlane_b32 of a loop-invariant value is loop-invariant when EXEC
++  // is loop-invariant (i.e. the loop is uniform): the "first active lane" is the
++  // same on every iteration, so the broadcast result does not change. EXEC is
++  // an implicit operand of the instruction, and SIRegisterInfo asks
++  // MachineLoopInfo to analyze it, so IsLoopInvariantInst already rejects the
++  // divergent-loop case (EXEC redefined in the loop). Here we only whitelist the
++  // opcode so MachineLICM does not bail purely on the convergent bit.
++  return MI.getOpcode() == AMDGPU::V_READFIRSTLANE_B32;
++}
++
+ bool SIInstrInfo::isSafeToSink(MachineInstr &MI,
+                                MachineBasicBlock *SuccToSinkTo,
+                                MachineCycleInfo *CI) const {
+diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.h b/llvm/lib/Target/AMDGPU/SIInstrInfo.h
+index dd008faba..197cd5065 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstrInfo.h
++++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.h
+@@ -302,6 +302,8 @@ public:
+ 
+   bool isIgnorableUse(const MachineOperand &MO) const override;
+ 
++  bool isConvergentInstrHoistable(const MachineInstr &MI) const override;
++
+   bool isSafeToSink(MachineInstr &MI, MachineBasicBlock *SuccToSinkTo,
+                     MachineCycleInfo *CI) const override;
+ 
+diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+index cae4f9a85..6865fa632 100644
+--- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+@@ -791,6 +791,15 @@ bool SIRegisterInfo::requiresRegisterScavenging(const MachineFunction &Fn) const
+   return true;
+ }
+ 
++bool SIRegisterInfo::shouldAnalyzePhysregInMachineLoopInfo(MCRegister R) const {
++  // Ask MachineLoopInfo to track EXEC so that instructions whose result depends
++  // on EXEC (e.g. v_readfirstlane_b32) are treated as loop-invariant only when
++  // EXEC itself is loop-invariant -- i.e. in uniform loops, where EXEC is not
++  // redefined. This is what makes hoisting such instructions out of uniform
++  // loops safe (see SIInstrInfo::isConvergentInstrHoistable).
++  return R == AMDGPU::EXEC || R == AMDGPU::EXEC_LO || R == AMDGPU::EXEC_HI;
++}
++
+ bool SIRegisterInfo::requiresFrameIndexScavenging(
+   const MachineFunction &MF) const {
+   // Do not use frame virtual registers. They used to be used for SGPRs, but
+diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
+index fb87fa2f0..4ac419de6 100644
+--- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
++++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
+@@ -144,6 +144,8 @@ public:
+   bool shouldRealignStack(const MachineFunction &MF) const override;
+   bool requiresRegisterScavenging(const MachineFunction &Fn) const override;
+ 
++  bool shouldAnalyzePhysregInMachineLoopInfo(MCRegister R) const override;
++
+   bool requiresFrameIndexScavenging(const MachineFunction &MF) const override;
+   bool requiresFrameIndexReplacementScavenging(
+     const MachineFunction &MF) const override;
