@@ -41,10 +41,21 @@ CREDENTIAL_PATHS=(
     # vault.sh gh -> ~/.config/gh/hosts.yml). Listing them here would symlink to
     # persistent storage and shadow the vault-written files, so the two
     # strategies would fight over the same path.
+    # NOTE: .npmrc is intentionally NOT here. Its only content in practice is
+    # `prefix=$HOME/.local`, which is a machine-local path, not a credential:
+    # the host ($HOME=/home/<user>) and the container ($HOME=/root) need
+    # DIFFERENT prefixes. Symlinking the file across the /zyin mount forces the
+    # host's prefix onto the container, so codex/claude self-updates land in the
+    # host's ~/.local while the on-PATH binary lives in the container's
+    # /root/.local -- the update "succeeds" but never takes effect, prompting
+    # to update on every launch. codex.sh already runs `npm config set prefix
+    # "$HOME/.local"` per environment, which is correct as long as nothing
+    # symlinks the file away afterwards. If real npm registry auth is ever
+    # needed, source it via vault (like gh/gist) or set NPM_CONFIG_PREFIX in the
+    # shell rc (env overrides user npmrc) -- do NOT raw-sync the whole file.
     ".config/github-copilot"     # GitHub Copilot (vim/neovim)
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
-    ".npmrc"                     # NPM registry auth
     ".codex"                     # OpenAI Codex CLI state (OAuth tokens, auto-refreshed;
                                  # config.toml is copied by codex.sh during setup)
 )
