@@ -138,20 +138,16 @@ def test_gfx1250_tensor_and_wait_families_are_not_other() -> None:
     records = att_analyze.parse_att_csv(str(path))
     categories, hitcount, _coverage = att_analyze.analyze(records, 20)
     assert hitcount == 20
-    assert categories["buffer_load_lds"]["latency"] == 200
-    assert categories["s_waitcnt"]["latency"] == 160
+    assert categories["tensor_load_to_lds"]["latency"] == 200
+    assert categories["s_wait_tensorcnt"]["latency"] == 100
+    assert categories["s_waitcnt"]["latency"] == 60
     assert categories["nop"]["latency"] == 40
     assert categories["alu"]["latency"] == 40
     assert categories["global_load"]["latency"] == 20
     assert "other" not in categories
 
 
-def test_gfx1250_rules_cannot_reclassify_what_already_had_a_category() -> None:
-    """The gfx1250 rules run only where the chain above produced "other".
-
-    Reports written before they existed cannot shift, which matters because the
-    stored ATT captures can no longer be re-run against the raw CSVs.
-    """
+def test_explicit_families_keep_stable_categories() -> None:
     already_classified = {
         "v_wmma_f32_16x16x16_f16": "mfma",
         "global_load_async_to_lds_b128": "buffer_load_lds",
@@ -159,7 +155,10 @@ def test_gfx1250_rules_cannot_reclassify_what_already_had_a_category() -> None:
         "s_load_dwordx4": "scalar_load",
         "ds_read_b128": "ds_read",
         "s_waitcnt vmcnt(0)": "s_waitcnt",
-        "s_wait_loadcnt 0x0": "s_waitcnt",
+        "s_wait_loadcnt 0x0": "s_wait_loadcnt",
+        "s_wait_storecnt 0x0": "s_wait_storecnt",
+        "s_wait_dscnt 0x0": "s_wait_dscnt",
+        "s_wait_tensorcnt 0x0": "s_wait_tensorcnt",
         "s_clause 0x3": "s_clause",
         "v_perm_b32": "v_perm",
         "v_add_f32": "alu",
@@ -169,9 +168,6 @@ def test_gfx1250_rules_cannot_reclassify_what_already_had_a_category() -> None:
     }
     for instruction, expected in already_classified.items():
         assert att_analyze.categorize(instruction) == expected, instruction
-        mnemonic = instruction.split(maxsplit=1)[0].lower()
-        # Whatever the new rules would say in isolation is irrelevant: they are
-        # never consulted for these.
         assert att_analyze.categorize(instruction) != "other", instruction
 
 

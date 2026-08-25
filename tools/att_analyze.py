@@ -60,12 +60,19 @@ def categorize(inst: str) -> str:
         return "s_barrier"
     if mnemonic.startswith("s_clause"):
         return "s_clause"
+    # gfx12/gfx1250 split the legacy wait counter. Preserve which engine the
+    # wave is waiting on so ATT can distinguish TDM, LDS and memory pressure.
+    if mnemonic.startswith("s_wait_tensorcnt"):
+        return "s_wait_tensorcnt"
+    if mnemonic.startswith("s_wait_dscnt"):
+        return "s_wait_dscnt"
+    if mnemonic.startswith("s_wait_loadcnt"):
+        return "s_wait_loadcnt"
+    if mnemonic.startswith("s_wait_storecnt"):
+        return "s_wait_storecnt"
     if mnemonic.startswith((
         "s_waitcnt",
         "s_wait_xcnt",
-        "s_wait_loadcnt",
-        "s_wait_storecnt",
-        "s_wait_dscnt",
         "s_wait_kmcnt",
     )):
         return "s_waitcnt"
@@ -112,8 +119,7 @@ def categorize_gfx1250(mnemonic: str) -> str:
     unaffected by construction.
     """
     if mnemonic.startswith("tensor_load"):
-        # Global-to-LDS DMA, the same traffic buffer_load ... lds describes.
-        return "buffer_load_lds"
+        return "tensor_load_to_lds"
     if mnemonic.startswith("tensor_store"):
         return "global_store"
     if mnemonic.startswith("global_prefetch"):
@@ -135,15 +141,19 @@ def categorize_gfx1250(mnemonic: str) -> str:
 
 
 CATEGORY_ORDER = [
-    "mfma", "buffer_load_lds", "buffer_load", "global_load",
+    "mfma", "tensor_load_to_lds", "buffer_load_lds", "buffer_load",
+    "global_load",
     "flat_load", "scalar_load", "buffer_store", "global_store",
     "flat_store", "scalar_store",
-    "ds_read", "ds_write", "s_barrier", "s_clause", "s_waitcnt",
+    "ds_read", "ds_write", "s_barrier", "s_clause",
+    "s_wait_tensorcnt", "s_wait_dscnt", "s_wait_loadcnt",
+    "s_wait_storecnt", "s_waitcnt",
     "v_perm", "alu", "branch", "nop", "s_endpgm", "other",
 ]
 
 CATEGORY_LABELS = {
     "mfma": "Matrix (MFMA/WMMA)",
+    "tensor_load_to_lds": "TDM load→LDS",
     "buffer_load_lds": "DMA (global→LDS)",
     "buffer_load": "buffer_load",
     "global_load": "global_load",
@@ -157,6 +167,10 @@ CATEGORY_LABELS = {
     "ds_write": "ds_write (LDS)",
     "s_barrier": "s_barrier",
     "s_clause": "s_clause",
+    "s_wait_tensorcnt": "s_wait_tensorcnt (TDM)",
+    "s_wait_dscnt": "s_wait_dscnt (LDS)",
+    "s_wait_loadcnt": "s_wait_loadcnt (memory)",
+    "s_wait_storecnt": "s_wait_storecnt (memory)",
     "s_waitcnt": "s_waitcnt",
     "v_perm": "v_perm (swizzle)",
     "alu": "ALU / addr",
