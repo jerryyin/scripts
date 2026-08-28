@@ -25,3 +25,5 @@ python -m pip install clang-format==19.1.6
 # pybind11/nanobind: required by setup.py for building libtriton.so
 # Note: build-time deps (cmake, ninja, pybind11, lit) are in python/requirements.txt
 python -m pip install pytest numpy pre-commit pybind11 nanobind
+
+[ -e "$HOME/triton-investigations/.git" ] || git clone git@github.com:jerryyin/triton-investigations.git "$HOME/triton-investigations" || true
