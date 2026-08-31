@@ -15,11 +15,19 @@ set -e
 # code (0), so a real npm failure would be silently treated as success.
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/npm_global_bin.sh"
+
 install_claude_cli() {
     # Always install to ~/.local to avoid /usr/local being overridden
     # by Docker tools_volume mount at runtime
     mkdir -p "$HOME/.local"
     npm config set prefix "$HOME/.local" 2>/dev/null || true
+
+    # Every `claude` lookup below -- the already-at-latest check and the
+    # post-install verification -- goes through PATH, which does not carry
+    # npm's bin dir under min.sh's non-interactive shell.
+    use_npm_global_bin
 
     # Some environments (corporate proxies, WSL) present a TLS chain npm
     # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
@@ -77,14 +85,15 @@ install_claude_cli() {
         return 1
     fi
 
-    if [ -x "$HOME/.local/bin/claude" ]; then
-        local installed
+    if command -v claude >/dev/null 2>&1; then
+        local installed claude_path
+        claude_path=$(command -v claude)
         installed=$(claude --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "")
         if [ "$installed" != "$latest" ]; then
-            echo "⚠️  Claude CLI at ~/.local/bin/claude is still $installed, not $latest — install may have silently failed"
+            echo "⚠️  Claude CLI at $claude_path is still $installed, not $latest — install may have silently failed"
             return 1
         fi
-        echo "✓ Claude Code CLI $(claude --version 2>/dev/null) installed at ~/.local/bin/claude"
+        echo "✓ Claude Code CLI $(claude --version 2>/dev/null) installed at $claude_path"
         return 0
     fi
     echo "⚠️  Claude CLI not found after install — check npm prefix"

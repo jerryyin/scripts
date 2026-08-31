@@ -27,9 +27,17 @@ CODEX_TEMPLATE="$HOME/.codex.config.toml.template"
 CODEX_AGENTS_SOURCE="$HOME/rc_files/claude/.claude/CLAUDE.md"
 CODEX_SKILLS_SOURCE="$HOME/rc_files/claude/.claude/skills"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/npm_global_bin.sh"
+
 install_codex_cli() {
     mkdir -p "$HOME/.local"
     npm config set prefix "$HOME/.local" 2>/dev/null || true
+
+    # Every `codex` lookup below -- the already-at-latest check and the
+    # post-install verification -- goes through PATH, which does not carry
+    # npm's bin dir under min.sh's non-interactive shell.
+    use_npm_global_bin
 
     # Some environments (corporate proxies, WSL) present a TLS chain npm
     # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
@@ -69,14 +77,15 @@ install_codex_cli() {
         return 1
     fi
 
-    if [ -x "$HOME/.local/bin/codex" ]; then
-        local installed
+    if command -v codex >/dev/null 2>&1; then
+        local installed codex_path
+        codex_path=$(command -v codex)
         installed=$(codex --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "")
         if [ "$installed" != "$latest" ]; then
-            echo "⚠️  Codex CLI at ~/.local/bin/codex is still $installed, not $latest — install may have silently failed"
+            echo "⚠️  Codex CLI at $codex_path is still $installed, not $latest — install may have silently failed"
             return 1
         fi
-        echo "✓ Codex CLI $installed installed at ~/.local/bin/codex"
+        echo "✓ Codex CLI $installed installed at $codex_path"
         return 0
     fi
     echo "⚠️  Codex CLI not found after install — check npm prefix"
