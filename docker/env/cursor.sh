@@ -106,6 +106,15 @@ refresh_all_workspaces() {
             rc_files|scripts|vault) continue ;;
         esac
         [ -d "$dir/.git" ] || continue
+        # A checkout owned by someone else (root-owned build trees such as
+        # ~/ctags land in $HOME on shared hosts) cannot take a .cursor/rules
+        # dir. Skip it: under `set -e` the failing mkdir inside
+        # setup_cursor_rules aborts this whole loop, so one foreign directory
+        # silently costs every workspace sorted after it.
+        if [ ! -w "$dir" ]; then
+            echo "   Skipping ~/$name (not writable by $(id -un))"
+            continue
+        fi
 
         echo "   Refreshing rules for ~/$name"
         setup_cursor_rules "$name" "$dir"
