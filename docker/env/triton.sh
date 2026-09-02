@@ -6,6 +6,8 @@
 # - Optional: system clang/lld for faster builds (TRITON_BUILD_WITH_CLANG_LLD=true)
 set -x
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # CMake from Kitware (newer than Ubuntu's default)
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
@@ -27,3 +29,7 @@ python -m pip install clang-format==19.1.6
 python -m pip install pytest numpy pre-commit pybind11 nanobind
 
 [ -e "$HOME/triton-investigations/.git" ] || git clone git@github.com:jerryyin/triton-investigations.git "$HOME/triton-investigations" || true
+
+# Prepare a TokenSpeed checkout and its wheel-based ROCm dependencies. Its
+# in-tree packages remain unbuilt until explicitly installed by the user.
+bash "$SCRIPT_DIR/tokenspeed.sh"
