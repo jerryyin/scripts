@@ -11,7 +11,7 @@
 # old async_gather. Payloads (moe_decode.pt / moe_prefill.pt) come from
 # ../precompute_routing.py and are looked up in $OUT.
 set -u
-export AITER_HOME="${AITER_HOME:-/root/aiter}"
+export AITER_HOME="${AITER_HOME:-$HOME/aiter}"
 export GPU_ARCHS="${GPU_ARCHS:-gfx1250}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,7 @@ OUT="${OUT:-/zyin}"
 # tools), not $HOME -- in the container $HOME=/root has a stale scripts clone.
 PROF="${PROF:-$(cd "$HERE/../../../tools" && pwd)/prof.sh}"
 A8W4="$HERE/../run_a8w4_gemm1.py"         # shared a8w4 GEMM1 launcher
-MOE="${MOE:-/root/triton/third_party/amd/python/examples/gluon/moe_gfx1250.py}"
+MOE="${MOE:-${TRITON_DIR:-$HOME/triton}/third_party/amd/python/examples/gluon/moe_gfx1250.py}"
 ITERS="${ITERS:-50}"
 cd /tmp
 

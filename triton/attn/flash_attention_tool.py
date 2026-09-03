@@ -31,8 +31,11 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Optional
 
-# Add triton to path
-sys.path.insert(0, "/root/triton-mi450/python")
+# Add triton to path. Override TRITON_DIR for a checkout outside $HOME.
+sys.path.insert(
+    0,
+    os.path.join(os.environ.get("TRITON_DIR", os.path.expanduser("~/triton-mi450")), "python"),
+)
 
 import triton
 import triton.language as tl

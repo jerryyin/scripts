@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TRITON_DIR="${TRITON_DIR:-/home/mirror/triton}"
+TRITON_DIR="${TRITON_DIR:-$HOME/triton}"
 GEMM_SCRIPT="$TRITON_DIR/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py"
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/spill_benchmark_runs}"
 RESULTS_FILE="$RESULTS_DIR/spill_benchmark_results.md"

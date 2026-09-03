@@ -113,8 +113,9 @@ def main() -> int:
     parser.add_argument("--quiet", "-q", action="store_true", help="Minimal output")
     args = parser.parse_args()
 
-    sys.path.insert(0, "/root/triton-mi450/python")
-    sys.path.insert(0, "/root/triton-mi450/third_party/amd/python/examples/gluon")
+    triton_dir = os.environ.get("TRITON_DIR", os.path.expanduser("~/triton-mi450"))
+    sys.path.insert(0, os.path.join(triton_dir, "python"))
+    sys.path.insert(0, os.path.join(triton_dir, "third_party/amd/python/examples/gluon"))
 
     import f16_fa_gfx1250 as fa
 

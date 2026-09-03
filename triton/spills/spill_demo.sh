@@ -12,9 +12,13 @@
 
 set -euo pipefail
 
-TRITON_DIR="${TRITON_DIR:-/home/mirror/triton}"
+TRITON_DIR="${TRITON_DIR:-$HOME/triton}"
 GEMM_SCRIPT="$TRITON_DIR/third_party/amd/python/examples/gluon/f16_gemm_gfx1250.py"
 AM_FFM_DIR="${TRITON_GFX1250_MODEL_PATH:-/am-ffm}"
+# Triton honours TRITON_CACHE_DIR and otherwise caches under $HOME. Deriving it
+# here keeps the search and the clear below pointed at the cache this run uses,
+# rather than at whichever home the script was first written on.
+TRITON_CACHE="${TRITON_CACHE_DIR:-$HOME/.triton/cache}"
 TIMEOUT_S=${TIMEOUT_S:-300}
 
 usage() {
@@ -102,7 +106,7 @@ setup_env() {
 # --- Step 2: Compile & extract spill info from cached assembly ---
 extract_spill_info() {
     local cache_file
-    cache_file=$(find /root/.triton/cache/ /home/mirror/.triton/cache/ \
+    cache_file=$(find "$TRITON_CACHE" \
                 -name "gemm_tdm_pipelined_kernel.amdgcn" 2>/dev/null | head -1 || true)
 
     if [[ -z "$cache_file" ]]; then
@@ -145,7 +149,10 @@ run_kernel() {
     local log_file="$run_dir/output.log"
 
     echo "[RUN] Clearing triton cache..."
-    rm -rf /root/.triton/cache/ /home/mirror/.triton/cache/
+    # Guarded: TRITON_CACHE is set unconditionally above, but an empty expansion
+    # here would make this an `rm -rf /`-shaped command.
+    [[ -n "$TRITON_CACHE" ]] || { echo "TRITON_CACHE unset; refusing to clear" >&2; exit 1; }
+    rm -rf "${TRITON_CACHE:?}"
 
     echo "[RUN] Launching kernel $KERNEL on $BACKEND (timeout=${TIMEOUT_S}s)..."
     echo "      python f16_gemm_gfx1250.py -M $M -N $N -K $K \\"

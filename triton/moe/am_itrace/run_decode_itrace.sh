@@ -31,12 +31,14 @@ set -uo pipefail   # NOT -e: the gluon run is expected to FATAL; handled explici
 
 # -------------------------- configuration ------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AITER_HOME="${AITER_HOME:-/root/aiter}"
-OUT_ROOT="${OUT_ROOT:-/root/itrace_runs}"
+AITER_HOME="${AITER_HOME:-$HOME/aiter}"
+OUT_ROOT="${OUT_ROOT:-$HOME/itrace_runs}"
 PKG="${PKG:-/am-ffm}"
 AM_ENV="$PKG/am_env.sh"
-RUNNER="${RUNNER:-$HOME/scripts/tools/run_on_model.sh}"
-ITRACEVIZ="${ITRACEVIZ:-/root/ItraceViz}"
+# Derive the runner from THIS script's location rather than $HOME: in the
+# container $HOME=/root can hold a stale scripts clone (see b0_bringup/att_collect.sh).
+RUNNER="${RUNNER:-$(cd "$SCRIPT_DIR/../../../tools" && pwd)/run_on_model.sh}"
+ITRACEVIZ="${ITRACEVIZ:-$HOME/ItraceViz}"
 
 # Decode shape. K x N = 2048 x 7168 are the ticket dims (keep them: they set the
 # per-tile/per-WGP instruction mix). EXPERTS_TOT=32 gives block_m=16 (decode

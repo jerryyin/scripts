@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Paths
-ROOT="/root/iree-test-suites/sharktank_models"
+ROOT="${ROOT:-$HOME/iree-test-suites/sharktank_models}"
 ARTIFACTS="$ROOT/artifacts/sdxl_unet_fp16"
 VMFBS="$ROOT/sdxl_unet_fp16_vmfbs"
 MODULE="$VMFBS/model.rocm_gfx942.vmfb"

@@ -35,7 +35,7 @@ import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)   # lib_moe_ffm.py is a sibling in moe/
-_AITER_HOME = os.environ.get("AITER_HOME", "/root/aiter")
+_AITER_HOME = os.environ.get("AITER_HOME", os.path.expanduser("~/aiter"))
 if _AITER_HOME not in sys.path:
     sys.path.insert(0, _AITER_HOME)
 

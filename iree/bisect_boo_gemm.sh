@@ -5,8 +5,9 @@ set -euo pipefail
 THRESH_BAD=55000.0    # > this => bad
 THRESH_GOOD=40000.0   # < this => good
 
-# Where to run the benchmark (exact path you provided)
-BENCH_CWD="/root/iree-turbine/iree/turbine/kernel/boo/driver"
+# Where to run the benchmark. Anchored to $HOME so this works off a container
+# whose HOME is not /root; override BENCH_CWD for a checkout elsewhere.
+BENCH_CWD="${BENCH_CWD:-$HOME/iree-turbine/iree/turbine/kernel/boo/driver}"
 BENCH_CMD=(
   python driver.py
   --backend iree_boo_experimental

@@ -12,8 +12,9 @@ list -- e.g. (256,256,512) -- so the assert actually runs. (300,400,416) and
 import os
 import sys
 
-sys.path.insert(0, "/root/triton-mi450/third_party/amd/python/examples/gluon")
-sys.path.insert(0, "/root/triton-mi450/python/triton_kernels")
+_TRITON_DIR = os.environ.get("TRITON_DIR", os.path.expanduser("~/triton-mi450"))
+sys.path.insert(0, os.path.join(_TRITON_DIR, "third_party/amd/python/examples/gluon"))
+sys.path.insert(0, os.path.join(_TRITON_DIR, "python/triton_kernels"))
 
 import moe_gfx1250 as M  # noqa: E402
 

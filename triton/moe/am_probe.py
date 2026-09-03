@@ -13,7 +13,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # aiter is not pip-installed; make it importable (mirrors lib_moe_ffm.py).
-_AITER_HOME = os.environ.get("AITER_HOME", "/root/aiter")
+_AITER_HOME = os.environ.get("AITER_HOME", os.path.expanduser("~/aiter"))
 if _AITER_HOME not in sys.path:
     sys.path.insert(0, _AITER_HOME)
 

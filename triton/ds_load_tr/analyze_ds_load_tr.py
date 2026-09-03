@@ -29,9 +29,48 @@ import tempfile
 import shutil
 from pathlib import Path
 
-# Tool paths
-TRITON_OPT = "/root/triton-mi450/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
-LLC = "/opt/rocm/llvm/bin/llc"
+# Tool paths.
+#
+# The Triton build directory name encodes the platform and CPython version
+# (e.g. cmake.linux-x86_64-cpython-3.12), so pinning it breaks on any other
+# interpreter. Resolve it the way the checkout itself records it: setup.py
+# symlinks compile_commands.json at the active build dir.
+LLC = os.environ.get("LLC", "/opt/rocm/llvm/bin/llc")
+
+_TRITON_DIR = Path(os.environ.get("TRITON_DIR", Path.home() / "triton-mi450"))
+
+
+def _find_triton_opt() -> str:
+    """Locate triton-opt, preferring an explicit override.
+
+    Order: $TRITON_OPT -> the build dir compile_commands.json points at ->
+    any build/*/bin/triton-opt in the checkout -> PATH.
+    """
+    override = os.environ.get("TRITON_OPT")
+    if override:
+        return override
+
+    link = _TRITON_DIR / "compile_commands.json"
+    if link.is_symlink():
+        candidate = link.resolve().parent / "bin" / "triton-opt"
+        if candidate.is_file():
+            return str(candidate)
+
+    for candidate in sorted(_TRITON_DIR.glob("build/*/bin/triton-opt")):
+        if candidate.is_file():
+            return str(candidate)
+
+    found = shutil.which("triton-opt")
+    if found:
+        return found
+
+    raise FileNotFoundError(
+        f"triton-opt not found under {_TRITON_DIR} or on PATH. "
+        f"Set $TRITON_OPT to the binary, or $TRITON_DIR to the Triton checkout."
+    )
+
+
+TRITON_OPT = _find_triton_opt()
 
 # ANSI colors for terminal output
 class Colors:

@@ -4,6 +4,11 @@
 
 set -e
 
+# run_on_model.sh lives in this same repo, so resolve it relative to this script
+# rather than assuming the checkout sits at /root/scripts.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_ON_MODEL="${RUN_ON_MODEL:-$SCRIPT_DIR/../../tools/run_on_model.sh}"
+
 NI=${1:-8}
 NW=${2:-4}
 BN=${3:-128}
@@ -20,7 +25,7 @@ for variant in $VARIANTS; do
 
     rm -f perf_counters*.csv perf_counters*.txt dumpPerDrawPerf.csv hsakmt_counters.csv
 
-    /root/scripts/tools/run_on_model.sh --backend am -- python3 bench_one.py "$variant" "$NI" "$NW" "$BN" 2>&1 || true
+    "$RUN_ON_MODEL" --backend am -- python3 bench_one.py "$variant" "$NI" "$NW" "$BN" 2>&1 || true
 
     if [ -f perf_counters.csv ]; then
         cp perf_counters.csv "$RESULTS_DIR/${variant}.csv"

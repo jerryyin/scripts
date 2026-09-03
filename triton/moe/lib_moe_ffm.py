@@ -24,7 +24,7 @@ import torch
 
 # aiter is not pip-installed; it is importable from its repo root. Point AITER_HOME
 # at the clone if it lives somewhere other than /root/aiter.
-_AITER_HOME = os.environ.get("AITER_HOME", "/root/aiter")
+_AITER_HOME = os.environ.get("AITER_HOME", os.path.expanduser("~/aiter"))
 if _AITER_HOME not in sys.path:
     sys.path.insert(0, _AITER_HOME)
 
