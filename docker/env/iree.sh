@@ -1,8 +1,11 @@
 #!/bin/sh
 set -x
 
+# The Kitware suite must match this host's release: noble cmake needs glibc
+# 2.38 / libstdc++ 13 / libcurl4t64, which a jammy host cannot satisfy.
+codename=$(lsb_release -cs 2>/dev/null || { . /etc/os-release && echo "$VERSION_CODENAME"; })
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${codename} main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f -y -qq kitware-archive-keyring
 
 sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build libdbus-1-dev
@@ -11,7 +14,7 @@ sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build libdb
 # https://github.com/google/llvm-premerge-checks/blob/main/containers/buildbot-linux/Dockerfile
 # LLVM must be installed after prerequisite packages.
 export LLVM_VERSION=17
-LLVM_VERSION=17 echo "install llvm ${LLVM_VERSION}" && \
+echo "install llvm ${LLVM_VERSION}" && \
     wget --no-verbose -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh && \
     chmod +x /tmp/llvm.sh && \
     sudo /tmp/llvm.sh ${LLVM_VERSION} && \

@@ -8,9 +8,13 @@ set -x
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# CMake from Kitware (newer than Ubuntu's default)
+# CMake from Kitware (newer than Ubuntu's default). The suite must match this
+# host's release: Kitware's noble cmake needs glibc 2.38 / libstdc++ 13 /
+# libcurl4t64, which a jammy host cannot satisfy, and apt then reports the
+# unmet dependencies as "held broken packages".
+codename=$(lsb_release -cs 2>/dev/null || { . /etc/os-release && echo "$VERSION_CODENAME"; })
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${codename} main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f -y -qq kitware-archive-keyring
 # m4: macro processor used by the AM simulator to preprocess model.conf. Without
 # it, AM fails preprocessing fatally but its SystemC threads never tear down, so
