@@ -53,6 +53,15 @@ time".
   python3 distinct_hashes.py outputs/ --pattern 'run*.bin' --expect-runs 20
   ```
 
+  The same judgement is also implemented in C++ by
+  `../llvm/amdgpu-repro/driver/replay.cpp`, which hashes a device buffer in-process
+  because writing ~10 MB per run to disk for 120 runs just to hash it is not worth doing.
+  Neither copy can be deleted, so `test_determinism_rule_agreement.py` checks that the
+  two have not drifted apart in meaning — which a pre-commit hook cannot see. Its hash
+  lines are byte-identical to the driver's, and `--driver-format LABEL` adds the driver's
+  summary line so `summarize_replay_ab.py` reduces a file-based run and a device run
+  through one parser.
+
 - `sensitivity_classify.py` — the arbiter, and the one file here that issues a verdict.
   Where `ulp_magnitudes.py` reports how far apart two buffers are and refuses to judge,
   this one judges: it classifies each differing element as **sensitive** (a perturbation

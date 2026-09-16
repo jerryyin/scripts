@@ -317,6 +317,14 @@ int main(int argc, char **argv) {
         else if (a == "--check-manifest") check_only = true;
         else fail("unknown argument " + a);
     }
+    // A verdict needs two runs to compare. One launch yields one hash, which cannot
+    // agree or disagree with anything, so reading "1 distinct hash" there as determinism
+    // reports a comparison that never happened. The rule below is stated
+    // unconditionally, so the guard has to live here rather than in the wording.
+    // numerics/distinct_hashes.py refuses the same case; the two must not drift apart.
+    // --check-manifest launches nothing and is exempt.
+    if (!check_only && runs < 2)
+        fail("--runs must be at least 2: a single launch cannot show determinism");
     if (args.empty() || (code.empty() && !check_only))
         fail("usage: replay --code K.hsaco --args <dir> [--runs N] [--label name]\n"
              "       replay --args <dir> --check-manifest");

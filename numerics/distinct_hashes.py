@@ -380,7 +380,13 @@ def format_report(record: dict[str, Any]) -> str:
     lines = [record["headline"], ""]
     if record["hashes"]:
         for group in record["hashes"]:
-            lines.append(f"  {group['files']:6d} x  {group['sha256']}   ({group['bytes']} bytes)")
+            # Byte-identical to the format ../llvm/amdgpu-repro/driver/replay.cpp prints
+            # ("  %6d x  %s"), so that driver's summarizer can read this tool's output
+            # unchanged. The size used to be appended here, which made the line LOOK like
+            # the driver's while failing its end-anchored regex -- an incompatibility that
+            # produced an empty record instead of an error. It sits on its own line now.
+            lines.append(f"  {group['files']:6d} x  {group['sha256']}")
+            lines.append(f"             ({group['bytes']} bytes each)")
             for path in group["paths"]:
                 lines.append(f"             {path}")
         lines.append("")
@@ -642,6 +648,13 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit the record as JSON.")
     parser.add_argument(
+        "--driver-format", metavar="LABEL",
+        help="also print the summary line ../llvm/amdgpu-repro/driver/replay.cpp prints, "
+             "under this label, so that driver's summarize_replay_ab.py can reduce a "
+             "file-based run and a device run through one parser. The hash lines already "
+             "match it; this adds the summary line it anchors on.",
+    )
+    parser.add_argument(
         "--selftest", action="store_true",
         help="run the built-in tests on synthesised files and exit. No inputs needed.",
     )
@@ -663,6 +676,14 @@ def main() -> int:
     if args.json:
         print(json.dumps(record, indent=2))
     else:
+        if args.driver_format:
+            # Exactly replay.cpp's wording, so its summarizer's end-anchored regex
+            # matches. "runs" here is files hashed, which is the same quantity only if
+            # every run wrote exactly one file -- which is why --expect-runs exists.
+            print(
+                f"{args.driver_format}: {record['files_hashed']} runs, "
+                f"{record['distinct_hashes']} distinct output hash(es)"
+            )
         print(format_report(record))
     return exit_code_for(record)
 
