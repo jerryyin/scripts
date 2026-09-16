@@ -7,14 +7,14 @@ pip install websockets matplotlib
 
 # therock images ship ROCm in the venv (_rocm_sdk_devel) WITH the trace decoder
 # and aqlprofile already bundled, and have no /opt/rocm. ATT works there out of the
-# box: tools/prof.sh resolves the venv ROCm and points rocprofv3 at it
+# box: profiling/prof.sh resolves the venv ROCm and points rocprofv3 at it
 # (--att-library-path/--preload), so nothing below needs to run. This block makes
 # att.sh a documented no-op on therock instead of failing on the missing /opt/rocm-*.
 if [[ ! -e /opt/rocm ]]; then
   VENV_ROCM=$(ls -d /opt/venv/lib/python*/site-packages/_rocm_sdk_devel 2>/dev/null | head -1)
   if [[ -n "$VENV_ROCM" && -f "$VENV_ROCM/lib/librocprof-trace-decoder.so" ]]; then
     echo "therock layout: trace decoder + aqlprofile bundled in $VENV_ROCM/lib"
-    echo "ATT works via tools/prof.sh (no /opt/rocm, no decoder install needed). Done."
+    echo "ATT works via profiling/prof.sh (no /opt/rocm, no decoder install needed). Done."
     exit 0
   fi
 fi

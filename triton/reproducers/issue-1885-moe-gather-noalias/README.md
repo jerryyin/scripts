@@ -115,7 +115,7 @@ TRITON_HIP_USE_EXPERT_SCHEDULING=1 TRITON_HIP_USE_COEXEC_SCHEDULER=1`.
 ### Reproduce (turn-key; some manual steps)
 Prereqs: Triton at `~/triton`, AMD remote fetched, gfx1250, `~/.triton/llvm/llvm-850a2b1b-*`,
 `rocprofv3` on PATH, ATT decoder lib (default `/root/rocm-systems/projects/rocprof-trace-decoder/build/lib`;
-override `ATT_LIB` in `scripts/run_moe_att_bench.sh`), and `~/scripts/tools/gpu-lock`
+override `ATT_LIB` in `scripts/run_moe_att_bench.sh`), and `~/scripts/board/gpu-lock`
 (lock file `/data/lock/amd-gpu.lock`).
 ```bash
 cd ~/triton

@@ -38,11 +38,11 @@ apt-get install -y m4
 
 # 2. precompute routing + quantized weights under FFM (routing is on CPU; only
 #    the weight quant runs on the model). Writes a .pt payload.
-~/scripts/tools/run_on_model.sh --backend ffm -- \
+~/scripts/am/run_on_model.sh --backend ffm -- \
     python3 precompute_routing.py --out moe.pt --shape 2048 7168 --experts 256 8 --batch 128
 
 # 3. run GEMM1-ONLY under AM from the payload, per backend -> emits *.mon
-GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
+GPU_ARCHS=gfx1250 ~/scripts/am/run_on_model.sh --backend am -- \
     python3 run_a8w4_gemm1.py --backend gluon  --data moe.pt     # then --backend triton
 
 # 4. extract one WGP and render the timeline HTML
@@ -166,13 +166,13 @@ Shape: `dim1(K)=256 dim2(N)=512`, experts `8/8`, batch `64` → `block_m=64`.
 
 ```bash
 # precompute (CPU routing + FFM weight quant) -> 631 KB payload, <1 min
-~/scripts/tools/run_on_model.sh --backend ffm -- \
+~/scripts/am/run_on_model.sh --backend ffm -- \
   python3 precompute_routing.py --out moe_tiny2.pt --shape 256 512 --experts 8 8 --batch 64
 
 # AM GEMM1, per backend (each emits xcc0se{0,1}sa{0,1}_itrace_emu.mon)
-GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
+GPU_ARCHS=gfx1250 ~/scripts/am/run_on_model.sh --backend am -- \
   python3 run_a8w4_gemm1.py --backend gluon  --data moe_tiny2.pt
-GPU_ARCHS=gfx1250 ~/scripts/tools/run_on_model.sh --backend am -- \
+GPU_ARCHS=gfx1250 ~/scripts/am/run_on_model.sh --backend am -- \
   python3 run_a8w4_gemm1.py --backend triton --data moe_tiny2.pt
 
 # visualize + analyze WGP00

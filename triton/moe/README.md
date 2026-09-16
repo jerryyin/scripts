@@ -31,7 +31,7 @@ moe/
 │   └── README.md             #   benchmark-driven optimization process template
 │
 └── b0_bringup/               # B0 hardware: rocprofv3 ATT of the GEMM
-    ├── att_collect.sh        #   collect 4 decoded traces (thin wrapper on tools/prof.sh)
+    ├── att_collect.sh        #   collect 4 decoded traces (thin wrapper on profiling/prof.sh)
     └── README.md             #   workflow, version pinning, os._exit gotcha, findings
 ```
 
@@ -46,7 +46,7 @@ export AITER_HOME=/root/aiter       # only if aiter is not at /root/aiter
   (aiter is not pip-installed).
 - **Run from anywhere except the triton source tree `/root/triton`** (running
   there breaks `import triton.profiler` / `triton.language`).
-- Simulator runs go through the canonical wrapper `~/scripts/tools/run_on_model.sh`
+- Simulator runs go through the canonical wrapper `~/scripts/am/run_on_model.sh`
   (`--backend ffm` or `--backend am`). For AM, prefix `LD_PRELOAD= GPU_ARCHS=gfx1250`
   (am_env.sh reads `$LD_PRELOAD` under `set -u`; AM has no working `rocminfo`).
 

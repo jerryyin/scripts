@@ -21,7 +21,7 @@ Evaluate which index distribution layout produces the most efficient TDM gather 
 cd ~/scripts/triton/gather-layout-perf
 
 # Single variant (requires AM environment, ~7.5 min)
-/root/scripts/tools/run_on_model.sh --backend am -- \
+/root/scripts/am/run_on_model.sh --backend am -- \
     python3 bench_one.py greedy 64 4 128
 python3 extract_am.py
 

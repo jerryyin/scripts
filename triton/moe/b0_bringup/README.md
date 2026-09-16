@@ -66,7 +66,7 @@ python ~/scripts/triton/moe/precompute_routing.py --out moe_prefill.pt --shape 2
 OUT=/zyin bash ~/scripts/triton/moe/b0_bringup/att_collect.sh
 
 # 3. analyze a decoded GEMM dispatch (each trace now has exactly ONE dispatch)
-python ~/scripts/tools/att_analyze.py <out>/att_a8w4_gluon_decode/stats_ui_output_*.csv
+python ~/scripts/profiling/att_analyze.py <out>/att_a8w4_gluon_decode/stats_ui_output_*.csv
 ```
 
 `prof.sh att` writes raw `.att` + decoded `ui_output/` + `stats_ui_output_*.csv`.
@@ -102,14 +102,14 @@ which are "not found" on gfx1250; harmless (decode still works).
 Both memory-bound, but **gluon is far more barrier-bound** (35% vs ~5%) with a much
 higher overall stall rate — a concrete, actionable gluon-vs-triton difference.
 
-## Files (kept minimal — generic functionality lives in tools/ and docker/env/)
-- `att_collect.sh` — thin orchestrator over `tools/prof.sh att`; collects all four traces.
+## Files (kept minimal — generic functionality lives in profiling/ and docker/env/)
+- `att_collect.sh` — thin orchestrator over `profiling/prof.sh att`; collects all four traces.
 - `README.md` — this doc.
 
 Reused generic pieces (not duplicated here):
 - a8w4 GEMM1 launcher: `../run_a8w4_gemm1.py` (shared by AM/FFM/B0; `--iters`
   for the ATT loop; auto-picks `os._exit` under the simulator vs normal exit on hardware).
-- ATT wrapper: `tools/prof.sh att` (therock-aware ROCm resolution).
-- ATT analysis: `tools/att_analyze.py`.
+- ATT wrapper: `profiling/prof.sh att` (therock-aware ROCm resolution).
+- ATT analysis: `profiling/att_analyze.py`.
 - Fresh upstream/decoder build for triage: `docker/env/build_trace_decoder.sh`.
 - Payloads (`moe_*.pt`) are **regenerable scratch** — not kept in git.

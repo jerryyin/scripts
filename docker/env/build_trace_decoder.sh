@@ -17,7 +17,7 @@ WORK="${WORK:-/root}"
 INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
 
-# Resolve the ROCm root without forcing /opt/rocm (same logic as tools/prof.sh):
+# Resolve the ROCm root without forcing /opt/rocm (same logic as profiling/prof.sh):
 # prefer /opt/rocm, else /opt/rocm-*, else the therock venv _rocm_sdk_devel.
 if [ -e /opt/rocm ]; then
   ROCM_DIR=$(readlink -f /opt/rocm)

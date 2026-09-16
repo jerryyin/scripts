@@ -23,7 +23,7 @@ edits, and keep only the one that the simulator says helps — all off-hardware.
 # 0. one-time env (see "Environment" below; new triton tip must be built)
 export GPU_ARCHS=gfx1250
 export PYTHONPATH=/root/triton-mi450/python/triton_kernels:/root/triton-mi450/python
-RUN=~/scripts/tools/run_on_model.sh
+RUN=~/scripts/am/run_on_model.sh
 AMP=~/scripts/triton/moe/am_perf
 MOE=~/scripts/triton/moe                # shared itrace_analyze.py lives at the moe base
 
@@ -115,7 +115,7 @@ at high occupancy — which B0 then confirms.
 ## Step-by-step
 
 ### Step 0 — name the target
-From the B0 ATT (`../b0_bringup`, `tools/att_analyze.py`) get the **source line**
+From the B0 ATT (`../b0_bringup`, `profiling/att_analyze.py`) get the **source line**
 and **wait opcode** (e.g. `moe_gfx1250.py:1142` bias `convert_layout`, stalling
 `s_wait_loadcnt`). Confirm in the compiled asm what that maps to:
 ```bash

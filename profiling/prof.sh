@@ -75,7 +75,9 @@ trace() {
 }
 
 att() {
-  local OUTBASE="/zyin/rocprof_att"
+  # Where the decoded capture lands. Overridable because /zyin is one machine's scratch
+  # mount; ATT output is large and belongs wherever that machine has room for it.
+  local OUTBASE="${ATT_OUT_BASE:-/zyin/rocprof_att}"
 
   resolve_rocm_dir || exit 1
   setup_hip_env

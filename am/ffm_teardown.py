@@ -2,7 +2,7 @@
 the FFM simulator teardown hang (192 threads stuck in futex_wait_queue).
 
 Load with:  pytest -p ffm_teardown ...
-Requires:   ~/scripts/tools on PYTHONPATH (run_on_model.sh does this).
+Requires:   ~/scripts/am on PYTHONPATH (run_on_model.sh does this).
 """
 
 import atexit

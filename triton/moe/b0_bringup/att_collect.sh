@@ -1,7 +1,7 @@
 #!/bin/bash
 # Collect the four B0 ATT traces (a8w4 gluon + triton moe_gfx1250, decode + prefill),
 # decoded to ui_output/ + stats_ui_output_*.csv, under $OUT (default /zyin). This is a
-# thin orchestrator over the generic tools/prof.sh ATT wrapper.
+# thin orchestrator over the generic profiling/prof.sh ATT wrapper.
 #
 # a8w4 is driven by the shared launcher ../run_a8w4_gemm1.py with --iters
 # (loops the GEMM1 so the single-CU ATT target captures it, and it exits normally on
@@ -16,9 +16,11 @@ export GPU_ARCHS="${GPU_ARCHS:-gfx1250}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${OUT:-/zyin}"
+# Must match what prof.sh writes to: it is exported so the child prof.sh sees the same path.
+export ATT_OUT_BASE="${ATT_OUT_BASE:-/zyin/rocprof_att}"
 # Derive prof.sh from THIS script's location (b0_bringup -> moe -> triton -> scripts ->
-# tools), not $HOME -- in the container $HOME=/root has a stale scripts clone.
-PROF="${PROF:-$(cd "$HERE/../../../tools" && pwd)/prof.sh}"
+# profiling), not $HOME -- in the container $HOME=/root has a stale scripts clone.
+PROF="${PROF:-$(cd "$HERE/../../../profiling" && pwd)/prof.sh}"
 A8W4="$HERE/../run_a8w4_gemm1.py"         # shared a8w4 GEMM1 launcher
 MOE="${MOE:-${TRITON_DIR:-$HOME/triton}/third_party/amd/python/examples/gluon/moe_gfx1250.py}"
 ITERS="${ITERS:-50}"
@@ -30,7 +32,7 @@ run() {  # $1=name  $2=kernel-regex  $3..=command
   ATT_KERNEL_REGEX="$kregex" timeout 1500 bash "$PROF" att "$@"
   echo "PROF_RC=$? ($name)"
   rm -rf "$OUT/att_$name"
-  mv /zyin/rocprof_att "$OUT/att_$name" 2>/dev/null
+  mv "$ATT_OUT_BASE" "$OUT/att_$name" 2>/dev/null
   local ui; ui=$(find "$OUT/att_$name" -type d -name 'ui_output*' 2>/dev/null | wc -l)
   echo "== $name -> $(du -sh "$OUT/att_$name" 2>/dev/null | cut -f1)  ui_output=$ui"
 }

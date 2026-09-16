@@ -7,7 +7,7 @@ set -e
 # run_on_model.sh lives in this same repo, so resolve it relative to this script
 # rather than assuming the checkout sits at /root/scripts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_ON_MODEL="${RUN_ON_MODEL:-$SCRIPT_DIR/../../tools/run_on_model.sh}"
+RUN_ON_MODEL="${RUN_ON_MODEL:-$SCRIPT_DIR/../../am/run_on_model.sh}"
 
 NI=${1:-8}
 NW=${2:-4}

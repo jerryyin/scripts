@@ -1,1 +1,10 @@
 __pycache__/
+
+# board/lock-guard/ build output. These are compiled per-container against that
+# container's hipcc and its own lock path (-DGPU_LOCK_FILE), so a committed copy
+# would be wrong somewhere else. Rebuild with board/lock-guard/build-guard.sh.
+board/lock-guard/*.o
+board/lock-guard/*.so
+
+# llvm/amdgpu-repro scratch: assembly, objects and code objects from a codegen run.
+llvm/amdgpu-repro/out/

@@ -18,7 +18,7 @@ RESULTS_ROOT="${2:?results root dir}"
 
 ROOT=/root/triton
 MOE="${ROOT}/third_party/amd/python/examples/gluon/moe_gfx1250.py"
-GPU_LOCK="${HOME}/scripts/tools/gpu-lock"
+GPU_LOCK="${HOME}/scripts/board/gpu-lock"
 ATT_JSON="${RESULTS_ROOT}/att.json"
 ATT_LIB=/root/rocm-systems/projects/rocprof-trace-decoder/build/lib
 

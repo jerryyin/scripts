@@ -53,15 +53,15 @@ imported via a `sys.path` shim:
   one or two `.rocmasm` files. Standalone CLI or importable; replaces
   the old `compare_isa.sh`.
 
-### Related Tools (in `~/scripts/tools/`)
+### Related Tools
 
 Useful for deeper profiling work that this reproducer does not cover:
 
-- `prof.sh` — `rocprofv3` wrapper (supports `trace` and `att` modes).
-- `att_analyze.py` — Parse ATT (Advanced Thread Trace) CSV results,
+- `~/scripts/profiling/prof.sh` — `rocprofv3` wrapper (supports `trace` and `att` modes).
+- `~/scripts/profiling/att_analyze.py` — Parse ATT (Advanced Thread Trace) CSV results,
   report stall/latency/idle breakdown.
-- `genRandInput.py` — Generate random binary inputs for IREE modules.
-- `compare.py` — Compare binary outputs with configurable threshold.
+- `~/scripts/numerics/genRandInput.py` — Generate random binary inputs for IREE modules.
+- `~/scripts/numerics/compare.py` — Compare binary outputs with configurable threshold.
 
 ## Build Instructions
 
