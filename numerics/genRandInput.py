@@ -1,8 +1,8 @@
 ## Usage:
 ## Gen rand output:
-##    python genRandInput.py 2x235x363x224xbf16.bin --shape 2 235 363 224 --dtype bf16
+##    python genRandInput.py 2x235x363x224xbf16.bin --shape 2x235x363x224 --dtype bf16
 ## Gen readable output from bin input:
-##    python genRandInput.py input.bin --shape 1 2 3 --dtype bf16 --dump
+##    python genRandInput.py input.bin --shape 1x2x3 --dtype bf16 --dump
 ## Gen a buffer made entirely of special values (both zeros, NaN, infinities, ...):
 ##    python genRandInput.py --shape 1x256 --dtype bf16 --special
 ## Gen a mostly-random buffer with 1% of its elements special:
