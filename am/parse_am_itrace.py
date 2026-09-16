@@ -3,7 +3,16 @@
 
 The trace is a merged timeline of every wave on one WGP. Each line carries the
 wave handle and an instruction sequence number, so lines belonging to different
-waves interleave freely and nothing may be parsed as a block:
+waves interleave freely and nothing may be parsed as a block -- this tool reads
+the `// SQ:TYPE_DEP` annotations, and those are non-adjacent to the instruction
+they belong to. Measured over xcc0se1sa0_itrace_emu.mon: 73,824 TYPE_DEP lines,
+only 2,000 of them sitting directly after an instruction line.
+
+(A sibling tool, `../triton/moe/itrace_analyze.py`, documents the format AS a
+block and is also correct, because it pairs only the timeline and disasm lines
+below -- and those two ARE adjacent, 83,496 times against 8 exceptions in that
+same trace. The two headers are not in conflict; they describe different line
+kinds. Do not "fix" either one to match the other.)
 
     60b00031 00000094: VGLOBAL[WGP00_SIMD11_WAVE0] TS=50860
     60b00031 00000094:   global_load_b32  v4, v4, s[26:27] ... // 0005...: EE05...

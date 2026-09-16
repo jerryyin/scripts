@@ -11,6 +11,20 @@ Format of a .mon instruction block:
     <code> <addr>: ENC[WGPnn_SIMDmm_WAVEk] TS=...   <- timeline line (TS + WGP)
     <code> <addr>:   <mnemonic> operands // hex      <- disasm line (opcode)
 The leading <code> is a stable per-(WGP,SIMD,WAVE) id shared by both lines.
+
+SCOPE, because a sibling tool documents the opposite and both are right. These two
+lines are genuinely adjacent: measured over xcc0se1sa0_itrace_emu.mon (8 waves,
+~1M lines), a timeline line is immediately followed by its own disasm line 83,496
+times and fails to be 8 times. So pairing them by position is sound, and `stall`
+mode's single-slot pending buffer loses nothing -- it captured exactly the same
+83,496 pairs as a position-independent join on (code, addr).
+
+What is NOT adjacent is the `// SQ:TYPE_DEP` dependency-stall annotation: 73,824 of
+them in that same trace, only 2,000 sitting directly after an instruction line. This
+tool does not read them. `../../am/parse_am_itrace.py` does, which is why its header
+says nothing may be parsed as a block -- true for the line kind it handles. If you
+ever extend this tool to TYPE_DEP, that statement becomes true here too and the
+pending-buffer approach stops working.
 """
 import re
 import sys
