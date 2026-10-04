@@ -63,9 +63,12 @@ add_ppa_if_available ppa:neovim-ppa/stable
 
 wait_for_dpkg_lock
 # Install misc pkgs (For macos: the_silver_searcher)
+# gcc + python3-dev: LeaderF's vim-plug `do` hook (run by rc_files/install.sh)
+# compiles its fuzzyMatch C extension; without them it silently falls back to
+# the slow pure-Python matcher.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
      git zsh fonts-powerline tmux silversearcher-ag less stow neovim vim wget \
-     python-is-python3 gdb gist openssh-client
+     python-is-python3 gdb gist openssh-client gcc python3-dev
 
 # rc files. Clone once, but ALWAYS re-run install.sh: it is idempotent (stow -R,
 # backs up real-file conflicts) and is what re-heals a partial prior setup — e.g.
