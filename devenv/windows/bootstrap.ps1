@@ -17,7 +17,7 @@ param(
     [string]$TerminalPath,
     [string]$DocumentsPath,
     [string]$PythonRoot,
-    [string]$EnvironmentPath = (Join-Path $PSScriptRoot 'defaults/environment.json'),
+    [string]$EnvironmentPath,
     [switch]$Update,
     [switch]$SkipPackages,
     [switch]$SkipWsl,
@@ -27,6 +27,7 @@ param(
     [switch]$SkipCredentials,
     [switch]$InstallCodexDesktop
 )
+if (!$EnvironmentPath) { $EnvironmentPath = Join-Path $PSScriptRoot 'defaults/environment.json' }
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Devenv.psm1') -Force -DisableNameChecking

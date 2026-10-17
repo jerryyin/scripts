@@ -17,6 +17,8 @@ try {
         [void][Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
         Assert ($errors.Count -eq 0) "PowerShell syntax: $($file.Name)"
     }
+    $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'bootstrap.ps1') 2>&1
+    Assert ($LASTEXITCODE -eq 0 -and ($plan -join "`n") -match 'PLAN: install') 'Documented powershell -File entry point resolves its default manifest'
     $defaults = Read-Json (Join-Path $root 'defaults/terminal.json')
     $arrayPath = Join-Path $testRoot 'plugins.json'
     Save-Text $arrayPath '["calendar", "copilot"]' ''
