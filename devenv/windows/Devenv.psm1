@@ -440,6 +440,21 @@ function Update-ProcessPath {
     $env:PATH = ((($paths -join ';') -split ';' | Where-Object { $_ } | Select-Object -Unique) -join ';')
 }
 
+function Get-NativeVim {
+    $command = Get-Command vim.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source -notlike '*\Git\*') { return $command.Source }
+    # Current installers default to per-user; older installs used Program Files.
+    $roots = @((Join-Path $env:LOCALAPPDATA 'Programs/Vim'), (Join-Path $env:ProgramFiles 'Vim'))
+    $x86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    if ($x86) { $roots += Join-Path $x86 'Vim' }
+    foreach ($root in $roots) {
+        $executable = Get-ChildItem -Path @((Join-Path $root 'vim.exe'), (Join-Path $root 'vim*/vim.exe')) -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if ($executable) { return $executable.FullName }
+    }
+    throw 'Native Vim could not be located. Install vim.vim or put native vim.exe on PATH.'
+}
+
 function Set-NativeCodex([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
     $target = Join-Path $UserRoot '.codex/config.toml'
     $template = Join-Path $RcRoot 'codex/.codex.config.toml.template'

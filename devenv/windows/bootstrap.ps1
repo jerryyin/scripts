@@ -65,10 +65,12 @@ if ($Check) {
         if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and (@(Get-WslDistributions) -contains $manifest.wsl.distribution)) { Write-Output "OK WSL $($manifest.wsl.distribution)" }
         else { [void]$missing.Add('WSL'); Write-Output "MISSING WSL $($manifest.wsl.distribution) (install or complete first launch)" }
     }
-    foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'vim', 'psmux', 'codex', 'node', 'rg', 'oh-my-posh')) {
+    foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'psmux', 'codex', 'node', 'rg', 'oh-my-posh')) {
         if (Get-Command $command -ErrorAction SilentlyContinue) { Write-Output "OK $command" }
         else { [void]$missing.Add($command); Write-Output "MISSING $command" }
     }
+    try { $nativeVim = Get-NativeVim; Write-Output "OK vim $nativeVim" }
+    catch { [void]$missing.Add('vim'); Write-Output 'MISSING native Vim' }
     if (Get-Command node -ErrorAction SilentlyContinue) {
         $version = Invoke-Native node @('--version') -Capture
         if ([version]$version.TrimStart('v') -lt [version]'22.19.0') { [void]$missing.Add('Node >=22.19'); Write-Output "OUTDATED Node $version (requires >=22.19)" }
@@ -159,12 +161,7 @@ Ensure-Checkout $NotesPath $manifest.notesRepository
 $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
 $gitBash = Join-Path $gitRoot 'bin/bash.exe'
 if (!(Test-Path -LiteralPath $gitBash)) { throw 'Git for Windows Bash could not be found; required by the existing Vim shell commands.' }
-$vimCommand = Get-Command vim.exe -ErrorAction SilentlyContinue
-if (!$vimCommand -or $vimCommand.Source -like '*\Git\*') {
-    $vimCommand = Get-ChildItem -Path 'C:/Program Files/Vim/vim*/vim.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
-    if (!$vimCommand) { throw 'Native Vim was installed but vim.exe could not be located. Restart PowerShell and rerun.' }
-    $vimExe = $vimCommand.FullName
-} else { $vimExe = $vimCommand.Source }
+$vimExe = Get-NativeVim
 $psmuxExe = (Get-Command psmux.exe).Source
 $pwshExe = (Get-Command pwsh.exe).Source
 if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
