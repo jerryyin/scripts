@@ -401,14 +401,19 @@ function Install-PsmuxPlugins([string]$TmuxPath, [string]$UserRoot, [string]$Sta
     }
 }
 
-function Get-PsmuxConfiguration([string]$TmuxPath) {
+function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
     # Reuse portable settings directly from the existing Linux configuration.
     # Shell snippets, TPM and zsh startup commands belong to their OS adapter.
     $lines = New-Object Collections.ArrayList
     [void]$lines.Add('# Generated from rc_files/tmux/.tmux.conf; native PowerShell panes.')
-    foreach ($binding in @('Left select-pane -L', 'Right select-pane -R', 'Up select-pane -U', 'Down select-pane -D')) {
-        [void]$lines.Add('bind-key -r ' + $binding)
+    if (!$TmuxRoot) { $TmuxRoot = Split-Path $TmuxPath -Parent }
+    $sections = @{}
+    $section = ''
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.psmux.conf'))) {
+        if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
+        elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
     }
+    foreach ($line in $sections.navigation) { [void]$lines.Add($line) }
     $source = [IO.File]::ReadAllText($TmuxPath) -replace '\\\r?\n\s*', ' '
     $nativePrefix = ([regex]::Match($source, '(?m)^set(?:-option)? -g prefix\s+([^\r\n]+)')).Groups[1].Value.Trim()
     foreach ($line in $source -split '\r?\n') {
@@ -420,31 +425,28 @@ function Get-PsmuxConfiguration([string]$TmuxPath) {
             [void]$lines.Add($line)
         }
     }
-    $sections = @{}
-    $section = ''
-    foreach ($line in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'defaults/psmux-compat.conf'))) {
-        if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
-        elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
-    }
     $resize = '5'
     if ($source -match '(?m)^set(?:-option)? -g @pane_resize\s+[''"]?(\d+)') { $resize = $Matches[1] }
-    foreach ($plugin in [regex]::Matches($source, '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/([^''"]+)[''"]')) {
-        $name = $plugin.Groups[1].Value
+    $names = @('native') + @([regex]::Matches($source, '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/([^''"]+)[''"]') | ForEach-Object { $_.Groups[1].Value })
+    foreach ($name in $names) {
         if ($sections.ContainsKey($name)) {
             foreach ($line in $sections[$name]) {
-                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $PSScriptRoot 'mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
+                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $TmuxRoot '.tmux/mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
             }
         }
     }
-    [void]$lines.Add('set -g default-shell pwsh')
-    [void]$lines.Add('set -g set-clipboard on')
-    [void]$lines.Add('bind r source-file ~/.psmux.conf')
     return ($lines -join "`n") + "`n"
+}
+
+function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$StateRoot, [string]$BackupRoot) {
+    $generated = Join-Path $StateRoot 'psmux.conf'
+    Save-Text $generated (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf')) $BackupRoot
+    Save-Text (Join-Path $UserRoot '.psmux.conf') ('# Generated entry point; preferences live in rc_files.' + "`n" + 'source-file "' + $generated.Replace('\', '/') + '"' + "`n") $BackupRoot
 }
 
 function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [string]$BackupRoot, [string]$PythonRoot = '') {
     if (!(Test-Path -LiteralPath (Join-Path $RcRoot 'vim/.vimrc'))) { throw 'Shared vim/.vimrc is missing from rc_files' }
-    foreach ($relative in @('vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/coc-settings.json')) {
+    foreach ($relative in @('vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required shared configuration is missing: $relative" }
     }
     $pythonDll = ''

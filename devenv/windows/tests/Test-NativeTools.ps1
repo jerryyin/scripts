@@ -43,7 +43,7 @@ try {
     $managed = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     [void][IO.Directory]::CreateDirectory($managed)
     if (!$UseExistingDeployment) {
-        Copy-Item -LiteralPath (Join-Path $root 'defaults/profile.ps1') -Destination (Join-Path $managed 'profile.ps1')
+        Set-ProfileLoader (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot '.powershell/profile.ps1') ''
         Set-NativeVim $fixture $RcRoot $GitBash (Join-Path $fixture 'backups') $PythonRoot
         Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
@@ -84,7 +84,7 @@ try {
     $vimTest = @"
 call setline(1, ['native Windows editing works'])
 execute 'write! ' . fnameescape('$filePath')
-let report = {'clipboard': has('clipboard'), 'python': has('python3'), 'trueColor': &termguicolors, 'theme': get(g:, 'colors_name', ''), 'prefixMap': maparg('<leader>ss', 'n'), 'muxCopy': maparg('<leader>ty', 'v'), 'shellResult': system('printf NATIVE_OK'), 'shell': &shell, 'pluginsDeclared': len(g:plugs), 'leaderfHook': has_key(g:plugs.LeaderF, 'do'), 'polyglot': has_key(g:plugs, 'vim-polyglot'), 'ctags': has_key(g:plugs, 'vim-gutentags'), 'cocHome': !empty(globpath(&runtimepath, 'autoload/coc/util.vim')) ? coc#util#get_config_home() : g:coc_config_home, 'vista': g:vista_default_executive, 'clangd': executable('clangd'), 'scripts': execute('scriptnames')}
+let report = {'clipboard': has('clipboard'), 'python': has('python3'), 'trueColor': &termguicolors, 'theme': get(g:, 'colors_name', ''), 'prefixMap': maparg('<leader>ss', 'n'), 'muxCopy': maparg('<leader>ty', 'v'), 'shellResult': system('echo NATIVE_OK'), 'shell': &shell, 'pluginsDeclared': len(g:plugs), 'leaderfHook': has_key(g:plugs.LeaderF, 'do'), 'polyglot': has_key(g:plugs, 'vim-polyglot'), 'ctags': has_key(g:plugs, 'vim-gutentags'), 'cocHome': !empty(globpath(&runtimepath, 'autoload/coc/util.vim')) ? coc#util#get_config_home() : g:coc_config_home, 'vista': g:vista_default_executive, 'clangd': executable('clangd'), 'scripts': execute('scriptnames')}
 call writefile([json_encode(report)], '$reportPath')
 qall!
 "@
@@ -119,7 +119,7 @@ qall!
     Assert (![IO.File]::ReadAllText($runtimeLog).Contains('Error detected')) 'Interactive Vim starts in an unnamed buffer without a startup error'
     if (Test-Path -LiteralPath (Join-Path $fixture '.vim/plugged/gruvbox-material/colors/gruvbox-material.vim')) { Assert ($report.theme -ceq 'gruvbox-material') 'Native Vim actually loads the shared Gruvbox Material theme' }
     if ($PythonRoot) { Assert ($report.python -eq 1) 'Native Python runtime loads inside Vim for LeaderF' }
-    Assert ($report.shellResult.Trim() -eq 'NATIVE_OK') 'Shared POSIX tool commands run through Git for Windows Bash'
+    Assert ($report.shellResult.Trim() -eq 'NATIVE_OK' -and $report.shell -match 'cmd.exe$') 'Windows plugin commands use native shell quoting'
     Assert ($report.prefixMap -like '*Grepper -tool rg*') 'Existing search shortcut uses native ripgrep'
     Assert ($report.pluginsDeclared -gt 20 -and !$report.leaderfHook) 'Shared plugins reused with Unix-only build hook adapted'
     Assert (!$report.polyglot -and !$report.ctags -and $report.vista -ceq 'coc') 'Native Windows uses built-in syntax and LSP navigation without Polyglot patches or Ctags'
@@ -138,7 +138,7 @@ qall!
     }
 
     $config = Join-Path $fixture '.psmux.conf'
-    if (!$UseExistingDeployment) { Save-Text $config (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf')) '' }
+    if (!$UseExistingDeployment) { Set-NativeMux $fixture $RcRoot $managed '' }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine
     # provisioning installs PowerShell 7 and makes it the default pane shell.
     Invoke-Native $PsmuxExe @('-L', $socket, '-f', $config, 'new-session', '-d', '-s', 'work', '--', $ShellExe, '-NoLogo', '-NoProfile')

@@ -1,3 +1,4 @@
+param([string]$RcRoot = (Join-Path $env:USERPROFILE 'rc_files'))
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'Devenv.psm1') -Force -DisableNameChecking
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('mux-config-' + [guid]::NewGuid().ToString('N') + '.conf')
@@ -13,7 +14,7 @@ set -g @plugin 'tmux-plugins/tmux-pain-control'
 set -g @plugin 'tmux-plugins/tmux-yank'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 '@ ''
-    $config = Get-PsmuxConfiguration $fixture
+    $config = Get-PsmuxConfiguration $fixture (Join-Path $RcRoot 'tmux')
     if (!$config.Contains('set-option -g status-style bg=default')) { throw 'FAIL: shared status background was dropped' }
     if (!$config.Contains('#[fg=colour223,bg=colour239]') -or $config.Contains('$wg_is_keys_off')) { throw 'FAIL: shared status colors were dropped or a Linux shell variable leaked' }
     if (!$config.Contains('set -g prefix C-a') -or $config.Contains('zsh -l')) { throw 'FAIL: prefix or native shell selection changed' }
@@ -27,7 +28,7 @@ set -g @plugin 'tmux-plugins/tmux-resurrect'
         if ($config -notmatch ('(?m)^bind-key ' + [regex]::Escape($key) + ' ')) { throw "FAIL: missing plugin key $key" }
     }
     Save-Text $fixture 'set -g prefix C-a' ''
-    $plain = Get-PsmuxConfiguration $fixture
+    $plain = Get-PsmuxConfiguration $fixture (Join-Path $RcRoot 'tmux')
     if ($plain.Contains('bind-key h ') -or $plain.Contains('psmux-resurrect')) { throw 'FAIL: disabled Linux plugins still change Windows keys' }
     Write-Output 'PASS: shared status colors, prefix, native shell, arrow navigation and declared plugin shortcuts'
 } finally { if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture } }

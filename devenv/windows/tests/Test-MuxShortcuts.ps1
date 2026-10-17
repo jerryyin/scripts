@@ -8,6 +8,7 @@ $shell=(Get-Command pwsh.exe).Source
 $rc=Join-Path $env:USERPROFILE 'rc_files/tmux/.tmux.conf'
 $original=@{HOME=$env:HOME; USERPROFILE=$env:USERPROFILE; LOCALAPPDATA=$env:LOCALAPPDATA; APPDATA=$env:APPDATA}
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('mux-keys-'+[guid]::NewGuid().ToString('N').Substring(0,8))
+$socket='mux-keys-'+[guid]::NewGuid().ToString('N')
 [void][IO.Directory]::CreateDirectory((Join-Path $fixture '.psmux/plugins'))
 foreach($name in @('ppm','psmux-resurrect')) { Copy-Item -LiteralPath (Join-Path $env:USERPROFILE ('.psmux/plugins/'+$name)) -Destination (Join-Path $fixture '.psmux/plugins') -Recurse }
 $configuration=if($ConfigurationPath){[IO.File]::ReadAllText($ConfigurationPath)}else{Get-PsmuxConfiguration $rc}
@@ -20,7 +21,7 @@ $script:differences=New-Object Collections.ArrayList
 function Difference($ok,[string]$message) { if(!$ok){ [void]$script:differences.Add($message); Write-Output "DIFFERENCE: $message" } }
 function Assert($ok,[string]$message) { if(!$ok){throw "FAIL: $message; inspect $fixture"}; $script:passed++; Write-Output "PASS: $message" }
 function Mux([string[]]$words) {
-    $out=& $exe @words 2>&1
+    $out=& $exe -L $socket @words 2>&1
     if($LASTEXITCODE -ne 0){throw ($out -join [Environment]::NewLine)}
     return (($out -join [Environment]::NewLine).Trim())
 }
@@ -37,7 +38,8 @@ $console=$null
 $priorClipboard=if($Clipboard){Get-Clipboard -Raw}else{$null}
 try {
     $env:HOME=$fixture; $env:USERPROFILE=$fixture; $env:LOCALAPPDATA=Join-Path $fixture 'AppData/Local'; $env:APPDATA=Join-Path $fixture 'AppData/Roaming'
-    $command='"'+$exe+'" -f "'+(Join-Path $fixture '.psmux.conf')+'" new-session -s habits -c "'+$fixture+'" -- "'+$shell+'" -NoProfile -NoExit -EncodedCommand '+$encoded
+    Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') ([ordered]@{psmuxExe=$exe}) ''
+    $command='"'+$exe+'" -L '+$socket+' -f "'+(Join-Path $fixture '.psmux.conf')+'" new-session -s habits -c "'+$fixture+'" -- "'+$shell+'" -NoProfile -NoExit -EncodedCommand '+$encoded
     $console=[DevenvConsole]::new($command,$fixture)
     Assert (Until { try { (Mux @('list-sessions')).Contains('habits:') } catch { $false } } 20) 'isolated native session starts'
     Start-Sleep -Seconds 1
@@ -107,7 +109,7 @@ try {
     throw
 } finally {
     $ErrorActionPreference='Continue'
-    & $exe kill-server 2>$null | Out-Null
+    & $exe -L $socket kill-server 2>$null | Out-Null
     if($console){$console.Dispose()}
     foreach($name in $original.Keys){[Environment]::SetEnvironmentVariable($name,$original[$name],'Process')}
     if($Clipboard){Set-Clipboard -Value $priorClipboard}

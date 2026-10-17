@@ -1,4 +1,4 @@
-param([switch]$Network)
+param([switch]$Network, [string]$RcRoot = (Join-Path $env:USERPROFILE 'rc_files'))
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = Split-Path $PSScriptRoot -Parent
@@ -19,7 +19,7 @@ try {
     }
     $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'bootstrap.ps1') 2>&1
     Assert ($LASTEXITCODE -eq 0 -and ($plan -join "`n") -match 'PLAN: install') 'Documented powershell -File entry point resolves its default manifest'
-    $defaults = Read-Json (Join-Path $root 'defaults/terminal.json')
+    $defaults = Read-Json (Join-Path $RcRoot '.windows-terminal/settings.json')
     $arrayPath = Join-Path $testRoot 'plugins.json'
     Save-Text $arrayPath '["calendar", "copilot"]' ''
     $ids = @(Read-Json $arrayPath)
@@ -61,7 +61,7 @@ try {
     Assert ($codexPackage.Count -eq 1 -and $codexPackage[0].installedCommand -eq 'codex.exe') 'Codex reuses an existing app-managed CLI'
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
-    $powerToysDefaults = Read-Json (Join-Path $root 'defaults/powertoys.json')
+    $powerToysDefaults = Read-Json (Join-Path $RcRoot '.powertoys/settings.json')
     $powerToys = Join-Path $testRoot 'PowerToys'
     $powerToysGeneral = Join-Path $powerToys 'settings.json'
     $powerToysAwake = Join-Path $powerToys 'Awake/settings.json'
@@ -160,7 +160,7 @@ try {
     Assert (Test-Path -LiteralPath (Join-Path $empty '.git')) 'An explicitly created empty directory can receive a Git checkout'
 
     $vimRc = Join-Path $testRoot 'shared-vim-rc'
-    foreach ($relative in @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
+    foreach ($relative in @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''

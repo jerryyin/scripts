@@ -42,7 +42,7 @@ if (!$TerminalPath) {
 }
 $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
 $backupRoot = Join-Path $stateRoot ('backups/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$managedProfile = Join-Path $stateRoot 'profile.ps1'
+$managedProfile = Join-Path $RcPath '.powershell/profile.ps1'
 $documents = if ($DocumentsPath) { $DocumentsPath } else { [Environment]::GetFolderPath('MyDocuments') }
 if (!$documents) { $documents = Join-Path $env:USERPROFILE 'Documents' }
 
@@ -65,7 +65,7 @@ if ($Check) {
         if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and (@(Get-WslDistributions) -contains $manifest.wsl.distribution)) { Write-Output "OK WSL $($manifest.wsl.distribution)" }
         else { [void]$missing.Add('WSL'); Write-Output "MISSING WSL $($manifest.wsl.distribution) (install or complete first launch)" }
     }
-    foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'psmux', 'codex', 'node', 'rg', 'oh-my-posh')) {
+    foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'psmux', 'codex', 'node', 'rg')) {
         if (Get-Command $command -ErrorAction SilentlyContinue) { Write-Output "OK $command" }
         else { [void]$missing.Add($command); Write-Output "MISSING $command" }
     }
@@ -158,6 +158,9 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
+foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.psmux.conf', 'tmux/.tmux/mux.ps1')) {
+    if (!(Test-Path -LiteralPath (Join-Path $RcPath $file))) { throw "Update rc_files: $file is missing." }
+}
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
@@ -169,20 +172,17 @@ $pwshExe = (Get-Command pwsh.exe).Source
 if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
 if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
 
-Set-PowerToys (Join-Path $env:LOCALAPPDATA 'Microsoft/PowerToys') (Read-Json (Join-Path $PSScriptRoot 'defaults/powertoys.json')) $backupRoot
+Set-PowerToys (Join-Path $env:LOCALAPPDATA 'Microsoft/PowerToys') (Read-Json (Join-Path $RcPath '.powertoys/settings.json')) $backupRoot
 $fontFace = $manifest.font.preferredFace
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot }
 $shellCommand = '"' + $pwshExe + '" -NoLogo'
-Set-Terminal $TerminalPath (Read-Json (Join-Path $PSScriptRoot 'defaults/terminal.json')) $shellCommand $fontFace $backupRoot
+Set-Terminal $TerminalPath (Read-Json (Join-Path $RcPath '.windows-terminal/settings.json')) $shellCommand $fontFace $backupRoot
 Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
-foreach ($file in @('profile.ps1', 'prompt.omp.json')) {
-    Save-Text (Join-Path $stateRoot $file) ([IO.File]::ReadAllText((Join-Path $PSScriptRoot "defaults/$file"))) $backupRoot
-}
 Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
-Save-Text (Join-Path $env:USERPROFILE '.psmux.conf') (Get-PsmuxConfiguration (Join-Path $RcPath 'tmux/.tmux.conf')) $backupRoot
+Set-NativeMux $env:USERPROFILE $RcPath $stateRoot $backupRoot
 if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
 foreach ($shell in @('WindowsPowerShell', 'PowerShell')) { Set-ProfileLoader (Join-Path $documents "$shell/profile.ps1") $managedProfile $backupRoot }
 if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }

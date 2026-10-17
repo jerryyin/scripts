@@ -1,9 +1,10 @@
+param([string]$RcRoot = (Join-Path $env:USERPROFILE 'rc_files'))
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
 $fixture = Join-Path $env:TEMP ('terminal-profile-' + [guid]::NewGuid().ToString('N'))
 $path = Join-Path $fixture 'settings.json'
-$defaults = Read-Json (Join-Path $root 'defaults/terminal.json')
+$defaults = Read-Json (Join-Path $RcRoot '.windows-terminal/settings.json')
 Save-Json $path ([ordered]@{profiles=[ordered]@{list=@(
     [ordered]@{guid='{61c54bbd-c2c6-5271-96e7-009a87ff44bf}';name='Windows PowerShell';commandline='powershell.exe'},
     [ordered]@{guid='{574e775e-4f2a-5b96-ac1e-a2962a402336}';name='PowerShell';source='Windows.Terminal.PowershellCore'},
@@ -22,7 +23,7 @@ $originalLocalAppData = $env:LOCALAPPDATA
 try {
     $env:LOCALAPPDATA = Join-Path $fixture 'AppData/Local'
     Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') ([ordered]@{vimExe='vim.exe';psmuxExe='psmux.exe'}) ''
-    . (Join-Path $root 'defaults/profile.ps1')
+    . (Join-Path $RcRoot '.powershell/profile.ps1')
 } finally { $env:LOCALAPPDATA = $originalLocalAppData }
 $global:LASTEXITCODE = 42
 $text = prompt

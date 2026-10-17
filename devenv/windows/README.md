@@ -127,8 +127,8 @@ The status bar reuses the shared background and colored time/host
 format; its Linux shell variable for the nested-session indicator is omitted.
 The native PowerShell prompt inside each pane uses the same Gruvbox colors,
 folder, Git branch/change marker and `➜`; psmux draws the pane borders and status
-bar. No external prompt engine loads at startup. Oh My Posh remains installed;
-set the user environment variable `DEVENV_PROMPT=oh-my-posh` to opt back in.
+bar. The prompt is defined in `rc_files/.powershell/profile.ps1`. No external
+prompt engine is required or installed by the bootstrap.
 
 The native keyboard audit uses real key input in an isolated Windows home:
 
@@ -157,6 +157,27 @@ uses Vim's built-in syntax plus CoC semantic highlighting; Polyglot remains
 enabled on Linux. There is no plugin-autocommand rewriting and no separate
 `vim-windows.vim` shim. Search and multiplexer keys have one shared definition,
 selecting `rg`/`psmux` on Windows and the existing `ag`/`tmux` on Linux.
+Windows Vim uses `cmd.exe` quoting, matching native async plugins such as
+Grepper. LeaderF's Unix file-list command explicitly invokes Git Bash through
+the shared `leaderf-files.sh`, preserving the IREE/Triton filters. Outside a
+Git checkout it falls back to ripgrep file discovery.
+
+`Test-VimShortcuts.ps1` executes search mappings against known files in a path
+with spaces, checks Git search/signs, window navigation, quickfix, NERDTree and
+session commands, then drives the actual file/buffer pickers and native clangd
+navigation. It tests multiplexer copy/paste and AI-pane transfer using an
+isolated psmux server and a local input reader; no live AI session receives text.
+Windows AI-pane discovery uses the process tree from CIM instead of Linux
+`/proc`, and searches the current psmux session. Linux keeps its existing
+discovery behavior. The tests disable clipboard integration and automatic
+file saving inside their own Vim instance.
+
+Project build/test/debug mappings still require that project's native toolchain.
+Formatting mappings require a formatter such as `clang-format`; `clangd` alone
+does not provide the external command used by vim-autoformat. GDB, IREE/MLIR
+tools and `clang-format` are not installed by this bootstrap. Those project
+workflows, authenticated Copilot operations and Git commands that write history
+are not covered by the shortcut audit.
 
 CoC reads `rc_files/vim/.vim/coc-settings.json` directly on Windows. Its existing
 generic clangd server and `semanticTokens.enable` settings are reused; no extra
@@ -198,8 +219,24 @@ PowerShell 7 with the chosen colors, font and shell profile. It uses the same
 Windows account and files. The stock Windows PowerShell 5 and automatically
 detected PowerShell 7 entries are hidden, retaining their settings. PowerShell's `ls` and `cat` are aliases for
 `Get-ChildItem` and `Get-Content`; Bash syntax and flags are separate.
-Vim shell commands use Git for Windows Bash at `Git/bin/bash.exe`. That Bash
-runs on Windows; use `wsl` explicitly to enter the separate Ubuntu environment.
+Vim's default command shell is Windows `cmd.exe`. Unix shell scripts such as the
+file-list helper explicitly use Git for Windows Bash at `Git/bin/bash.exe`.
+That Bash runs on Windows; use `wsl` explicitly to enter the separate Ubuntu environment.
+
+The latest three-run measurement on PowerShell 7.6.7 reached the bare interactive
+prompt in 1.59-1.70 seconds and the configured prompt in 1.95-2.00 seconds.
+Earlier runs measured 1.3-1.5 and 1.6-1.9 seconds respectively; this varies with
+machine load. Removing the default Oh My Posh initialization brought the
+configured prompt down from roughly 3.7 seconds. A .NET startup
+trace attributed about 423 ms to importing PSReadLine and 276 ms to the system
+script-policy check. The latter creates temporary policy-test scripts; roughly
+182 ms in that trace was inside file-handle closing. These are sampled wall
+times from one trace, not CPU percentages or measurements of antivirus alone.
+The profile itself measured 180-210 ms and drawing the home prompt 40-50 ms.
+Security settings and PSReadLine remain enabled.
+The profile reads discovered executable paths only when `vim`, `tmux`, or `dev`
+is first called. Moving configuration ownership does not remove PowerShell's
+engine, PSReadLine or security-check costs.
 
 ### Configuration ownership
 
@@ -210,13 +247,39 @@ runs on Windows; use `wsl` explicitly to enter the separate Ubuntu environment.
   theme choice and settings. Setup preserves these Git-tracked files.
 * `rc_files/vim/.vimrc`: the shared entry point; `config/plugins.vim` owns plugin
   and CoC extension choices, and `config/windows.vim` holds native OS settings.
-* `defaults/terminal.json`: portable snapshot of the current Terminal preferences.
-* `defaults/powertoys.json`: portable PowerToys preferences; merges Awake settings
+* `rc_files/.powershell/profile.ps1`: authored PowerShell
+  configuration, loaded directly from the checkout without an AppData copy.
+* `rc_files/.windows-terminal/settings.json`: portable Terminal preferences.
+* `rc_files/.powertoys/settings.json`: portable PowerToys preferences; merges Awake settings
   into the new account's settings without copying device-specific state.
-* `%LOCALAPPDATA%\PersonalDevenv`: generated shell profile, state and backups.
-* `%USERPROFILE%\_vimrc`, `.vim`, `.psmux.conf`: native editor/multiplexer state.
+* `rc_files/tmux/.psmux.conf` and `.tmux/mux.ps1`: Windows equivalents of the
+  shared tmux plugin bindings and their runtime clipboard helper.
+* `%LOCALAPPDATA%\PersonalDevenv`: discovered machine paths (`state.json`),
+  translated `psmux.conf`, downloaded plugin source and backups.
+* `%USERPROFILE%\_vimrc` and `.psmux.conf`: small generated source loaders.
+  `.vim`, `_viminfo` and swap files are editor runtime state, not source config.
 * Both PowerShell 5 and PowerShell 7 all-host profiles get one managed loader
   block. Existing profile content is kept and backed up.
+
+`scripts` owns installation and deployment; `rc_files` owns authored settings.
+Each application owns its configuration. The new hidden application directories
+are skipped by the Linux installer's package scan. Native tmux configuration
+stays in the existing `tmux` package beside `.tmux.conf`; Linux tmux does not
+source `.psmux.conf` or the PowerShell helper. Linux installer and tmux behavior
+are unchanged.
+No ignore rules are widened, and no runtime app directory is linked into Git.
+Run setup again after editing the tracked Terminal/PowerToys preferences or tmux
+bindings. PowerShell profile edits are picked up by the next shell directly.
+
+#### Alternatives Considered
+
+* A single Windows configuration directory avoided Linux deployment, but put
+  unrelated applications together. Application directories keep ownership clear;
+  the native tmux files belong with the existing tmux configuration.
+* Linking whole application directories would send runtime files into the Git
+  checkout. The bootstrap merges mutable app settings and writes source loaders.
+* File symlinks need Developer Mode or elevation on this account. Source loaders
+  keep this setup usable on an ordinary fresh Windows account.
 
 The installer does not pull/reset existing checkouts, replace a separate WSL
 notes checkout, or terminate existing sessions. Native sign-in and the limited
@@ -268,6 +331,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1 -Net
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MuxConfiguration.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
+pwsh -NoProfile -File .\tests\Test-VimShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
 ```
 
@@ -320,8 +384,8 @@ to stay within Windows' executable-path limit for nested npm dependencies.
 
 Supply real portable builds in a tools folder: `vim/**/vim.exe`,
 `psmux/psmux.exe`, `node/**/node.exe`, `python/python3.dll`,
-`clangd/**/clangd.exe`, `gh/**/gh.exe`, `pwsh/pwsh.exe` and
-`prompt/oh-my-posh.exe`. Existing host Git/WinGet/Terminal/Codex are used for
+`clangd/**/clangd.exe`, `gh/**/gh.exe` and `pwsh/pwsh.exe`.
+Existing host Git/WinGet/Terminal/Codex are used for
 inventory. All writable app, Git and npm locations are redirected to the fixture.
 
 ```powershell

@@ -29,8 +29,7 @@ $node = @(Get-ChildItem -LiteralPath (Join-Path $ToolsRoot 'node') -Recurse -Fil
 $clangd = @(Get-ChildItem -LiteralPath (Join-Path $ToolsRoot 'clangd') -Recurse -Filter clangd.exe)[0].FullName
 $gh = @(Get-ChildItem -LiteralPath (Join-Path $ToolsRoot 'gh') -Recurse -Filter gh.exe)[0].FullName
 $pwsh = Join-Path $ToolsRoot 'pwsh/pwsh.exe'
-$prompt = Join-Path $ToolsRoot 'prompt/oh-my-posh.exe'
-foreach ($exe in @($psmux, $vim, $node, $clangd, $gh, $pwsh, $prompt)) { if (!(Test-Path -LiteralPath $exe)) { throw "Missing real test tool: $exe" } }
+foreach ($exe in @($psmux, $vim, $node, $clangd, $gh, $pwsh)) { if (!(Test-Path -LiteralPath $exe)) { throw "Missing real test tool: $exe" } }
 $script:passed = 0
 function Assert($Ok, [string]$Message) {
     if (!$Ok) { throw "FAIL: $Message. Inspect $fixture" }
@@ -42,7 +41,9 @@ try {
     Ensure-Checkout $sourceRc $environment.rcRepository
     # Pending shared Vim changes are tested before publication. The source Git
     # clone otherwise contains only upstream-tracked files, never local secrets.
-    foreach ($relative in @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/coc-settings.json')) {
+    $candidateFiles = @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')
+    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/mux.ps1')
+    foreach ($relative in $candidateFiles) {
         $destination = Join-Path $sourceRc $relative
         [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
         Copy-Item -LiteralPath (Join-Path $RcCandidate $relative) -Destination $destination -Force
@@ -63,7 +64,7 @@ try {
     Save-Json $environmentPath $environment ''
     $userRoot = Join-Path $fixture 'empty Windows home'
     Assert (!(Test-Path -LiteralPath $userRoot)) 'Deployment starts with no Windows home, rc_files, notes, profiles or plugin directories'
-    $toolPaths = @($node, $vim, $psmux, $pwsh, $gh, $clangd, $prompt) | ForEach-Object { Split-Path $_ -Parent }
+    $toolPaths = @($node, $vim, $psmux, $pwsh, $gh, $clangd) | ForEach-Object { Split-Path $_ -Parent }
     $jobPath = Join-Path $fixture 'job.json'
     Save-Json $jobPath ([ordered]@{ root=$root; fixture=$fixture; userRoot=$userRoot; environment=$environmentPath; toolPaths=@($toolPaths); python=(Join-Path $ToolsRoot 'python'); vim=$vim; psmux=$psmux; pwsh=$pwsh; clangd=$clangd; nodeDirectory=(Split-Path $node -Parent) }) ''
     $worker = Join-Path $fixture 'worker.ps1'
