@@ -43,7 +43,7 @@
                          "id":  "Microsoft.PowerToys"
                      },
                      {
-                         "id":  "KDE.KDEConnect"
+                         "id":  "KDE.KDEConnect", "installedAppxName": "KDEe.V.KDEConnect"
                      },
                      {
                          "id":  "Rufus.Rufus"

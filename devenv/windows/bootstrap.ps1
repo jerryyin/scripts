@@ -128,6 +128,10 @@ if ($env:USERPROFILE -eq $nativeProfile -and (Get-Process Obsidian -ErrorAction 
 if (!$SkipPackages -and !(Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install App Installer (WinGet), then rerun.' }
 $wslState = if (!$SkipWsl) { Ensure-Wsl $manifest.wsl.distribution } else { 'Skipped' }
 if (!$SkipPackages) { foreach ($package in $manifest.packages) {
+    if ($package.Contains('installedAppxName') -and (Get-AppxPackage -Name $package.installedAppxName -ErrorAction SilentlyContinue)) {
+        Write-Host "SKIP $($package.id) (Microsoft Store installation)"
+        continue
+    }
     & winget list --id $package.id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
     $packageStatus = $LASTEXITCODE
     if ($packageStatus -eq -1978335212) {
