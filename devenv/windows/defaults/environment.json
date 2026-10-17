@@ -37,7 +37,7 @@
                          "id":  "OpenJS.NodeJS.LTS"
                      },
                      {
-                         "id":  "OpenAI.Codex"
+                         "id":  "OpenAI.Codex", "installedCommand": "codex.exe"
                      },
                      {
                          "id":  "Microsoft.PowerToys"
