@@ -13,10 +13,15 @@
 #
 # Ask npm where it installs rather than assuming ~/.local/bin, so this still
 # holds if the prefix is ever configured somewhere else.
+#
+# Deliberately not gated on the directory existing: callers run this *before*
+# `npm install -g`, and on a fresh host npm only creates the bin dir during that
+# install -- gating here left PATH unchanged and the post-install check failed.
 use_npm_global_bin() {
-    local bin
-    bin="$(npm prefix -g 2>/dev/null)/bin"
-    [ -d "$bin" ] || return 0
+    local prefix bin
+    prefix="$(npm prefix -g 2>/dev/null)"
+    [ -n "$prefix" ] || return 0
+    bin="$prefix/bin"
 
     case ":$PATH:" in
         *":$bin:"*) ;;

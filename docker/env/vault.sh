@@ -27,8 +27,8 @@ if [ -n "$MODE" ]; then
     shift
 fi
 
-# Only patch_config needs this: patch_netrc rewrites its marker block every run
-# and patch_rawfile compares content, so both already pick up a rotated secret.
+# Only patch_config needs this: patch_netrc and patch_rawfile compare their
+# full desired content, so both already pick up a rotated secret.
 FORCE=0
 if [ "$MODE" = "--force" ]; then
     FORCE=1
@@ -333,21 +333,23 @@ patch_netrc() {
     local marker_end="# <<< vault: $NETRC_HOST <<<"
 
     touch "$CONFIG_FILE"
-    awk -v b="$marker_begin" -v e="$marker_end" '
-        $0 == b { skip=1; next }
-        $0 == e { skip=0; next }
-        !skip { print }
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    local desired
+    desired=$(
+        awk -v b="$marker_begin" -v e="$marker_end" '
+            $0 == b { skip=1; next }
+            $0 == e { skip=0; next }
+            !skip { print }
+        ' "$CONFIG_FILE"
+        printf '%s\n' "$marker_begin" "machine $NETRC_HOST" "login $NETRC_LOGIN" \
+            "password $secret" "$marker_end"
+    )
 
-    {
-        cat "$CONFIG_FILE.tmp"
-        echo "$marker_begin"
-        echo "machine $NETRC_HOST"
-        echo "login $NETRC_LOGIN"
-        echo "password $secret"
-        echo "$marker_end"
-    } > "$CONFIG_FILE"
-    rm -f "$CONFIG_FILE.tmp"
+    if [ "$desired" = "$(cat "$CONFIG_FILE")" ]; then
+        return 0
+    fi
+
+    (umask 077 && printf '%s\n' "$desired" > "$CONFIG_FILE.tmp")
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     echo "Patched $DESCRIPTION into $CONFIG_FILE"
 }
