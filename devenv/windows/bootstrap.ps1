@@ -141,7 +141,9 @@ if (!$SkipPackages) { foreach ($package in $manifest.packages) {
     & winget list --id $package.id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
     $packageStatus = $LASTEXITCODE
     if ($packageStatus -eq -1978335212) {
-        Invoke-Native winget @('install', '--id', $package.id, '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+        $installArguments = @('install', '--id', $package.id, '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+        if ($package.Contains('installerArguments')) { $installArguments += @('--custom', $package.installerArguments) }
+        Invoke-Native winget $installArguments
     } elseif ($packageStatus -eq 0) { Write-Host "SKIP $($package.id) (installed)" }
     else { throw "WinGet inventory failed for $($package.id) (exit $packageStatus); refusing to treat a query error as a missing package." }
 } }
@@ -177,8 +179,11 @@ foreach ($file in @('profile.ps1', 'prompt.omp.json')) {
     Save-Text (Join-Path $stateRoot $file) ([IO.File]::ReadAllText((Join-Path $PSScriptRoot "defaults/$file"))) $backupRoot
 }
 Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
+$desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
+Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
 Save-Text (Join-Path $env:USERPROFILE '.psmux.conf') (Get-PsmuxConfiguration (Join-Path $RcPath 'tmux/.tmux.conf')) $backupRoot
+if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
 foreach ($shell in @('WindowsPowerShell', 'PowerShell')) { Set-ProfileLoader (Join-Path $documents "$shell/profile.ps1") $managedProfile $backupRoot }
 if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }
 

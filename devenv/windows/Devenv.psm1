@@ -69,7 +69,27 @@ function Save-Text([string]$Path, [string]$Text, [string]$BackupRoot) {
     } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp } }
 }
 
+function Test-JsonEquivalent($Left, $Right) {
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+    if ($Left -is [Collections.IDictionary] -or $Right -is [Collections.IDictionary]) {
+        if ($Left -isnot [Collections.IDictionary] -or $Right -isnot [Collections.IDictionary] -or $Left.Count -ne $Right.Count) { return $false }
+        foreach ($key in $Left.Keys) {
+            if (!$Right.Contains($key) -or !(Test-JsonEquivalent $Left[$key] $Right[$key])) { return $false }
+        }
+        return $true
+    }
+    if ($Left -is [Collections.IList] -or $Right -is [Collections.IList]) {
+        if ($Left -isnot [Collections.IList] -or $Right -isnot [Collections.IList] -or $Left.Count -ne $Right.Count) { return $false }
+        for ($i = 0; $i -lt $Left.Count; $i++) {
+            if (!(Test-JsonEquivalent $Left[$i] $Right[$i])) { return $false }
+        }
+        return $true
+    }
+    return (ConvertTo-Json -InputObject $Left -Compress) -ceq (ConvertTo-Json -InputObject $Right -Compress)
+}
+
 function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
+    if ((Test-Path -LiteralPath $Path) -and (Test-JsonEquivalent (Read-Json $Path) (ConvertTo-Map $Value))) { return }
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
 }
 
@@ -108,8 +128,17 @@ function Set-Terminal([string]$Path, $Defaults, [string]$ShellCommand, [string]$
     Merge-Map $settings.profiles.defaults $Defaults.profiles.defaults
     $settings.profiles.defaults.font.face = $FontFace
     $guid = '{66fce70d-f58a-45d6-a538-11c34abff4a8}'
-    $profile = [ordered]@{ guid = $guid; name = 'Development (PowerShell)'; commandline = $ShellCommand; startingDirectory = '%USERPROFILE%'; hidden = $false; font = [ordered]@{ face = $FontFace; size = 10 }; colorScheme = 'GruvboxMaterialHardDark'; cursorShape = 'emptyBox'; bellStyle = 'taskbar'; opacity = 95; padding = '5' }
+    $profile = [ordered]@{ guid = $guid; name = 'PowerShell'; commandline = $ShellCommand; startingDirectory = '%USERPROFILE%'; hidden = $false; font = [ordered]@{ face = $FontFace; size = 10 }; colorScheme = 'GruvboxMaterialHardDark'; cursorShape = 'emptyBox'; bellStyle = 'taskbar'; opacity = 95; padding = '5' }
     $settings.profiles.list = Merge-Entries $settings.profiles['list'] @($profile) 'guid'
+    # Keep one visible PowerShell, including when Terminal discovers PS7 later.
+    foreach ($duplicate in @(
+        [ordered]@{ guid='{61c54bbd-c2c6-5271-96e7-009a87ff44bf}'; name='Windows PowerShell' },
+        [ordered]@{ guid='{574e775e-4f2a-5b96-ac1e-a2962a402336}'; name='PowerShell'; source='Windows.Terminal.PowershellCore' }
+    )) {
+        $found = @($settings.profiles.list | Where-Object { $_.guid -eq $duplicate.guid })
+        if ($found.Count) { $found[0].hidden = $true }
+        else { $duplicate.hidden = $true; $settings.profiles.list += $duplicate }
+    }
     $settings.defaultProfile = $guid
     Save-Json $Path $settings $BackupRoot
 }
@@ -345,20 +374,70 @@ function Ensure-Wsl([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$Di
     return 'PendingInitialization'
 }
 
+function Install-PsmuxPlugins([string]$TmuxPath, [string]$UserRoot, [string]$StateRoot, [switch]$Update) {
+    $source = [IO.File]::ReadAllText($TmuxPath)
+    $plugins = @()
+    if ($source -match '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/tpm[''"]') { $plugins += 'ppm' }
+    if ($source -match '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/tmux-resurrect[''"]') { $plugins += 'psmux-resurrect' }
+    $required = @{ ppm=@('ppm.ps1','scripts/install_plugins.ps1','scripts/update_plugins.ps1','scripts/clean_plugins.ps1'); 'psmux-resurrect'=@('psmux-resurrect.ps1','scripts/save.ps1','scripts/restore.ps1') }
+    $pending = @($plugins | Where-Object {
+        $name = $_
+        @($required[$name] | Where-Object { !(Test-Path -LiteralPath (Join-Path $UserRoot ('.psmux/plugins/' + $name + '/' + $_))) }).Count
+    })
+    if (!$Update -and !$pending.Count) { Write-Host 'SKIP native psmux plugins (installed)'; return }
+    if (!$plugins.Count) { return }
+    $cache = Join-Path $StateRoot 'psmux-plugin-source'
+    Ensure-Checkout $cache 'https://github.com/psmux/psmux-plugins.git'
+    if ($Update) { Invoke-Native git @('-C',$cache,'pull','--ff-only') }
+    foreach ($name in $plugins) {
+        if (!$Update -and $pending -notcontains $name) { continue }
+        $target = Join-Path $UserRoot ('.psmux/plugins/' + $name)
+        [void][IO.Directory]::CreateDirectory($target)
+        Copy-Item -Path (Join-Path $cache ($name + '/*')) -Destination $target -Recurse -Force
+        Save-Json (Join-Path $target '.monorepo.json') ([ordered]@{monorepo='psmux/psmux-plugins'; org='psmux-plugins'; name=$name; url='https://github.com/psmux/psmux-plugins.git'; branch=$null}) ''
+        foreach ($file in $required[$name]) {
+            if (!(Test-Path -LiteralPath (Join-Path $target $file))) { throw "Incomplete psmux plugin: $name/$file" }
+        }
+    }
+}
+
 function Get-PsmuxConfiguration([string]$TmuxPath) {
     # Reuse portable settings directly from the existing Linux configuration.
     # Shell snippets, TPM and zsh startup commands belong to their OS adapter.
     $lines = New-Object Collections.ArrayList
     [void]$lines.Add('# Generated from rc_files/tmux/.tmux.conf; native PowerShell panes.')
+    foreach ($binding in @('Left select-pane -L', 'Right select-pane -R', 'Up select-pane -U', 'Down select-pane -D')) {
+        [void]$lines.Add('bind-key -r ' + $binding)
+    }
     $source = [IO.File]::ReadAllText($TmuxPath) -replace '\\\r?\n\s*', ' '
+    $nativePrefix = ([regex]::Match($source, '(?m)^set(?:-option)? -g prefix\s+([^\r\n]+)')).Groups[1].Value.Trim()
     foreach ($line in $source -split '\r?\n') {
-        if ($line -match '^unbind C-b$|^set -g prefix |^bind-key ` send-prefix$|^bind-key [vSs] split-window|^bind-key b copy-mode|^bind -T (root|off) F10|^(set|setw|set-window-option) -g (status-keys|mode-keys|mouse|status-justify|status|status-left-style|message-command-style|status-right-style|message-style|pane-active-border-style|pane-border-style|status-right-length|status-left-length|window-status-activity-style|window-status-separator|status-left|window-status-format|window-status-current-format) ') {
+        if ($line -match '^unbind(-key)? |^bind(-key)? |^set -g prefix |^(set|set-option|setw|set-window-option) -g (status-right|status-style|status-keys|mode-keys|mouse|status-justify|status|status-left-style|message-command-style|status-right-style|message-style|pane-active-border-style|pane-border-style|status-right-length|status-left-length|window-status-activity-style|window-status-separator|status-left|window-status-format|window-status-current-format) ') {
+            $line = $line.Replace('set prefix None', 'set -g prefix None').Replace('set key-table off', 'set -g key-table off')
+            $line = $line.Replace('set -u prefix', ('set -g prefix ' + $nativePrefix)).Replace('set -u key-table', 'set -g key-table root')
+            $line = $line.Replace('~/.tmux.conf', '~/.psmux.conf') -replace '\s*\\;\s*', ' \; '
+            $line = $line.Replace('$wg_is_keys_off', '')
             [void]$lines.Add($line)
+        }
+    }
+    $sections = @{}
+    $section = ''
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'defaults/psmux-compat.conf'))) {
+        if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
+        elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
+    }
+    $resize = '5'
+    if ($source -match '(?m)^set(?:-option)? -g @pane_resize\s+[''"]?(\d+)') { $resize = $Matches[1] }
+    foreach ($plugin in [regex]::Matches($source, '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/([^''"]+)[''"]')) {
+        $name = $plugin.Groups[1].Value
+        if ($sections.ContainsKey($name)) {
+            foreach ($line in $sections[$name]) {
+                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $PSScriptRoot 'mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
+            }
         }
     }
     [void]$lines.Add('set -g default-shell pwsh')
     [void]$lines.Add('set -g set-clipboard on')
-    [void]$lines.Add('set -g status-right "%Y-%m-%d | %H:%M #h"')
     [void]$lines.Add('bind r source-file ~/.psmux.conf')
     return ($lines -join "`n") + "`n"
 }
@@ -453,6 +532,53 @@ function Get-NativeVim {
         if ($executable) { return $executable.FullName }
     }
     throw 'Native Vim could not be located. Install vim.vim or put native vim.exe on PATH.'
+}
+
+function Set-VimShortcuts([string]$VimExe, [string]$DesktopPath, [string]$ProgramsPath, [string]$BackupRoot) {
+    $shell = New-Object -ComObject WScript.Shell
+    $vimRoot = Split-Path ([IO.Path]::GetFullPath($VimExe)) -Parent
+    $launcher = Join-Path $ProgramsPath 'Vim.lnk'
+    if (Test-Path -LiteralPath $launcher) {
+        $existing = $shell.CreateShortcut($launcher)
+        if ($existing.TargetPath -ine $VimExe -or $existing.Arguments) { throw "Preserve existing custom Vim shortcut: $launcher" }
+    }
+    $candidates = @()
+    if (Test-Path -LiteralPath $DesktopPath) {
+        $candidates += @(Get-ChildItem -LiteralPath $DesktopPath -File -Filter '*.lnk' |
+            Where-Object Name -match '^gVim( Easy| Read-only)? [0-9]+\.[0-9]+\.lnk$')
+    }
+    $folders = @(Get-ChildItem -LiteralPath $ProgramsPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^Vim [0-9]+\.[0-9]+$' -and !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+    $names = @('gVim.lnk', 'gVim Easy.lnk', 'gVim Read-only.lnk', 'gVim Diff.lnk', 'Vim.lnk', 'Vim Read-only.lnk', 'Vim Diff.lnk', 'Help.lnk', 'Vim tutor.lnk', 'Uninstall.lnk')
+    foreach ($folder in $folders) {
+        $candidates += @(Get-ChildItem -LiteralPath $folder.FullName -File | Where-Object { $names -contains $_.Name -or $_.Name -eq 'Vim Online.url' })
+    }
+    $removed = 0
+    foreach ($file in $candidates) {
+        if ($file.Extension -eq '.url') {
+            if ([IO.File]::ReadAllText($file.FullName) -notmatch '(?m)^URL=https://www\.vim\.org/?\r?$') { continue }
+        } else {
+            $shortcut = $shell.CreateShortcut($file.FullName)
+            if ((Split-Path $shortcut.TargetPath -Parent) -ine $vimRoot) { continue }
+        }
+        $relative = if ($file.DirectoryName -ieq $DesktopPath) { 'Desktop/' + $file.Name } else { 'StartMenu/' + $file.Directory.Name + '/' + $file.Name }
+        $backup = Join-Path $BackupRoot ('vim-shortcuts/' + $relative)
+        [void][IO.Directory]::CreateDirectory((Split-Path $backup -Parent))
+        Copy-Item -LiteralPath $file.FullName -Destination $backup
+        Remove-Item -LiteralPath $file.FullName
+        $removed++
+    }
+    foreach ($folder in $folders) {
+        if (!@(Get-ChildItem -LiteralPath $folder.FullName -Force).Count) { Remove-Item -LiteralPath $folder.FullName }
+    }
+    if (!(Test-Path -LiteralPath $launcher)) {
+        [void][IO.Directory]::CreateDirectory($ProgramsPath)
+        $shortcut = $shell.CreateShortcut($launcher)
+        $shortcut.TargetPath = $VimExe
+        $shortcut.WorkingDirectory = $env:USERPROFILE
+        $shortcut.Save()
+    }
+    Write-Host "Vim shortcuts: one terminal launcher; $removed extra shortcut(s) backed up and removed."
 }
 
 function Set-NativeCodex([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {

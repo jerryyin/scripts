@@ -118,6 +118,39 @@ implementation: the Unix TPM shell scripts, zsh commands, and work-host-specific
 environment aren't loaded. LLVM/GDB mappings remain in the shared vimrc; their
 toolchains must be installed separately if used locally on Windows.
 
+Pane navigation uses the same sequence as Ubuntu: press and release backtick,
+then an arrow or `h/j/k/l` key. The Vim keys come from your Linux
+`tmux-pain-control` declaration, which the original Windows adapter omitted.
+The Windows adapter now reads those plugin choices and adds native equivalents;
+it does not run Linux shell plugins. Arrow bindings are explicitly repeatable.
+The status bar reuses the shared background and colored time/host
+format; its Linux shell variable for the nested-session indicator is omitted.
+The native PowerShell prompt inside each pane uses the same Gruvbox colors,
+folder, Git branch/change marker and `➜`; psmux draws the pane borders and status
+bar. No external prompt engine loads at startup. Oh My Posh remains installed;
+set the user environment variable `DEVENV_PROMPT=oh-my-posh` to opt back in.
+
+The native keyboard audit uses real key input in an isolated Windows home:
+
+| Habit | Audit result with psmux 3.4.0 |
+| --- | --- |
+| Backtick then `h/j/k/l`, Ctrl variants | Pane movement verified |
+| `H/J/K/L` | Resize directions verified; amount differs from Linux |
+| `v`, `S`, `s`, `\|`, `\`, `-`, `_`, `%`, `"` | Pane splitting verified |
+| `<`, `>`, Ctrl-p, Ctrl-n | Window swapping/navigation verified |
+| F10 twice | Disable/restore keys and backtick prefix verified |
+| `[`, then `q` | Enter/exit vi copy mode verified |
+| `y`, `Y` | Command line without prompt / directory copied into buffer |
+| Ctrl-s | Native session save verified |
+| Ctrl-r, plugin install/update/clean, mouse clipboard | Configured; not verified by the keyboard audit |
+
+Full parity is not claimed. In the isolated test, a requested five-column resize
+changed 59 columns to 65, and five rows changed 19 to 21. New panes/windows also
+reported the account home instead of inheriting the test directory despite the
+shared `-c` bindings. Clipboard delivery to desktop applications could not be
+verified from the automation session. Native session restoration is separate
+from Linux tmux-resurrect's Vim session support.
+
 The shared vimrc chooses plugins and commands by platform. LeaderF uses its
 Python implementation on Windows and the existing build hook on Linux. Windows
 uses Vim's built-in syntax plus CoC semantic highlighting; Polyglot remains
@@ -150,6 +183,25 @@ Restart Windows, launch Ubuntu once to create the Linux account, and rerun
 aren't converted, updated, relaunched, or made the default by this utility.
 
 ## Storage and reruns
+
+### Terminal Vim and PowerShell
+
+Vim is used through its terminal executable, `vim.exe`. The official Windows
+package also bundles gVim; its base installer component cannot be deselected.
+Bootstrap disables the installer's desktop/Start menu shortcuts and graphical
+Explorer integration on fresh installs, then creates one terminal Vim Start menu
+entry. On existing installs it backs up and removes the standard extra Vim
+shortcuts that target that same installation. Custom shortcuts are preserved.
+
+`PowerShell` is the single visible Windows Terminal profile launching native
+PowerShell 7 with the chosen colors, font and shell profile. It uses the same
+Windows account and files. The stock Windows PowerShell 5 and automatically
+detected PowerShell 7 entries are hidden, retaining their settings. PowerShell's `ls` and `cat` are aliases for
+`Get-ChildItem` and `Get-Content`; Bash syntax and flags are separate.
+Vim shell commands use Git for Windows Bash at `Git/bin/bash.exe`. That Bash
+runs on Windows; use `wsl` explicitly to enter the separate Ubuntu environment.
+
+### Configuration ownership
 
 * `defaults/environment.json`: repository URLs, Windows package IDs, WSL choice
   and font family/source. No plugin list or artifact version/hash locks.
@@ -214,6 +266,9 @@ family name in memory.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1 -Network
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MuxConfiguration.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
+pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
 ```
 
 The credential suite uses fake vault entries and SSH key fixtures. It checks

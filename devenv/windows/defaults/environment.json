@@ -16,7 +16,8 @@
                          "id":  "Microsoft.PowerShell"
                      },
                      {
-                         "id":  "vim.vim"
+                         "id":  "vim.vim",
+                         "installerArguments": "/console=1 /desktop=0 /startmenu=0 /editwith=0 /vimrc=0 /launcher=0"
                      },
                      {
                          "id":  "marlocarlo.psmux"

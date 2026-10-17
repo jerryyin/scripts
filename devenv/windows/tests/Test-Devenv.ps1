@@ -29,7 +29,7 @@ try {
     $terminal = Join-Path $testRoot 'Terminal/settings.json'
     Set-Terminal $terminal $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
     $result = Read-Json $terminal
-    Assert ($result.profiles.list.Count -eq 1) 'Fresh Terminal receives one development profile'
+    Assert (@($result.profiles.list | Where-Object { !$_.hidden }).Count -eq 1) 'Fresh Terminal receives one visible PowerShell profile'
     Assert ($result.profiles.defaults.font.face -eq 'Test Font') 'Terminal uses the installed font'
     Assert ($result.profiles.list[0].commandline -eq 'pwsh.exe -NoLogo') 'Development profile is native PowerShell'
     Assert ($result.profiles.list[0].colorScheme -ceq 'GruvboxMaterialHardDark' -and $result.profiles.list[0].font.size -eq 10) 'Development profile retains Gruvbox Material Hard Dark and font size'
@@ -38,6 +38,22 @@ try {
     Set-Terminal $terminal $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
     Assert ((Get-FileHash -LiteralPath $terminal).Hash -eq $hash) 'Terminal rerun is byte-for-byte unchanged'
 
+    $formatted = Join-Path $testRoot 'formatted.json'
+    $formatBackups = Join-Path $testRoot 'format-backups'
+    Save-Text $formatted '{ "nested": { "b": 2, "a": 1 }, "items": ["x", "y"], "text": "A" }' ''
+    $before = Get-Item $formatted
+    $beforeHash = (Get-FileHash $formatted).Hash
+    $beforeTime = $before.LastWriteTimeUtc.Ticks
+    $desired = [ordered]@{ text='A'; items=@('x','y'); nested=[ordered]@{a=1;b=2} }
+    Save-Json $formatted $desired $formatBackups
+    Assert ((Get-FileHash $formatted).Hash -ceq $beforeHash -and (Get-Item $formatted).LastWriteTimeUtc.Ticks -eq $beforeTime) 'JSON whitespace and property order do not cause a rewrite'
+    Assert (!(Test-Path $formatBackups)) 'Equivalent app-formatted JSON creates no redundant backup'
+    $desired.text = 'a'
+    Save-Json $formatted $desired $formatBackups
+    Assert ((Read-Json $formatted).text -ceq 'a' -and @(Get-ChildItem $formatBackups -File).Count -eq 1) 'Actual string changes are saved and backed up'
+    Assert (!(Test-JsonEquivalent @('x','y') @('y','x'))) 'JSON comparison preserves array order'
+    Assert (!(Test-JsonEquivalent @('x') 'x')) 'JSON comparison distinguishes single-item arrays from scalars'
+    Assert ((Test-JsonEquivalent $null $null) -and !(Test-JsonEquivalent $null '')) 'JSON comparison preserves null values'
     $environment = Read-Json (Join-Path $root 'defaults/environment.json')
     $everyday = @('Microsoft.PowerToys', 'KDE.KDEConnect', 'Rufus.Rufus', 'AntibodySoftware.WizTree', 'VideoLAN.VLC')
     Assert (@($everyday | Where-Object { $environment.packages.id -notcontains $_ }).Count -eq 0) 'All requested everyday Windows tools are included in WinGet setup'
@@ -78,7 +94,7 @@ try {
     Set-Terminal $existing $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
     $result = Read-Json $existing
     Assert ($result.custom -eq 'https://example.com/a//b') 'JSONC parser preserves URL strings'
-    Assert ($result.profiles.list.Count -eq 2 -and $result.profiles.list[0].name -eq 'Personal') 'Existing profiles preserved'
+    Assert ($result.profiles.list.Count -eq 4 -and $result.profiles.list[0].name -eq 'Personal') 'Existing profiles preserved alongside hidden PowerShell duplicates'
     Assert (@($result.schemes | Where-Object { $_.name -eq 'Personal' }).Count -eq 1) 'Existing color schemes preserved'
     Assert (@($result.keybindings | Where-Object { $_.keys -eq 'ctrl+alt+x' }).Count -eq 1) 'Unrelated shortcuts preserved'
 

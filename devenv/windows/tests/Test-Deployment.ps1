@@ -116,7 +116,7 @@ try {
     } else {
     & (Join-Path $job.root 'tests/Test-NativeTools.ps1') -VimExe $job.vim -PsmuxExe $job.psmux -RcRoot (Join-Path $job.userRoot 'rc_files') -PythonRoot $job.python -NodeDirectory $job.nodeDirectory -ClangdExe $job.clangd -FixturePath $job.userRoot -UseExistingDeployment -ShellExe $job.pwsh
     $profile = Join-Path $job.userRoot 'Documents/PowerShell/profile.ps1'
-    & $job.pwsh -NoProfile -Command ". '$profile'; if (!(Get-Command vim,tmux,dev) -or (Get-Alias vi).Definition -ne 'vim') { exit 1 }; oh-my-posh print primary --config (Join-Path `$env:LOCALAPPDATA 'PersonalDevenv/prompt.omp.json') --shell pwsh"
+    & $job.pwsh -NoProfile -Command ". '$profile'; if (!(Get-Command vim,tmux,dev) -or (Get-Alias vi).Definition -ne 'vim') { exit 1 }; `$text = prompt; if (!`$text.Contains([char]0x279c)) { exit 1 }; `$text"
     if ($LASTEXITCODE -ne 0) { throw 'Deployed PowerShell profile/prompt failed' }
     & node.exe (Join-Path $job.root 'tests/Test-ACP.mjs') (Join-Path $env:NPM_CONFIG_PREFIX 'node_modules/@agentclientprotocol/codex-acp/package.json')
     if ($LASTEXITCODE -ne 0) { throw 'Installed ACP adapter did not initialize' }
