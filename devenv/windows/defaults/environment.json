@@ -1,0 +1,72 @@
+{
+    "notesRepository":  "https://github.com/jerryyin/notes.git",
+    "rcRepository":  "https://github.com/jerryyin/rc_files.git",
+    "vaultRepository": "https://github.com/jerryyin/vault.git",
+    "wsl":  {
+                "distribution":  "Ubuntu-24.04"
+            },
+    "packages":  [
+                     {
+                         "id":  "Git.Git"
+                     },
+                     {
+                         "id":  "Microsoft.WindowsTerminal"
+                     },
+                     {
+                         "id":  "Microsoft.PowerShell"
+                     },
+                     {
+                         "id":  "vim.vim"
+                     },
+                     {
+                         "id":  "marlocarlo.psmux"
+                     },
+                     {
+                         "id":  "BurntSushi.ripgrep.MSVC"
+                     },
+                     {
+                         "id":  "Python.Python.3.14"
+                     },
+                     {
+                         "id":  "JanDeDobbeleer.OhMyPosh"
+                     },
+                     {
+                         "id":  "Obsidian.Obsidian"
+                     },
+                     {
+                         "id":  "OpenJS.NodeJS.LTS"
+                     },
+                     {
+                         "id":  "OpenAI.Codex"
+                     },
+                     {
+                         "id":  "Microsoft.PowerToys"
+                     },
+                     {
+                         "id":  "KDE.KDEConnect"
+                     },
+                     {
+                         "id":  "Rufus.Rufus"
+                     },
+                     {
+                         "id":  "AntibodySoftware.WizTree"
+                     },
+                     {
+                         "id":  "VideoLAN.VLC"
+                     },
+                     {
+                         "id":  "GitHub.cli"
+                     },
+                     {
+                         "id":  "7zip.7zip"
+                     },
+                     {
+                         "id":  "LLVM.clangd"
+                     }
+                 ],
+    "font":  {
+                 "preferredFace":  "MonacoLigaturized Nerd Font",
+                 "repository":  "thep0y/monaco-nerd-font",
+                 "asset":  "MonacoLigaturizedNerdFont.zip"
+             }
+}

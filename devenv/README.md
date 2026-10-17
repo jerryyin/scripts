@@ -4,6 +4,10 @@ Things that fix or inspect **your own workstation, container or editor session**
 here touches a GPU, a simulator or a trace. If a script is about the machine you work *on*
 rather than the hardware you measure, it goes here.
 
+For a native Windows PowerShell workstation (Vim, psmux, Terminal, fonts, Codex
+and Obsidian), see [windows/README.md](windows/README.md). It reuses `rc_files`
+without provisioning or modifying WSL.
+
 ```
 devenv/
 ├── README.md                     # this file

@@ -1,0 +1,13 @@
+{
+  "general": {
+    "enabled": {
+      "Awake": true
+    }
+  },
+  "awake": {
+    "properties": {
+      "mode": 1,
+      "keepDisplayOn": false
+    }
+  }
+}
