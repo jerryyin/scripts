@@ -112,16 +112,25 @@ try {
     Write-Host 'Developer Mode enabled.'
 }
 
-function Set-TrackedFile([string]$Path, [string]$Source, [string]$BackupRoot) {
+function Test-TrackedFile([string]$Path, [string]$Source) {
+    if (!(Test-Path -LiteralPath $Source -PathType Leaf)) { return $false }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (!$item -or $item.LinkType -ne 'SymbolicLink') { return $false }
+    $target = [string](@($item.Target)[0])
+    if (![IO.Path]::IsPathRooted($target)) { $target = Join-Path $item.DirectoryName $target }
+    return [IO.Path]::GetFullPath($target) -ieq [IO.Path]::GetFullPath($Source)
+}
+
+function Set-TrackedFile([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
     $sourcePath = [IO.Path]::GetFullPath($Source)
     if (!(Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Tracked configuration is missing: $sourcePath" }
     $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($existing -and $existing.PSIsContainer) { throw "Configuration destination is a directory: $Path" }
-    if ($existing -and $existing.LinkType -eq 'SymbolicLink') {
-        $target = [string](@($existing.Target)[0])
-        if (![IO.Path]::IsPathRooted($target)) { $target = Join-Path $existing.DirectoryName $target }
-        if ([IO.Path]::GetFullPath($target) -ieq $sourcePath) { return }
+    if (Test-TrackedFile $Path $sourcePath) { return }
+    if ($existing -and !$ReplaceExisting -and ($existing.LinkType -or (Get-FileHash -LiteralPath $Path).Hash -ne (Get-FileHash -LiteralPath $sourcePath).Hash)) {
+        throw "Configuration conflict: $Path differs from $sourcePath. Recover local edits into rc_files before relinking; nothing was replaced."
     }
+    if ($existing -and $ReplaceExisting -and !$BackupRoot) { throw "A backup directory is required before replacing $Path." }
     if (!('DevenvFileLinks' -as [type])) { Add-Type -TypeDefinition @'
 using System.Runtime.InteropServices;
 public static class DevenvFileLinks {
@@ -182,74 +191,82 @@ function Set-TrackedDirectory([string]$Path, [string]$Source, [string]$BackupRoo
     [void](New-Item -ItemType Junction -Path $Path -Target $sourcePath)
 }
 
-function Merge-Map($Base, $Desired) {
-    foreach ($key in $Desired.Keys) {
-        if ($Base.Contains($key) -and $Base[$key] -is [System.Collections.IDictionary] -and $Desired[$key] -is [System.Collections.IDictionary]) {
-            Merge-Map $Base[$key] $Desired[$key]
-        } else { $Base[$key] = $Desired[$key] }
-    }
+function Set-Terminal([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
+    Set-TrackedFile $Path $Source $BackupRoot -ReplaceExisting:$ReplaceExisting
 }
 
-function Merge-Entries($Existing, $Desired, [string]$Key) {
-    $items = New-Object Collections.ArrayList
-    foreach ($entry in @($Existing)) { if ($null -ne $entry) { [void]$items.Add($entry) } }
-    foreach ($entry in @($Desired)) {
-        $found = -1
-        for ($i = 0; $i -lt $items.Count; $i++) {
-            if ($null -ne $items[$i][$Key] -and (ConvertTo-Json -Compress $items[$i][$Key]) -ceq (ConvertTo-Json -Compress $entry[$Key])) { $found = $i; break }
+function Set-PowerToys([string]$SettingsRoot, [string]$RcRoot, [string]$BackupRoot, [switch]$ReplaceExisting) {
+    Set-TrackedFile (Join-Path $SettingsRoot 'settings.json') (Join-Path $RcRoot '.powertoys/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
+    Set-TrackedFile (Join-Path $SettingsRoot 'Awake/settings.json') (Join-Path $RcRoot '.powertoys/Awake/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
+}
+
+function Set-NativeGit([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
+    $common = Join-Path $RcRoot 'git/.gitconfig.common'
+    $globalPath = Join-Path $UserRoot '.gitconfig'
+    $machinePath = Join-Path $UserRoot '.config/git/windows-machine.conf'
+    if ((Test-Path -LiteralPath $globalPath) -and !(Test-TrackedFile $globalPath $common) -and
+        (Get-FileHash -LiteralPath $globalPath).Hash -ne (Get-FileHash -LiteralPath $common).Hash) {
+        if (Test-Path -LiteralPath $machinePath) { throw "Reconcile existing $globalPath with $machinePath before migrating Git configuration." }
+        $text = [IO.File]::ReadAllText($globalPath)
+        Save-Text $machinePath $text $BackupRoot
+        $keys = @(& git config --file $common --name-only --list | Where-Object { $_ -ne 'include.path' })
+        if ($LASTEXITCODE) { throw 'Cannot read shared Git preferences.' }
+        foreach ($key in $keys) {
+            & git config --file $machinePath --get-all $key | Out-Null
+            if ($LASTEXITCODE -eq 0) { Invoke-Native git @('config', '--file', $machinePath, '--unset-all', $key) }
         }
-        if ($found -ge 0) { $items[$found] = $entry } else { [void]$items.Add($entry) }
-    }
-    return ,$items.ToArray()
+        Set-TrackedFile $globalPath $common $BackupRoot -ReplaceExisting
+    } else { Set-TrackedFile $globalPath $common $BackupRoot }
+    Set-TrackedFile (Join-Path $UserRoot '.gitignore') (Join-Path $RcRoot 'git/.gitignore') $BackupRoot
 }
 
-function Set-Terminal([string]$Path, $Defaults, [string]$ShellCommand, [string]$FontFace, [string]$BackupRoot) {
-    $settings = Read-Json $Path
-    foreach ($key in $Defaults.Keys) {
-        if ($key -eq 'profiles') { continue }
-        if ($key -eq 'actions') { $settings[$key] = Merge-Entries $settings[$key] $Defaults[$key] 'id' }
-        elseif ($key -eq 'keybindings') { $settings[$key] = Merge-Entries $settings[$key] $Defaults[$key] 'keys' }
-        elseif ($key -eq 'schemes') { $settings[$key] = Merge-Entries $settings[$key] $Defaults[$key] 'name' }
-        else { $settings[$key] = $Defaults[$key] }
+function Get-ConfigurationLinks([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
+    $homeFiles = [ordered]@{
+        '_vimrc'='vim/_vimrc'; '.psmux.conf'='tmux/.psmux.conf'
+        '.gitconfig'='git/.gitconfig.common'; '.gitignore'='git/.gitignore'
+        '.codex/AGENTS.md'='claude/.claude/CLAUDE.md'
     }
-    if (!$settings.Contains('profiles')) { $settings.profiles = [ordered]@{} }
-    if (!$settings.profiles.Contains('defaults')) { $settings.profiles.defaults = [ordered]@{} }
-    Merge-Map $settings.profiles.defaults $Defaults.profiles.defaults
-    $settings.profiles.defaults.font.face = $FontFace
-    $guid = $Defaults.defaultProfile
-    $selected = @($Defaults.profiles.list | Where-Object { $_.guid -eq $guid })
-    if ($selected.Count -ne 1) { throw 'Tracked Terminal settings must define the default profile exactly once.' }
-    $profile = ConvertTo-Map (ConvertFrom-Json (ConvertTo-Json $selected[0] -Depth 30))
-    $profile.commandline = $ShellCommand
-    $profile.font.face = $FontFace
-    $settings.profiles.list = Merge-Entries $settings.profiles['list'] @($profile) 'guid'
-    # Keep one visible PowerShell, including when Terminal discovers PS7 later.
-    foreach ($duplicate in @(
-        [ordered]@{ guid='{61c54bbd-c2c6-5271-96e7-009a87ff44bf}'; name='Windows PowerShell' },
-        [ordered]@{ guid='{574e775e-4f2a-5b96-ac1e-a2962a402336}'; name='PowerShell'; source='Windows.Terminal.PowershellCore' }
+    foreach ($name in $homeFiles.Keys) { [pscustomobject]@{Path=(Join-Path $UserRoot $name); Source=(Join-Path $RcRoot $homeFiles[$name])} }
+    foreach ($shell in @('PowerShell','WindowsPowerShell')) {
+        [pscustomobject]@{Path=(Join-Path $DocumentsPath "$shell/profile.ps1"); Source=(Join-Path $RcRoot '.powershell/profile.ps1')}
+    }
+    [pscustomobject]@{Path=$TerminalPath; Source=(Join-Path $RcRoot '.windows-terminal/settings.json')}
+    foreach ($name in @('settings.json','Awake/settings.json')) {
+        [pscustomobject]@{Path=(Join-Path $env:LOCALAPPDATA "Microsoft/PowerToys/$name"); Source=(Join-Path $RcRoot ".powertoys/$name")}
+    }
+}
+
+function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
+    foreach ($link in @(Get-ConfigurationLinks $UserRoot $RcRoot $DocumentsPath $TerminalPath)) {
+        if (!(Test-TrackedFile $link.Path $link.Source)) { "Link missing or detached: $($link.Path) -> $($link.Source)" }
+    }
+    foreach ($entry in @(
+        @{Path=(Join-Path $UserRoot '.vim/machine-paths.json'); Fields=@('gitBash','pythonRoot','pythonDll','vimrc')},
+        @{Path=(Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json'); Fields=@('vimExe','psmuxExe','rcRoot','notes')}
     )) {
-        $found = @($settings.profiles.list | Where-Object { $_.guid -eq $duplicate.guid })
-        if ($found.Count) { $found[0].hidden = $true }
-        else { $duplicate.hidden = $true; $settings.profiles.list += $duplicate }
+        try {
+            $data = Read-Json $entry.Path
+            foreach ($key in $entry.Fields) {
+                if (!$data.Contains($key) -or !$data[$key] -or !(Test-Path -LiteralPath $data[$key])) { "Missing or invalid $key in $($entry.Path)" }
+            }
+            if ($data.Contains('rcRoot') -and $data.rcRoot -ine $RcRoot) { "Configuration checkout differs from -RcPath: $($entry.Path)" }
+            if ($data.Contains('vimrc') -and [IO.Path]::GetFullPath($data.vimrc) -ine [IO.Path]::GetFullPath((Join-Path $RcRoot 'vim/.vimrc'))) { "Vim points at a different checkout: $($entry.Path)" }
+        } catch { "Invalid configuration data: $($entry.Path)" }
     }
-    $settings.defaultProfile = $guid
-    Save-Json $Path $settings $BackupRoot
-}
-
-function Set-PowerToys([string]$SettingsRoot, $Defaults, [string]$BackupRoot) {
-    $generalPath = Join-Path $SettingsRoot 'settings.json'
-    $general = Read-Json $generalPath
-    Merge-Map $general $Defaults.general
-    Save-Json $generalPath $general $BackupRoot
-
-    $awakePath = Join-Path $SettingsRoot 'Awake/settings.json'
-    $awake = Read-Json $awakePath
-    # PowerToys' settings schema requires these fields on first launch.
-    # Preserve an existing schema version instead of pinning an app version.
-    if (!$awake.Contains('name')) { $awake.name = 'Awake' }
-    if (!$awake.Contains('version')) { $awake.version = '1.0' }
-    Merge-Map $awake $Defaults.awake
-    Save-Json $awakePath $awake $BackupRoot
+    try {
+        $generated = Join-Path $UserRoot '.psmux/generated.conf'
+        if (!(Test-Path -LiteralPath $generated) -or [IO.File]::ReadAllText($generated) -cne (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf'))) {
+            'Native tmux configuration is missing or differs from rc_files; rerun setup to render it.'
+        }
+    } catch { 'Cannot validate native tmux configuration against rc_files.' }
+    $tracked = @(& git -C $RcRoot ls-files -- 'claude/.claude/skills/')
+    if ($LASTEXITCODE) { 'Cannot inventory tracked skills.'; return }
+    foreach ($name in @($tracked | ForEach-Object { $_.Substring('claude/.claude/skills/'.Length).Split('/')[0] } | Sort-Object -Unique)) {
+        $path = Join-Path $UserRoot ".agents/skills/$name"
+        $source = Join-Path $RcRoot "claude/.claude/skills/$name"
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (!$item -or $item.LinkType -notin @('Junction','SymbolicLink') -or [string](@($item.Target)[0]) -ine $source) { "Skill link missing or detached: $path" }
+    }
 }
 
 function Get-VaultPath([string]$RegistryPath, [string]$Fallback) {
@@ -400,18 +417,7 @@ function Install-LatestAddon($Addon, [string]$Directory, [string]$BackupRoot) {
 }
 
 function Set-ProfileLoader([string]$Path, [string]$ManagedProfile, [string]$BackupRoot) {
-    $begin = '# >>> personal-devenv >>>'; $end = '# <<< personal-devenv <<<'
-    $text = if (Test-Path -LiteralPath $Path) { [IO.File]::ReadAllText($Path) } else { '' }
-    $block = "$begin`n. '" + $ManagedProfile.Replace("'", "''") + "'`n$end"
-    $pattern = '(?ms)^' + [regex]::Escape($begin) + '.*?^' + [regex]::Escape($end)
-    $sourceText = [IO.File]::ReadAllText($ManagedProfile)
-    if (!$text.Trim() -or $text -ceq $sourceText -or !([regex]::Replace($text, $pattern, '').Trim())) {
-        Set-TrackedFile $Path $ManagedProfile $BackupRoot
-        return
-    }
-    if ($text -match $pattern) { $text = [regex]::Replace($text, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($m) $block }) }
-    else { $text = $text.TrimEnd() + "`n`n" + $block + "`n" }
-    Save-Text $Path $text $BackupRoot
+    Set-TrackedFile $Path $ManagedProfile $BackupRoot
 }
 
 function Invoke-Native([string]$Program, [string[]]$Arguments, [switch]$Capture) {
@@ -579,6 +585,9 @@ function Install-VimPlugins([string]$VimExe, [string]$UserRoot, [string]$BackupR
     $changed = !(Test-Path -LiteralPath $packagePath)
     $package = Read-Json $packagePath
     if (!$package.Contains('dependencies')) { $package.dependencies = [ordered]@{} }
+    foreach ($extension in @($package.dependencies.Keys)) {
+        if ($package.dependencies[$extension] -cne 'latest') { $package.dependencies[$extension] = 'latest'; $changed = $true }
+    }
     $pending = $false
     foreach ($extension in @(Read-Json $choices)) {
         if (!$package.dependencies.Contains($extension)) { $package.dependencies[$extension] = 'latest'; $changed = $true }
@@ -586,15 +595,13 @@ function Install-VimPlugins([string]$VimExe, [string]$UserRoot, [string]$BackupR
         if (!(Test-Path -LiteralPath $installed)) { $pending = $true }
     }
     if ($changed) { Save-Json $packagePath $package $BackupRoot }
-    if ($Update -or $pending) {
-        # On Windows, npm install --prefix <dir> with no package arguments can
-        # mistake that prefix for a global install and install the caller's cwd.
-        Push-Location -LiteralPath $extensions
-        try {
-            $command = if ($Update) { 'update' } else { 'install' }
-            Invoke-Native npm.cmd @($command, '--no-package-lock')
-        } finally { Pop-Location }
-    } else { Write-Host 'SKIP CoC extensions (installed)' }
+    Write-Host 'CoC extensions: checking latest versions (existing choices are retained).'
+    # On Windows, npm install --prefix <dir> can select a global install.
+    Push-Location -LiteralPath $extensions
+    try {
+        $command = if ($pending) { 'install' } else { 'update' }
+        Invoke-Native npm.cmd @($command, '--no-save', '--no-package-lock')
+    } finally { Pop-Location }
 }
 
 function Install-CodexAdapter([switch]$Update) {
@@ -726,10 +733,10 @@ function Get-FontFiles($Font, [string]$Directory) {
     if (!@(Get-ChildItem -LiteralPath $Directory -Filter '*.ttf').Count) { throw 'Latest font archive contains no TrueType fonts' }
 }
 
-function Install-Fonts($Font, [string]$BackupRoot) {
+function Install-Fonts($Font, [string]$BackupRoot, [string]$PreferredFace) {
     Add-Type -AssemblyName System.Drawing
     $installed = @(New-Object Drawing.Text.InstalledFontCollection).Families.Name
-    if ($installed -contains $Font.preferredFace) { return $Font.preferredFace }
+    if ($installed -contains $PreferredFace) { return $PreferredFace }
     $target = Join-Path $env:LOCALAPPDATA 'Microsoft/Windows/Fonts'
     [void][IO.Directory]::CreateDirectory($target)
     $key = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
@@ -748,7 +755,7 @@ public static class DevenvFonts {
         $collection = New-Object Drawing.Text.PrivateFontCollection
         try {
             foreach ($fontFile in Get-ChildItem -LiteralPath $staging -Filter '*.ttf') { $collection.AddFontFile($fontFile.FullName) }
-            if ($collection.Families.Name -notcontains $Font.preferredFace) { throw 'Downloaded font does not contain the requested family' }
+            if ($collection.Families.Name -notcontains $PreferredFace) { throw 'Downloaded font does not contain the requested family' }
         } finally { $collection.Dispose() }
         foreach ($fontFile in Get-ChildItem -LiteralPath $staging -Filter '*.ttf') {
             $file = Join-Path $target $fontFile.Name
@@ -764,7 +771,7 @@ public static class DevenvFonts {
     }
     $result = [IntPtr]::Zero
     [void][DevenvFonts]::SendMessageTimeout([IntPtr]0xffff, 0x001D, [IntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$result)
-    return $Font.preferredFace
+    return $PreferredFace
 }
 
 Export-ModuleMember -Function *

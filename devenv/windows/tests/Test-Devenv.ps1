@@ -19,7 +19,12 @@ try {
     }
     $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'bootstrap.ps1') 2>&1
     Assert ($LASTEXITCODE -eq 0 -and ($plan -join "`n") -match 'PLAN: install') 'Documented powershell -File entry point resolves its default manifest'
-    $defaults = Read-Json (Join-Path $RcRoot '.windows-terminal/settings.json')
+    $sourceRc = Join-Path $testRoot 'rc_files'
+    foreach ($file in @('.windows-terminal/settings.json','.powertoys/settings.json','.powertoys/Awake/settings.json')) {
+        $destination=Join-Path $sourceRc $file
+        [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
+        Copy-Item -LiteralPath (Join-Path $RcRoot $file) -Destination $destination
+    }
     $arrayPath = Join-Path $testRoot 'plugins.json'
     Save-Text $arrayPath '["calendar", "copilot"]' ''
     $ids = @(Read-Json $arrayPath)
@@ -27,16 +32,13 @@ try {
     Save-Text $arrayPath '["calendar"]' ''
     Assert (@(Read-Json $arrayPath).Count -eq 1) 'Single-plugin JSON arrays remain iterable'
     $terminal = Join-Path $testRoot 'Terminal/settings.json'
-    Set-Terminal $terminal $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
-    $result = Read-Json $terminal
-    Assert (@($result.profiles.list | Where-Object { !$_.hidden }).Count -eq 1) 'Fresh Terminal receives one visible PowerShell profile'
-    Assert ($result.profiles.defaults.font.face -eq 'Test Font') 'Terminal uses the installed font'
-    Assert ($result.profiles.list[0].commandline -eq 'pwsh.exe -NoLogo') 'Development profile is native PowerShell'
-    Assert ($result.profiles.list[0].colorScheme -ceq 'GruvboxMaterialHardDark' -and $result.profiles.list[0].font.size -eq 10) 'Development profile retains Gruvbox Material Hard Dark and font size'
-    Assert ($result.schemes.Count -eq 6) 'All six captured Gruvbox Material palettes are restored'
-    $hash = (Get-FileHash -LiteralPath $terminal).Hash
-    Set-Terminal $terminal $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
-    Assert ((Get-FileHash -LiteralPath $terminal).Hash -eq $hash) 'Terminal rerun is byte-for-byte unchanged'
+    $terminalSource = Join-Path $sourceRc '.windows-terminal/settings.json'
+    Set-Terminal $terminal $terminalSource ''
+    Assert (Test-TrackedFile $terminal $terminalSource) 'Terminal directly links to tracked preferences'
+    $hash=(Get-FileHash -LiteralPath $terminal).Hash
+    $time=(Get-Item -LiteralPath $terminal).CreationTimeUtc.Ticks
+    Set-Terminal $terminal $terminalSource ''
+    Assert ((Get-FileHash -LiteralPath $terminal).Hash -ceq $hash -and (Get-Item -LiteralPath $terminal).CreationTimeUtc.Ticks -eq $time) 'Terminal rerun leaves source and link unchanged'
 
     $formatted = Join-Path $testRoot 'formatted.json'
     $formatBackups = Join-Path $testRoot 'format-backups'
@@ -61,55 +63,27 @@ try {
     Assert ($codexPackage.Count -eq 1 -and $codexPackage[0].installedCommand -eq 'codex.exe') 'Codex reuses an existing app-managed CLI'
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
-    $powerToysDefaults = Read-Json (Join-Path $RcRoot '.powertoys/settings.json')
     $powerToys = Join-Path $testRoot 'PowerToys'
-    $powerToysGeneral = Join-Path $powerToys 'settings.json'
-    $powerToysAwake = Join-Path $powerToys 'Awake/settings.json'
-    Set-PowerToys $powerToys $powerToysDefaults (Join-Path $testRoot 'backups')
-    Assert ((Read-Json $powerToysGeneral).enabled.Awake) 'Fresh PowerToys settings enable Awake'
-    $awake = Read-Json $powerToysAwake
-    Assert ($awake.properties.mode -eq 1 -and !$awake.properties.keepDisplayOn) 'Fresh Awake settings match indefinite mode with display allowed to sleep'
-    Save-Json $powerToysGeneral ([ordered]@{ enabled=[ordered]@{Awake=$false; FancyZones=$false}; startup=$true; theme='dark' }) ''
-    Save-Json $powerToysAwake ([ordered]@{name='Awake'; version='future-schema'; properties=[ordered]@{mode=0; keepDisplayOn=$true; customTrayTimes=[ordered]@{'8 hours'=28800}}}) ''
-    Set-PowerToys $powerToys $powerToysDefaults (Join-Path $testRoot 'backups')
-    $general = Read-Json $powerToysGeneral
-    $awake = Read-Json $powerToysAwake
-    Assert ($general.enabled.Awake -and !$general.enabled.FancyZones -and $general.startup -and $general.theme -ceq 'dark') 'PowerToys merge preserves other modules, startup preference and appearance'
-    Assert ($awake.version -ceq 'future-schema' -and $awake.properties.customTrayTimes['8 hours'] -eq 28800) 'Awake merge preserves the installed schema and custom tray times'
-    $generalHash = (Get-FileHash -LiteralPath $powerToysGeneral).Hash
-    $awakeHash = (Get-FileHash -LiteralPath $powerToysAwake).Hash
-    Set-PowerToys $powerToys $powerToysDefaults (Join-Path $testRoot 'backups')
-    Assert ((Get-FileHash -LiteralPath $powerToysGeneral).Hash -ceq $generalHash -and (Get-FileHash -LiteralPath $powerToysAwake).Hash -ceq $awakeHash) 'PowerToys and Awake rerun is byte-for-byte unchanged'
-
-    $existing = Join-Path $testRoot 'existing.json'
-    Save-Text $existing @'
-{
- // Comment, trailing comma, and URL must all survive parsing.
- "custom": "https://example.com/a//b",
- "profiles": {"list": [{"guid":"other", "name":"Personal"}],},
- "schemes": [{"name":"Personal", "background":"#010203"}],
- "keybindings": [{"keys":"ctrl+alt+x", "command":"newTab"}],
-}
-'@ ''
-    Set-Terminal $existing $defaults 'pwsh.exe -NoLogo' 'Test Font' (Join-Path $testRoot 'backups')
-    $result = Read-Json $existing
-    Assert ($result.custom -eq 'https://example.com/a//b') 'JSONC parser preserves URL strings'
-    Assert ($result.profiles.list.Count -eq 4 -and $result.profiles.list[0].name -eq 'Personal') 'Existing profiles preserved alongside hidden PowerShell duplicates'
-    Assert (@($result.schemes | Where-Object { $_.name -eq 'Personal' }).Count -eq 1) 'Existing color schemes preserved'
-    Assert (@($result.keybindings | Where-Object { $_.keys -eq 'ctrl+alt+x' }).Count -eq 1) 'Unrelated shortcuts preserved'
-
+    Set-PowerToys $powerToys $sourceRc ''
+    Assert (Test-TrackedFile (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc '.powertoys/settings.json')) 'PowerToys general settings directly link to rc_files'
+    Assert (Test-TrackedFile (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc '.powertoys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
+    $awake=Read-Json (Join-Path $powerToys 'Awake/settings.json')
+    Assert ($awake.properties.mode -eq 1 -and !$awake.properties.keepDisplayOn) 'Awake keeps the requested preferences'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
-    Save-Text $profile "function hello { 'hello' }`n" ''
     $sharedProfile = Join-Path $testRoot "Someone's computer/profile.ps1"
     Save-Text $sharedProfile '# tracked profile' ''
-    Set-ProfileLoader $profile $sharedProfile (Join-Path $testRoot 'backups')
-    $hash = (Get-FileHash -LiteralPath $profile).Hash
-    Set-ProfileLoader $profile $sharedProfile (Join-Path $testRoot 'backups')
-    $text = [IO.File]::ReadAllText($profile)
-    Assert ($text.Contains('function hello')) 'Existing PowerShell profile preserved'
-    Assert (([regex]::Matches($text, '>>> personal-devenv >>>')).Count -eq 1) 'Profile loader inserted once'
-    Assert ($text.Contains("Someone''s computer")) 'Profile loader escapes apostrophes in paths'
-    Assert ((Get-FileHash -LiteralPath $profile).Hash -eq $hash) 'Profile rerun is unchanged'
+    Save-Text $profile '# unrelated local edit' ''
+    $rejected=$false
+    try { Set-ProfileLoader $profile $sharedProfile '' } catch { $rejected=$_.Exception.Message.Contains('Configuration conflict') }
+    Assert ($rejected -and [IO.File]::ReadAllText($profile) -ceq '# unrelated local edit') 'Conflicting PowerShell content is preserved and reported'
+    Save-Text $profile '# tracked profile' ''
+    Set-ProfileLoader $profile $sharedProfile ''
+    Assert (Test-TrackedFile $profile $sharedProfile) 'An identical profile copy becomes a direct link'
+    [IO.File]::WriteAllText($profile,'# local edit through linked profile')
+    Assert ([IO.File]::ReadAllText($sharedProfile) -ceq '# local edit through linked profile') 'Installed profile edits reach rc_files'
+    $jsonc=Join-Path $testRoot 'jsonc.json'
+    Save-Text $jsonc "{ // comment`n `"url`": `"https://example.com/a//b`", }" ''
+    Assert ((Read-Json $jsonc).url -ceq 'https://example.com/a//b') 'JSONC preserves URL strings and permits comments and trailing commas'
 
     $registry = Join-Path $testRoot 'Obsidian/obsidian.json'
     Save-Json $registry ([ordered]@{ vaults = [ordered]@{ other = [ordered]@{ path = 'C:\other'; open = $true } }; custom = 'retained' }) ''
@@ -137,7 +111,7 @@ try {
     $source = Join-Path $testRoot 'source-repo'
     Invoke-Native git @('-c', 'init.defaultBranch=main', 'init', $source)
     Save-Text (Join-Path $source 'vim/.vimrc') '" shared configuration' ''
-    Invoke-Native git @('-C', $source, 'add', '.')
+    Invoke-Native git @('-C', $source, 'add', '-f', '.')
     Invoke-Native git @('-C', $source, '-c', 'user.name=Devenv Test', '-c', 'user.email=devenv@example.invalid', '-c', 'commit.gpgsign=false', '-c', ('core.hooksPath=' + (Join-Path $testRoot 'no-hooks')), 'commit', '-m', 'fixture')
     $freshRc = Join-Path $testRoot 'clean Windows account/rc_files'
     Ensure-Checkout $freshRc $source

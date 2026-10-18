@@ -12,7 +12,9 @@ $candidate = Join-Path $fixture "Someone's rc_files"
 $local = Join-Path $userRoot 'AppData/Local'
 $state = Join-Path $local 'PersonalDevenv'
 $socket = 'config-owner-' + [guid]::NewGuid().ToString('N')
-$prior = @{USERPROFILE=$env:USERPROFILE; HOME=$env:HOME; LOCALAPPDATA=$env:LOCALAPPDATA}
+$prior = @{USERPROFILE=$env:USERPROFILE; HOME=$env:HOME; LOCALAPPDATA=$env:LOCALAPPDATA; GIT_CONFIG_GLOBAL=$env:GIT_CONFIG_GLOBAL}
+$nativeState = Read-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json')
+$nativeVimPaths = Read-Json (Join-Path $env:USERPROFILE '.vim/machine-paths.json')
 $script:passed = 0
 $console = $null
 function Assert($Ok, [string]$Message) {
@@ -21,7 +23,7 @@ function Assert($Ok, [string]$Message) {
 }
 try {
     Assert ((Read-Json (Join-Path $root 'defaults/environment.json')).packages.id -notcontains 'JanDeDobbeleer.OhMyPosh') 'Fresh setup does not require the unused prompt engine'
-    foreach ($file in @('.powershell/profile.ps1', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1', 'tmux/.tmux.conf', 'vim/_vimrc')) {
+    foreach ($file in @('.powershell/profile.ps1', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1', 'tmux/.tmux.conf', 'vim/_vimrc', 'git/.gitconfig.common', 'git/.gitignore')) {
         $destination = Join-Path $candidate $file
         [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
         Copy-Item -LiteralPath (Join-Path $RcRoot $file) -Destination $destination
@@ -30,7 +32,6 @@ try {
     Assert (!(Test-Path -LiteralPath (Join-Path $candidate '.windows'))) 'Deployment uses application-owned configuration without a shared Windows directory'
     $profile = Join-Path $userRoot 'Documents/PowerShell/profile.ps1'
     $source = Join-Path $candidate '.powershell/profile.ps1'
-    Save-Text $profile '$global:ExistingProfilePreference = 123' ''
     Set-ProfileLoader $profile $source ''
     Set-NativeMux $userRoot $candidate ''
     $entry = Join-Path $userRoot '.psmux.conf'
@@ -42,7 +43,7 @@ try {
     Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink') 'Home Vim entry is a live link, never a copy'
     Assert (!(Test-Path -LiteralPath (Join-Path $state 'profile.ps1'))) 'No copied PowerShell profile in AppData'
     . $profile
-    Assert ($global:ExistingProfilePreference -eq 123) 'Existing PowerShell profile content is preserved'
+    Assert (Test-TrackedFile $profile $source) 'PowerShell profile directly links to its tracked source'
     Assert ($null -eq $script:DevenvState) 'Opening a shell does not read machine state'
     Save-Json (Join-Path $state 'state.json') ([ordered]@{vimExe='unused'; psmuxExe=$psmux; rcRoot=$candidate}) ''
     Assert ((Get-DevenvState).psmuxExe -eq $psmux) 'Machine paths load on demand'
@@ -122,10 +123,44 @@ try {
     $rejected = $false
     try { Set-TrackedDirectory $conflict $skillSource $backups } catch { $rejected = $_.Exception.Message.Contains('Local skill edits need recovery') }
     Assert ($rejected -and [IO.File]::ReadAllText((Join-Path $conflict 'SKILL.md')) -ceq 'local-only edits') 'Differing copied skills stop setup without losing local edits'
+    $env:GIT_CONFIG_GLOBAL = Join-Path $userRoot '.gitconfig'
+    Save-Text $env:GIT_CONFIG_GLOBAL "[user]`nname = old name`n[core]`nsshCommand = fixture-ssh.exe`n" ''
+    Set-NativeGit $userRoot $candidate $backups
+    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig.common')) 'Windows global Git configuration links to shared preferences'
+    Assert ((Invoke-Native git @('config','--global','--get','alias.cmt') -Capture) -ceq 'commit --signoff') 'Windows inherits the Linux Git aliases'
+    Assert ((Invoke-Native git @('config','--get','core.sshCommand') -Capture) -ceq 'fixture-ssh.exe') 'Machine Git settings survive in a separate local include'
+    Invoke-Native git @('config','--global','alias.windows-link-proof','status')
+    Assert ([IO.File]::ReadAllText((Join-Path $candidate 'git/.gitconfig.common')).Contains('windows-link-proof')) 'git config --global edits the tracked source through its symlink'
+    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig.common')) 'Git preserves its configuration symlink when saving'
+    Set-NativeGit $userRoot $candidate $backups
+    Assert (Test-TrackedFile (Join-Path $userRoot '.gitignore') (Join-Path $candidate 'git/.gitignore')) 'Windows global ignore rules link directly to the shared source'
+    $healthHome = Join-Path $fixture 'health home'
+    $env:USERPROFILE=$healthHome; $env:HOME=$healthHome; $env:LOCALAPPDATA=Join-Path $healthHome 'AppData/Local'
+    $healthDocuments = Join-Path $healthHome 'Documents'
+    $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
+    foreach ($link in @(Get-ConfigurationLinks $healthHome $RcRoot $healthDocuments $healthTerminal)) { Set-TrackedFile $link.Path $link.Source '' }
+    Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') $nativeState ''
+    Save-Json (Join-Path $healthHome '.vim/machine-paths.json') $nativeVimPaths ''
+    Set-NativeCodex $healthHome $RcRoot ''
+    Set-NativeMux $healthHome $RcRoot ''
+    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links, machine paths, skills and generated settings'
+    Save-Text $healthTerminal ([IO.File]::ReadAllText($healthTerminal)) ''
+    # Save-Text skips identical content, so replace only this disposable link.
+    $terminalCopy=[IO.File]::ReadAllText($healthTerminal)
+    Remove-Item -LiteralPath $healthTerminal
+    [IO.File]::WriteAllText($healthTerminal,$terminalCopy)
+    $problems=@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal)
+    Assert ($problems.Count -eq 1 -and $problems[0].Contains($healthTerminal)) 'Readiness rejects a detached copy even when its content matches'
+    Remove-Item -LiteralPath (Join-Path $healthHome '.vim/machine-paths.json')
+    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal | Where-Object { $_ -like '*machine-paths.json*' }).Count -gt 0) 'Readiness reports missing executable-path data'
     Assert (!(Get-ChildItem -LiteralPath $userRoot -Filter '*.link-*' -Recurse -Force)) 'File deployment leaves no temporary links or copies behind'
     Write-Output "$script:passed configuration ownership checks passed. Fixture: $fixture"
 } finally {
     if ($console) { $console.Dispose() }
-    & $psmux -L $socket kill-server 2>$null | Out-Null
-    $env:USERPROFILE=$prior.USERPROFILE; $env:HOME=$prior.HOME; $env:LOCALAPPDATA=$prior.LOCALAPPDATA
+    try {
+        $env:USERPROFILE=$userRoot; $env:HOME=$userRoot; $env:LOCALAPPDATA=$local
+        & $psmux -L $socket kill-server 2>$null | Out-Null
+    } finally {
+        $env:USERPROFILE=$prior.USERPROFILE; $env:HOME=$prior.HOME; $env:LOCALAPPDATA=$prior.LOCALAPPDATA; $env:GIT_CONFIG_GLOBAL=$prior.GIT_CONFIG_GLOBAL
+    }
 }

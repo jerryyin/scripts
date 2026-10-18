@@ -16,6 +16,7 @@ Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
+if (!(Test-DeveloperMode)) { throw 'Enable Developer Mode before running the isolated deployment test. This test never enables it.' }
 # Keep the synthetic user profile comparable in length to a real Windows home.
 # Deep temp roots can exceed CreateProcess's executable-path limit inside npm's
 # nested Codex dependency even when package extraction itself succeeds.
@@ -42,7 +43,7 @@ try {
     # Pending shared Vim changes are tested before publication. The source Git
     # clone otherwise contains only upstream-tracked files, never local secrets.
     $candidateFiles = @('vim/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')
-    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')
+    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', '.powertoys/Awake/settings.json', 'git/.gitconfig.common', 'git/.gitignore', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')
     foreach ($relative in $candidateFiles) {
         $destination = Join-Path $sourceRc $relative
         [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
@@ -103,7 +104,7 @@ function Snapshot {
 }
 try {
     if (!$RuntimeOnly) {
-    $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $job.root 'bootstrap.ps1'), '-SkipPackages', '-SkipWsl', '-SkipFonts', '-SkipCredentials', '-EnvironmentPath', $job.environment, '-DocumentsPath', (Join-Path $job.userRoot 'Documents'), '-PythonRoot', $job.python, '-TerminalPath', (Join-Path $job.userRoot 'Terminal/settings.json'))
+    $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $job.root 'bootstrap.ps1'), '-SkipPackages', '-SkipWsl', '-SkipFonts', '-SkipCredentials', '-RequireDeveloperMode', '-EnvironmentPath', $job.environment, '-DocumentsPath', (Join-Path $job.userRoot 'Documents'), '-PythonRoot', $job.python, '-TerminalPath', (Join-Path $job.userRoot 'Terminal/settings.json'))
     foreach ($pass in @('first', 'second')) {
         Start-Transcript -LiteralPath (Join-Path $job.fixture ($pass + '.log')) | Out-Null
         & powershell.exe @common -Apply | Out-Host
@@ -152,7 +153,7 @@ try {
     Assert ($first.Count -eq $second.Count) 'Second run creates no additional managed files'
     Assert (!(Test-Path -LiteralPath (Join-Path $userRoot 'AppData/Local/PersonalDevenv/backups'))) 'Second run produces no configuration backups'
     $secondLog = [IO.File]::ReadAllText((Join-Path $fixture 'second.log'))
-    Assert ($secondLog.Contains('SKIP CoC extensions') -and $secondLog.Contains('SKIP Codex ACP') -and $secondLog.Contains('SKIP Obsidian plugin') -and !$secondLog.Contains('Resolved ') -and !$secondLog.Contains('Cloning into')) 'Second run skips existing checkouts and plugin/npm setup'
+    Assert ($secondLog.Contains('CoC extensions: checking latest versions') -and $secondLog.Contains('SKIP Codex ACP') -and $secondLog.Contains('SKIP Obsidian plugin') -and !$secondLog.Contains('Resolved ') -and !$secondLog.Contains('Cloning into')) 'Second run retains existing checkouts/plugins and checks latest CoC extensions'
     Assert ([IO.File]::ReadAllText((Join-Path $userRoot '.vim/plugin-install.log')).Contains('SKIP Vim plugins')) 'Second run skips Vim plugin installation/update'
     foreach ($id in @(Read-Json (Join-Path $userRoot 'notes/.obsidian/community-plugins.json'))) {
         Assert ((Read-Json (Join-Path $userRoot "notes/.obsidian/plugins/$id/data.json")).fixture -ceq 'preserve plugin preferences') "Plugin $id retains tracked settings"

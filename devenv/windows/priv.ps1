@@ -50,11 +50,19 @@ if ($Status) {
 
 # GitHub CLI uses the Windows credential store. Do not render the Linux hosts.yml
 # token template or replace native credentials with a second plaintext copy.
+function Invoke-GhConfiguration([string[]]$Arguments) {
+    $previous = $env:GIT_CONFIG_GLOBAL
+    try {
+        $env:GIT_CONFIG_GLOBAL = Join-Path $env:USERPROFILE '.config/git/windows-machine.conf'
+        [void][IO.Directory]::CreateDirectory((Split-Path $env:GIT_CONFIG_GLOBAL -Parent))
+        Invoke-Native gh $Arguments
+    } finally { $env:GIT_CONFIG_GLOBAL = $previous }
+}
 if (!(Get-Command gh -ErrorAction SilentlyContinue)) { throw 'Install GitHub.cli (or run bootstrap.ps1 -Apply) first.' }
 $login = Invoke-CredentialCommand gh @('auth', 'status', '--hostname', 'github.com') ''
 if ($login.ExitCode -ne 0) {
     Write-Output 'Sign into the GitHub account that can read your private vault and notes.'
-    Invoke-Native gh @('auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--skip-ssh-key')
+    Invoke-GhConfiguration @('auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--skip-ssh-key')
 }
 
 # Clone only when absent; never pull/reset an existing private vault.
@@ -65,7 +73,9 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
         throw 'Vault destination is not an empty directory or Git checkout.'
     }
     $probe = Invoke-CredentialCommand git.exe @('-c', 'credential.interactive=never', 'ls-remote', $repository, 'HEAD') '' @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
-    if ($probe.ExitCode -ne 0) { Invoke-Native gh @('auth', 'setup-git', '--hostname', 'github.com') }
+    if ($probe.ExitCode -ne 0) {
+        Invoke-GhConfiguration @('auth', 'setup-git', '--hostname', 'github.com')
+    }
     [void][IO.Directory]::CreateDirectory($VaultPath)
     Set-PrivateAcl $VaultPath
     $clone = Invoke-CredentialCommand git.exe @('-c', 'core.autocrlf=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--', $repository, $VaultPath) '' @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
@@ -102,8 +112,12 @@ elseif (!$SkipSshAgent) {
         $id = if ($fingerprint) { ($fingerprint -split '\s+')[1] } else { '' }
         if (!$id -or !$loaded.Contains($id)) { Invoke-Native $sshAdd @($key.FullName) }
     }
-    $sshCommand = Invoke-CredentialCommand git.exe @('config', '--global', '--get', 'core.sshCommand') ''
-    if ($sshCommand.ExitCode -ne 0) { Invoke-Native git @('config', '--global', 'core.sshCommand', ((Join-Path $sshBin 'ssh.exe') -replace '\\', '/')) }
+    $sshCommand = Invoke-CredentialCommand git.exe @('config', '--global', '--includes', '--get', 'core.sshCommand') ''
+    if ($sshCommand.ExitCode -ne 0) {
+        $machineConfig = Join-Path $env:USERPROFILE '.config/git/windows-machine.conf'
+        [void][IO.Directory]::CreateDirectory((Split-Path $machineConfig -Parent))
+        Invoke-Native git @('config', '--file', $machineConfig, 'core.sshCommand', ((Join-Path $sshBin 'ssh.exe') -replace '\\', '/'))
+    }
     Write-Output 'OK SSH: native Windows agent enabled; existing keys and config preserved.'
 }
 

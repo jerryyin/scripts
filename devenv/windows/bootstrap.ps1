@@ -25,6 +25,7 @@ param(
     [switch]$SkipAddons,
     [switch]$SkipVimPlugins,
     [switch]$SkipCredentials,
+    [switch]$RequireDeveloperMode,
     [switch]$InstallCodexDesktop
 )
 if (!$EnvironmentPath) { $EnvironmentPath = Join-Path $PSScriptRoot 'defaults/environment.json' }
@@ -45,6 +46,7 @@ $backupRoot = Join-Path $stateRoot ('backups/' + (Get-Date -Format 'yyyyMMdd-HHm
 $managedProfile = Join-Path $RcPath '.powershell/profile.ps1'
 $documents = if ($DocumentsPath) { $DocumentsPath } else { [Environment]::GetFolderPath('MyDocuments') }
 if (!$documents) { $documents = Join-Path $env:USERPROFILE 'Documents' }
+$terminalSource = Join-Path $RcPath '.windows-terminal/settings.json'
 
 if (!$Apply -and !$Check) {
     Write-Output "PLAN: install $($manifest.packages.id -join ', ') with WinGet"
@@ -61,6 +63,7 @@ if (!$Apply -and !$Check) {
 }
 
 if ($Check) {
+    Update-ProcessPath
     $missing = New-Object Collections.ArrayList
     if (Test-DeveloperMode) { Write-Output 'OK Developer Mode' }
     else { [void]$missing.Add('Developer Mode'); Write-Output 'MISSING Developer Mode (required for configuration symlinks)' }
@@ -83,22 +86,32 @@ if ($Check) {
         else { [void]$missing.Add($path); Write-Output "MISSING $path" }
     }
     if (!$SkipFonts) {
+        $fontFace = (Read-Json $terminalSource).profiles.defaults.font.face
         Add-Type -AssemblyName System.Drawing
         $fonts = New-Object Drawing.Text.InstalledFontCollection
         try {
-            if ($fonts.Families.Name -contains $manifest.font.preferredFace) { Write-Output "OK font $($manifest.font.preferredFace)" }
-            else { [void]$missing.Add('font'); Write-Output "MISSING font $($manifest.font.preferredFace)" }
+            if ($fonts.Families.Name -contains $fontFace) { Write-Output "OK font $fontFace" }
+            else { [void]$missing.Add('font'); Write-Output "MISSING font $fontFace" }
         } finally { $fonts.Dispose() }
     }
     if (Test-Path -LiteralPath $TerminalPath) {
         $terminal = Read-Json $TerminalPath
         $development = @()
         if ($terminal.Contains('profiles') -and $terminal.profiles.Contains('list')) {
-            $development = @($terminal.profiles.list | Where-Object { $_.Contains('guid') -and $_.guid -eq '{66fce70d-f58a-45d6-a538-11c34abff4a8}' })
+            $defaultGuid = (Read-Json $terminalSource).defaultProfile
+            $development = @($terminal.profiles.list | Where-Object { $_.Contains('guid') -and $_.guid -eq $defaultGuid })
         }
-        if ($development.Count -eq 1 -and $development[0].Contains('colorScheme') -and $development[0].colorScheme -eq 'GruvboxMaterialHardDark' -and $development[0].Contains('font') -and $development[0].font.Contains('face') -and $development[0].font.face -eq $manifest.font.preferredFace) {
-            Write-Output 'OK Terminal development profile: GruvboxMaterialHardDark and MonacoLigaturized Nerd Font'
-        } else { [void]$missing.Add('Terminal preferences'); Write-Output 'MISSING Terminal development profile with the requested font and color scheme' }
+        if ($development.Count -eq 1) { Write-Output 'OK Terminal default PowerShell profile' }
+        else { [void]$missing.Add('Terminal profile'); Write-Output 'MISSING unique Terminal default PowerShell profile' }
+    }
+    foreach ($problem in @(Get-ConfigurationProblems $env:USERPROFILE $RcPath $documents $TerminalPath)) {
+        [void]$missing.Add($problem); Write-Output "DRIFT $problem"
+    }
+    if (!$SkipAddons) {
+        $prefix = Invoke-Native npm.cmd @('prefix','--global') -Capture
+        if (!(Test-Path -LiteralPath (Join-Path $prefix 'node_modules/@agentclientprotocol/codex-acp/package.json')) -or !(Test-Path -LiteralPath (Join-Path $prefix 'codex-acp.cmd'))) {
+            [void]$missing.Add('Codex ACP adapter'); Write-Output 'MISSING Codex ACP adapter'
+        }
     }
     if (!$SkipVimPlugins) {
         $themePath = Join-Path $env:USERPROFILE '.vim/plugged/gruvbox-material/colors/gruvbox-material.vim'
@@ -131,7 +144,9 @@ $nativeSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $nativeProfile = (Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $nativeSid)).ProfileImagePath
 if ($env:USERPROFILE -eq $nativeProfile -and (Get-Process Obsidian -ErrorAction SilentlyContinue)) { throw 'Close Obsidian before applying its settings and plugin files, then rerun.' }
 if (!$SkipPackages -and !(Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install App Installer (WinGet), then rerun.' }
-Ensure-DeveloperMode
+if ($RequireDeveloperMode) {
+    if (!(Test-DeveloperMode)) { throw 'This configuration-only run requires Developer Mode to be enabled beforehand; no machine settings were changed.' }
+} else { Ensure-DeveloperMode }
 $wslState = if (!$SkipWsl) { Ensure-Wsl $manifest.wsl.distribution } else { 'Skipped' }
 if (!$SkipPackages) { foreach ($package in $manifest.packages) {
     if ($package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
@@ -162,9 +177,10 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
-foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'vim/_vimrc', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')) {
+foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', '.powertoys/Awake/settings.json', 'git/.gitconfig.common', 'git/.gitignore', 'vim/_vimrc', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $RcPath $file))) { throw "Update rc_files: $file is missing." }
 }
+Set-NativeGit $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
@@ -176,12 +192,13 @@ $pwshExe = (Get-Command pwsh.exe).Source
 if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
 if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
 
-Set-PowerToys (Join-Path $env:LOCALAPPDATA 'Microsoft/PowerToys') (Read-Json (Join-Path $RcPath '.powertoys/settings.json')) $backupRoot
-$fontFace = $manifest.font.preferredFace
-if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot }
-$shellCommand = '"' + $pwshExe + '" -NoLogo'
-Set-Terminal $TerminalPath (Read-Json (Join-Path $RcPath '.windows-terminal/settings.json')) $shellCommand $fontFace $backupRoot
-Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
+$priorState = Read-Json (Join-Path $stateRoot 'state.json')
+$firstLinks = !$priorState.Contains('linkedPreferences') -or !$priorState.linkedPreferences
+Set-PowerToys (Join-Path $env:LOCALAPPDATA 'Microsoft/PowerToys') $RcPath $backupRoot -ReplaceExisting:$firstLinks
+$fontFace = (Read-Json (Join-Path $RcPath '.windows-terminal/settings.json')).profiles.defaults.font.face
+if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
+Set-Terminal $TerminalPath (Join-Path $RcPath '.windows-terminal/settings.json') $backupRoot -ReplaceExisting:$firstLinks
+Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath; linkedPreferences = $true }) $backupRoot
 Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
@@ -190,16 +207,6 @@ Set-NativeMux $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
 foreach ($shell in @('WindowsPowerShell', 'PowerShell')) { Set-ProfileLoader (Join-Path $documents "$shell/profile.ps1") $managedProfile $backupRoot }
 if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }
-
-# Reuse portable Git identity, keeping native credential helpers and local
-# includes intact. Linux's /usr/bin/gh helper and SSH rewrites aren't copied.
-foreach ($key in @('user.name', 'user.email')) {
-    & git config --global --get $key | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        $value = Invoke-Native git @('config', '-f', (Join-Path $RcPath 'git/.gitconfig'), '--get', $key) -Capture
-        Invoke-Native git @('config', '--global', $key, $value)
-    }
-}
 
 if (!$SkipAddons) {
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
