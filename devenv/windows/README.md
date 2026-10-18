@@ -38,6 +38,14 @@ shared CoC runtime requires it. Missing plugins are installed from current
 upstream releases. Ordinary reruns retain installed plugins; `-Apply -Update`
 explicitly refreshes Vim/CoC/Obsidian plugins, themes and the Codex ACP adapter.
 
+Bootstrap enables Developer Mode for file symlinks, using the Windows
+`AllowDevelopmentWithoutDevLicense` setting. Windows asks for administrator
+approval once if it is disabled. Reruns skip this step. Only that registry change
+runs elevated; configuration and credentials are installed as the current user.
+Remote Device Portal and Device Discovery are not enabled. If policy prevents
+symlinks, setup reports the failure instead of silently copying configuration.
+See [Microsoft's Developer Mode instructions](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode).
+
 The starting point is a clean Windows account: neither WSL nor `rc_files`,
 notes, fonts, native Vim, PowerShell 7 or psmux needs to exist. Git and this
 scripts checkout are obtained by the commands above; the bootstrap installs
@@ -252,14 +260,29 @@ engine, PSReadLine or security-check costs.
 * `rc_files/.windows-terminal/settings.json`: portable Terminal preferences.
 * `rc_files/.powertoys/settings.json`: portable PowerToys preferences; merges Awake settings
   into the new account's settings without copying device-specific state.
-* `rc_files/tmux/.psmux.conf` and `.tmux/mux.ps1`: Windows equivalents of the
-  shared tmux plugin bindings and their runtime clipboard helper.
+* `rc_files/vim/_vimrc` and `rc_files/tmux/.psmux.conf`: static native entry
+  files. Their installed home paths are file symlinks to these sources.
+* `rc_files/tmux/.tmux/psmux-compat.conf` and `mux.ps1`: Windows equivalents of
+  the shared tmux plugin bindings and their runtime clipboard helper.
 * `%LOCALAPPDATA%\PersonalDevenv`: discovered machine paths (`state.json`),
-  translated `psmux.conf`, downloaded plugin source and backups.
-* `%USERPROFILE%\_vimrc` and `.psmux.conf`: small generated source loaders.
+  downloaded plugin source and backups.
+* `%USERPROFILE%\.vim/machine-paths.json`: discovered Vim executable paths.
+  `%USERPROFILE%\.psmux/generated.conf`: translated native tmux settings.
   `.vim`, `_viminfo` and swap files are editor runtime state, not source config.
-* Both PowerShell 5 and PowerShell 7 all-host profiles get one managed loader
-  block. Existing profile content is kept and backed up.
+* Both PowerShell 5 and PowerShell 7 all-host profiles link to the tracked
+  PowerShell profile. An existing profile with unrelated custom content is
+  preserved with a managed source-loader block; that custom content stays local.
+* Agent instructions and skills come from tracked `rc_files/claude/.claude`
+  files. `.codex/AGENTS.md` is a file symlink; each managed `.agents/skills/<name>`
+  directory is a junction to the corresponding tracked skill directory.
+  Editing installed instructions or skills changes the Git source immediately,
+  including new files and atomic editor saves within skill directories.
+  Existing identical copies are backed up before conversion; differing copies
+  stop setup so their edits can be merged into rc_files. Other installed skills,
+  existing Codex preferences and credentials are preserved.
+* `install-vim-plugins.vim` in this utility is installation code, run directly
+  from `scripts`. Its generated extension choices and plugin/npm installations
+  remain runtime data outside Git.
 
 `scripts` owns installation and deployment; `rc_files` owns authored settings.
 Each application owns its configuration. The new hidden application directories
@@ -270,6 +293,17 @@ are unchanged.
 No ignore rules are widened, and no runtime app directory is linked into Git.
 Run setup again after editing the tracked Terminal/PowerToys preferences or tmux
 bindings. PowerShell profile edits are picked up by the next shell directly.
+Terminal and PowerToys settings are merged app state: GUI edits are local and
+must be copied into their tracked preference files to reproduce them elsewhere.
+The local Codex `config.toml` is initialized from its tracked template only when
+absent; reusable defaults belong in that template. Credentials, trust paths,
+generated translations, plugin code and caches stay outside Git.
+
+Review local edits with `git -C ~/rc_files status --short`. Existing tracked
+files show modifications; new files in the skills subtree show as untracked.
+The repository's existing ignore rules remain intact. New authored files in
+other ignored configuration directories still need an explicit `git add -f`.
+Linking does not stage, commit or push anything.
 
 #### Alternatives Considered
 
@@ -278,8 +312,9 @@ bindings. PowerShell profile edits are picked up by the next shell directly.
   the native tmux files belong with the existing tmux configuration.
 * Linking whole application directories would send runtime files into the Git
   checkout. The bootstrap merges mutable app settings and writes source loaders.
-* File symlinks need Developer Mode or elevation on this account. Source loaders
-  keep this setup usable on an ordinary fresh Windows account.
+* Copies would let edits drift outside Git. Developer Mode and file symlinks
+  keep installed configuration attached to its source. Per-skill junctions also
+  survive editors replacing files, without linking application runtime folders.
 
 The installer does not pull/reset existing checkouts, replace a separate WSL
 notes checkout, or terminate existing sessions. Native sign-in and the limited

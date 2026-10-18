@@ -88,9 +88,98 @@ function Test-JsonEquivalent($Left, $Right) {
     return (ConvertTo-Json -InputObject $Left -Compress) -ceq (ConvertTo-Json -InputObject $Right -Compress)
 }
 
+function Test-DeveloperMode {
+    $key = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -ErrorAction SilentlyContinue
+    return $null -ne $key -and $key.PSObject.Properties['AllowDevelopmentWithoutDevLicense'] -and $key.AllowDevelopmentWithoutDevLicense -eq 1
+}
+
+function Ensure-DeveloperMode {
+    if (Test-DeveloperMode) { Write-Host 'SKIP Developer Mode (enabled)'; return }
+    $command = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+    [void](New-Item -Path $key -Force)
+    [void](New-ItemProperty -LiteralPath $key -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force)
+    exit 0
+} catch { exit 1 }
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    Write-Host 'Enabling Developer Mode for configuration symlinks; Windows may ask for administrator approval.'
+    $process = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    if ($process.ExitCode -ne 0 -or !(Test-DeveloperMode)) { throw 'Developer Mode could not be enabled. Check administrator approval or device policy before rerunning.' }
+    Write-Host 'Developer Mode enabled.'
+}
+
+function Set-TrackedFile([string]$Path, [string]$Source, [string]$BackupRoot) {
+    $sourcePath = [IO.Path]::GetFullPath($Source)
+    if (!(Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Tracked configuration is missing: $sourcePath" }
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($existing -and $existing.PSIsContainer) { throw "Configuration destination is a directory: $Path" }
+    if ($existing -and $existing.LinkType -eq 'SymbolicLink') {
+        $target = [string](@($existing.Target)[0])
+        if (![IO.Path]::IsPathRooted($target)) { $target = Join-Path $existing.DirectoryName $target }
+        if ([IO.Path]::GetFullPath($target) -ieq $sourcePath) { return }
+    }
+    if (!('DevenvFileLinks' -as [type])) { Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class DevenvFileLinks {
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+ [return: MarshalAs(UnmanagedType.I1)]
+ public static extern bool CreateSymbolicLinkW(string link, string target, int flags);
+}
+'@ }
+    [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent))
+    $candidate = $Path + '.link-' + [guid]::NewGuid().ToString('N')
+    try {
+        $linked = [DevenvFileLinks]::CreateSymbolicLinkW($candidate, $sourcePath, 2)
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if (!$linked) { throw "Cannot link $Path to rc_files: $((New-Object ComponentModel.Win32Exception($code)).Message). Enable Developer Mode; configuration is never silently copied." }
+        if ($existing) {
+            if ($BackupRoot) {
+                [void][IO.Directory]::CreateDirectory($BackupRoot)
+                Copy-Item -LiteralPath $Path -Destination (Join-Path $BackupRoot ($existing.Name + '.' + [guid]::NewGuid().ToString('N')))
+            }
+            if ($existing.LinkType) { Remove-Item -LiteralPath $Path -Force }
+        }
+        Move-Item -LiteralPath $candidate -Destination $Path -Force
+    } finally { if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force } }
+}
+
 function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
     if ((Test-Path -LiteralPath $Path) -and (Test-JsonEquivalent (Read-Json $Path) (ConvertTo-Map $Value))) { return }
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
+}
+
+function Set-TrackedDirectory([string]$Path, [string]$Source, [string]$BackupRoot) {
+    $sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd('\')
+    if (!(Test-Path -LiteralPath $sourcePath -PathType Container)) { throw "Tracked directory is missing: $sourcePath" }
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($existing -and $existing.LinkType -in @('Junction', 'SymbolicLink')) {
+        if ([IO.Path]::GetFullPath([string](@($existing.Target)[0])).TrimEnd('\') -ieq $sourcePath) { return }
+        throw "Directory already links elsewhere: $Path. Reconcile its contents with $sourcePath before rerunning."
+    }
+    if ($existing) {
+        if (!$existing.PSIsContainer) { throw "Directory destination is a file: $Path" }
+        $entries = @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
+        $originals = @(Get-ChildItem -LiteralPath $sourcePath -Recurse -Force)
+        $different = $entries.Count -ne $originals.Count
+        foreach ($entry in $entries) {
+            $relative = $entry.FullName.Substring($existing.FullName.TrimEnd('\').Length + 1)
+            $original = Join-Path $sourcePath $relative
+            if ($entry.LinkType -or !(Test-Path -LiteralPath $original) -or $entry.PSIsContainer -ne (Get-Item -LiteralPath $original -Force).PSIsContainer) { $different = $true; break }
+            if (!$entry.PSIsContainer -and (Get-FileHash -LiteralPath $entry.FullName).Hash -ne (Get-FileHash -LiteralPath $original).Hash) { $different = $true; break }
+        }
+        if ($different) { throw "Local skill edits need recovery: $Path differs from $sourcePath. Merge them into rc_files before rerunning; nothing was replaced." }
+        if (!$BackupRoot) { throw "A backup directory is required to replace $Path with a junction." }
+    }
+    [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent))
+    if ($existing) {
+        [void][IO.Directory]::CreateDirectory($BackupRoot)
+        Move-Item -LiteralPath $existing.FullName -Destination (Join-Path $BackupRoot ($existing.Name + '.' + [guid]::NewGuid().ToString('N')))
+    }
+    [void](New-Item -ItemType Junction -Path $Path -Target $sourcePath)
 }
 
 function Merge-Map($Base, $Desired) {
@@ -127,8 +216,12 @@ function Set-Terminal([string]$Path, $Defaults, [string]$ShellCommand, [string]$
     if (!$settings.profiles.Contains('defaults')) { $settings.profiles.defaults = [ordered]@{} }
     Merge-Map $settings.profiles.defaults $Defaults.profiles.defaults
     $settings.profiles.defaults.font.face = $FontFace
-    $guid = '{66fce70d-f58a-45d6-a538-11c34abff4a8}'
-    $profile = [ordered]@{ guid = $guid; name = 'PowerShell'; commandline = $ShellCommand; startingDirectory = '%USERPROFILE%'; hidden = $false; font = [ordered]@{ face = $FontFace; size = 10 }; colorScheme = 'GruvboxMaterialHardDark'; cursorShape = 'emptyBox'; bellStyle = 'taskbar'; opacity = 95; padding = '5' }
+    $guid = $Defaults.defaultProfile
+    $selected = @($Defaults.profiles.list | Where-Object { $_.guid -eq $guid })
+    if ($selected.Count -ne 1) { throw 'Tracked Terminal settings must define the default profile exactly once.' }
+    $profile = ConvertTo-Map (ConvertFrom-Json (ConvertTo-Json $selected[0] -Depth 30))
+    $profile.commandline = $ShellCommand
+    $profile.font.face = $FontFace
     $settings.profiles.list = Merge-Entries $settings.profiles['list'] @($profile) 'guid'
     # Keep one visible PowerShell, including when Terminal discovers PS7 later.
     foreach ($duplicate in @(
@@ -311,6 +404,11 @@ function Set-ProfileLoader([string]$Path, [string]$ManagedProfile, [string]$Back
     $text = if (Test-Path -LiteralPath $Path) { [IO.File]::ReadAllText($Path) } else { '' }
     $block = "$begin`n. '" + $ManagedProfile.Replace("'", "''") + "'`n$end"
     $pattern = '(?ms)^' + [regex]::Escape($begin) + '.*?^' + [regex]::Escape($end)
+    $sourceText = [IO.File]::ReadAllText($ManagedProfile)
+    if (!$text.Trim() -or $text -ceq $sourceText -or !([regex]::Replace($text, $pattern, '').Trim())) {
+        Set-TrackedFile $Path $ManagedProfile $BackupRoot
+        return
+    }
     if ($text -match $pattern) { $text = [regex]::Replace($text, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($m) $block }) }
     else { $text = $text.TrimEnd() + "`n`n" + $block + "`n" }
     Save-Text $Path $text $BackupRoot
@@ -409,7 +507,7 @@ function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
     if (!$TmuxRoot) { $TmuxRoot = Split-Path $TmuxPath -Parent }
     $sections = @{}
     $section = ''
-    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.psmux.conf'))) {
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.tmux/psmux-compat.conf'))) {
         if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
         elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
     }
@@ -438,15 +536,15 @@ function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
     return ($lines -join "`n") + "`n"
 }
 
-function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$StateRoot, [string]$BackupRoot) {
-    $generated = Join-Path $StateRoot 'psmux.conf'
+function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
+    $generated = Join-Path $UserRoot '.psmux/generated.conf'
     Save-Text $generated (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf')) $BackupRoot
-    Save-Text (Join-Path $UserRoot '.psmux.conf') ('# Generated entry point; preferences live in rc_files.' + "`n" + 'source-file "' + $generated.Replace('\', '/') + '"' + "`n") $BackupRoot
+    Set-TrackedFile (Join-Path $UserRoot '.psmux.conf') (Join-Path $RcRoot 'tmux/.psmux.conf') $BackupRoot
 }
 
 function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [string]$BackupRoot, [string]$PythonRoot = '') {
     if (!(Test-Path -LiteralPath (Join-Path $RcRoot 'vim/.vimrc'))) { throw 'Shared vim/.vimrc is missing from rc_files' }
-    foreach ($relative in @('vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
+    foreach ($relative in @('vim/_vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required shared configuration is missing: $relative" }
     }
     $pythonDll = ''
@@ -455,11 +553,10 @@ function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [st
         if (!$dll) { throw 'The native Python runtime DLL could not be found' }
         $pythonDll = $dll.FullName
     }
-    $loader = "let g:personal_git_bash = '" + $GitBash.Replace('\', '/').Replace("'", "''") + "'`n"
-    $loader += "let g:personal_python_root = '" + $PythonRoot.Replace('\', '/').Replace("'", "''") + "'`n"
-    $loader += "let g:personal_python_dll = '" + $pythonDll.Replace('\', '/').Replace("'", "''") + "'`n"
-    $loader += "execute 'source ' . fnameescape('" + (Join-Path $RcRoot 'vim/.vimrc').Replace('\', '/').Replace("'", "''") + "')`n"
-    Save-Text (Join-Path $UserRoot '_vimrc') $loader $BackupRoot
+    Save-Json (Join-Path $UserRoot '.vim/machine-paths.json') ([ordered]@{
+        gitBash=$GitBash.Replace('\','/'); pythonRoot=$PythonRoot.Replace('\','/'); pythonDll=$pythonDll.Replace('\','/'); vimrc=(Join-Path $RcRoot 'vim/.vimrc').Replace('\','/')
+    }) $BackupRoot
+    Set-TrackedFile (Join-Path $UserRoot '_vimrc') (Join-Path $RcRoot 'vim/_vimrc') $BackupRoot
     [void][IO.Directory]::CreateDirectory((Join-Path $UserRoot '.vim/session'))
 }
 
@@ -471,16 +568,12 @@ function Install-VimPlugins([string]$VimExe, [string]$UserRoot, [string]$BackupR
         Get-Download 'https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim' $download
         Save-Text $plugPath ([IO.File]::ReadAllText($download)) $BackupRoot
     } finally { if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download } } }
-    # Source the same plugin declarations as Vim, without loading UI settings.
-    $shared = (Join-Path $RcRoot 'vim/.vim/config/plugins.vim').Replace('\', '/').Replace("'", "''")
-    $installer = Join-Path $UserRoot '.vim/install-plugins.vim'
     $choices = Join-Path $UserRoot '.vim/coc-extensions.json'
-    $choicesVim = $choices.Replace('\', '/').Replace("'", "''")
-    $script = "set nocompatible`nset eventignore=all`nexecute 'set runtimepath^=' . fnameescape(expand('~/.vim'))`nexecute 'source ' . fnameescape('$shared')`n"
-    $action = if ($Update) { 'PlugUpdate --sync' } else { "if !empty(filter(copy(values(g:plugs)), '!isdirectory(v:val.dir)'))`n  PlugInstall --sync`nelse`n  echom 'SKIP Vim plugins (installed)'`nendif" }
-    $script += "$action`nif !empty(filter(values(g:plugs), '!filereadable(v:val.dir . ''/.git/HEAD'')')) | cquit 1 | endif`nlet choices = json_encode(g:coc_global_extensions)`nif !filereadable('$choicesVim') || join(readfile('$choicesVim'), '') !=# choices | call writefile([choices], '$choicesVim') | endif`ncquit 0`n"
-    Save-Text $installer $script $BackupRoot
-    Invoke-Native $VimExe @('-n', '-E', '-s', ('-V1' + (Join-Path $UserRoot '.vim/plugin-install.log')), '-u', 'NONE', '-S', $installer)
+    $previous = @($env:DEVENV_RC_ROOT, $env:DEVENV_VIM_HOME, $env:DEVENV_UPDATE)
+    try {
+        $env:DEVENV_RC_ROOT = $RcRoot; $env:DEVENV_VIM_HOME = $UserRoot; $env:DEVENV_UPDATE = [string][int][bool]$Update
+        Invoke-Native $VimExe @('-n', '-E', '-s', ('-V1' + (Join-Path $UserRoot '.vim/plugin-install.log')), '-u', 'NONE', '-S', (Join-Path $PSScriptRoot 'install-vim-plugins.vim'))
+    } finally { $env:DEVENV_RC_ROOT=$previous[0]; $env:DEVENV_VIM_HOME=$previous[1]; $env:DEVENV_UPDATE=$previous[2] }
     $extensions = Join-Path $UserRoot '.config/coc/extensions'
     $packagePath = Join-Path $extensions 'package.json'
     $changed = !(Test-Path -LiteralPath $packagePath)
@@ -590,16 +683,25 @@ function Set-NativeCodex([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot
         $text = [IO.File]::ReadAllText($template).Replace('/home/zhuoryin', $UserRoot.Replace('\', '\\'))
         Save-Text $target $text $BackupRoot
     }
-    $agents = Join-Path $UserRoot '.codex/AGENTS.md'
-    $source = Join-Path $RcRoot 'claude/.claude/CLAUDE.md'
-    if (!(Test-Path -LiteralPath $agents) -and (Test-Path -LiteralPath $source)) { Save-Text $agents ([IO.File]::ReadAllText($source)) $BackupRoot }
+    $instructions = 'claude/.claude/CLAUDE.md'
+    if (Test-Path -LiteralPath (Join-Path $RcRoot $instructions)) {
+        $destination = Join-Path $UserRoot '.codex/AGENTS.md'
+        $source = Join-Path $RcRoot $instructions
+        $existing = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        if ($existing -and !$existing.LinkType -and (Get-FileHash -LiteralPath $destination).Hash -ne (Get-FileHash -LiteralPath $source).Hash) {
+            throw "Local instruction edits need recovery: $destination differs from $source. Merge them into rc_files before rerunning."
+        }
+        Set-TrackedFile $destination $source $BackupRoot
+    }
     $skillsSource = Join-Path $RcRoot 'claude/.claude/skills'
     if (Test-Path -LiteralPath $skillsSource) {
         $skillsTarget = Join-Path $UserRoot '.agents/skills'
         [void][IO.Directory]::CreateDirectory($skillsTarget)
-        foreach ($skill in Get-ChildItem -LiteralPath $skillsSource -Directory) {
-            $destination = Join-Path $skillsTarget $skill.Name
-            if (!(Test-Path -LiteralPath $destination)) { Copy-Item -LiteralPath $skill.FullName -Destination $destination -Recurse }
+        $tracked = @(& git -C $RcRoot ls-files -- 'claude/.claude/skills/')
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot list tracked rc_files skills.' }
+        $names = @($tracked | ForEach-Object { $_.Substring('claude/.claude/skills/'.Length).Split('/')[0] } | Sort-Object -Unique)
+        foreach ($name in $names) {
+            Set-TrackedDirectory (Join-Path $skillsTarget $name) (Join-Path $skillsSource $name) $BackupRoot
         }
     }
 }

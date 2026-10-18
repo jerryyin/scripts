@@ -23,9 +23,18 @@ try {
     $env:VIM_AUDIT_RC = $RcRoot
     $vim = Get-NativeVim
     $loader = Join-Path $fixture '_vimrc'
-    $machineSettings = @([IO.File]::ReadAllLines((Join-Path $env:USERPROFILE '_vimrc')) | Where-Object { $_ -match '^let g:personal_(git_bash|python_root|python_dll) = ' })
-    $source = "execute 'source ' . fnameescape('" + (Join-Path $RcRoot 'vim/.vimrc').Replace('\','/').Replace("'","''") + "')"
-    Save-Text $loader (($machineSettings + $source) -join "`n") ''
+    $machinePaths = Read-Json (Join-Path $env:USERPROFILE '.vim/machine-paths.json')
+    $machineSettings = @(
+        "let g:personal_git_bash = '" + $machinePaths.gitBash.Replace("'","''") + "'"
+        "let g:personal_python_root = '" + $machinePaths.pythonRoot.Replace("'","''") + "'"
+        "let g:personal_python_dll = '" + $machinePaths.pythonDll.Replace("'","''") + "'"
+    )
+    $sharedVimrc = (Join-Path $RcRoot 'vim/.vimrc').Replace('\','/')
+    if ($machinePaths.vimrc -ieq $sharedVimrc) { $loader = Join-Path $env:USERPROFILE '_vimrc' }
+    else {
+        $source = "execute 'source ' . fnameescape('" + $sharedVimrc.Replace("'","''") + "')"
+        Save-Text $loader (($machineSettings + $source) -join "`n") ''
+    }
     $command = '"' + $vim + '" -n -i NONE -u "' + $loader + '" -V1"' + (Join-Path $fixture 'runtime.log') + '" -S "' + (Join-Path $PSScriptRoot 'vim-shortcuts.vim') + '" "' + (Join-Path $project 'first.txt') + '"'
     $console = [DevenvConsole]::new($command, $project)
     $deadline = (Get-Date).AddSeconds(45)
@@ -66,7 +75,11 @@ try {
         } while ((Get-Date) -lt $end)
         return $false
     }
-    $console.Send(':edit ' + (Join-Path $RcRoot 'vim/.vim/config/tools.vim').Replace('\','/') + [char]13)
+    $signRepository = Join-Path $fixture 'git signs'
+    Invoke-Native git @('clone', '--quiet', '--shared', '--', $RcRoot, $signRepository)
+    $signFile = Join-Path $signRepository 'vim/.vim/config/tools.vim'
+    Add-Content -LiteralPath $signFile -Value '" disposable Git sign check'
+    $console.Send(":execute 'edit ' . fnameescape('" + $signFile.Replace('\','/').Replace("'","''") + "')" + [char]13)
     if (!(Wait-Editor {param($s) $s.signify -eq 'git'})) { throw 'Git diff signs did not update' }
     Write-Output 'PASS: Git diff signs update in a real repository'
     $report.checks += [ordered]@{passed=$true;name='Git diff signs update in a real repository'}

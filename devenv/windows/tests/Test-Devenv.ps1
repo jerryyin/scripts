@@ -100,9 +100,11 @@ try {
 
     $profile = Join-Path $testRoot 'shell/profile.ps1'
     Save-Text $profile "function hello { 'hello' }`n" ''
-    Set-ProfileLoader $profile "C:\Someone's computer\profile.ps1" (Join-Path $testRoot 'backups')
+    $sharedProfile = Join-Path $testRoot "Someone's computer/profile.ps1"
+    Save-Text $sharedProfile '# tracked profile' ''
+    Set-ProfileLoader $profile $sharedProfile (Join-Path $testRoot 'backups')
     $hash = (Get-FileHash -LiteralPath $profile).Hash
-    Set-ProfileLoader $profile "C:\Someone's computer\profile.ps1" (Join-Path $testRoot 'backups')
+    Set-ProfileLoader $profile $sharedProfile (Join-Path $testRoot 'backups')
     $text = [IO.File]::ReadAllText($profile)
     Assert ($text.Contains('function hello')) 'Existing PowerShell profile preserved'
     Assert (([regex]::Matches($text, '>>> personal-devenv >>>')).Count -eq 1) 'Profile loader inserted once'
@@ -160,15 +162,15 @@ try {
     Assert (Test-Path -LiteralPath (Join-Path $empty '.git')) 'An explicitly created empty directory can receive a Git checkout'
 
     $vimRc = Join-Path $testRoot 'shared-vim-rc'
-    foreach ($relative in @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
+    foreach ($relative in @('vim/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''
     Set-NativeVim $vimUser $vimRc 'C:/Program Files/Git/bin/bash.exe' '' $python
     $loader = [IO.File]::ReadAllText((Join-Path $vimUser '_vimrc'))
-    Assert (($loader -split "`n" | Where-Object { $_ }).Count -eq 4 -and $loader.Contains('/vim/.vimrc')) 'Native Vim loader only supplies machine paths and sources the shared vimrc'
+    Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/_vimrc'))) 'Native Vim entry is deployed from rc_files'
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/config'))) 'Windows setup does not copy a second Vim configuration tree'
-    Assert ($loader.Contains('python399.dll') -and !$loader.Contains('python314.dll')) 'Native Python DLL is discovered without a fixed version in Vim configuration'
+    Assert ((Read-Json (Join-Path $vimUser '.vim/machine-paths.json')).pythonDll.EndsWith('python399.dll')) 'Native Python DLL is discovered without a fixed version in Vim configuration'
     Assert ($environment.packages.id -contains 'LLVM.clangd' -and $environment.packages.id -contains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap installs clangd, GitHub CLI and 7-Zip without Ctags'
 
     $module = Get-Module Devenv

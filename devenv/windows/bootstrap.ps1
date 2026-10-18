@@ -50,6 +50,7 @@ if (!$Apply -and !$Check) {
     Write-Output "PLAN: install $($manifest.packages.id -join ', ') with WinGet"
     Write-Output "PLAN: native Windows Vim sources $RcPath/vim/.vimrc; native psmux reuses tmux keys"
     Write-Output 'PLAN: PowerShell 7, Gruvbox colors, font, prompt and shell shortcuts'
+    Write-Output 'PLAN: enable Developer Mode (one administrator prompt if disabled) and link authored configuration to rc_files'
     Write-Output 'PLAN: PowerToys Awake enabled indefinitely; display may sleep (matching existing preferences)'
     if (!$SkipCredentials) { Write-Output 'PLAN: native GitHub, Docker, SSH and Codex credentials via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with min.sh" }
@@ -61,6 +62,8 @@ if (!$Apply -and !$Check) {
 
 if ($Check) {
     $missing = New-Object Collections.ArrayList
+    if (Test-DeveloperMode) { Write-Output 'OK Developer Mode' }
+    else { [void]$missing.Add('Developer Mode'); Write-Output 'MISSING Developer Mode (required for configuration symlinks)' }
     if (!$SkipWsl) {
         if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and (@(Get-WslDistributions) -contains $manifest.wsl.distribution)) { Write-Output "OK WSL $($manifest.wsl.distribution)" }
         else { [void]$missing.Add('WSL'); Write-Output "MISSING WSL $($manifest.wsl.distribution) (install or complete first launch)" }
@@ -128,6 +131,7 @@ $nativeSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $nativeProfile = (Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $nativeSid)).ProfileImagePath
 if ($env:USERPROFILE -eq $nativeProfile -and (Get-Process Obsidian -ErrorAction SilentlyContinue)) { throw 'Close Obsidian before applying its settings and plugin files, then rerun.' }
 if (!$SkipPackages -and !(Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install App Installer (WinGet), then rerun.' }
+Ensure-DeveloperMode
 $wslState = if (!$SkipWsl) { Ensure-Wsl $manifest.wsl.distribution } else { 'Skipped' }
 if (!$SkipPackages) { foreach ($package in $manifest.packages) {
     if ($package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
@@ -158,7 +162,7 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
-foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.psmux.conf', 'tmux/.tmux/mux.ps1')) {
+foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'vim/_vimrc', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $RcPath $file))) { throw "Update rc_files: $file is missing." }
 }
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
@@ -182,7 +186,7 @@ Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
-Set-NativeMux $env:USERPROFILE $RcPath $stateRoot $backupRoot
+Set-NativeMux $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
 foreach ($shell in @('WindowsPowerShell', 'PowerShell')) { Set-ProfileLoader (Join-Path $documents "$shell/profile.ps1") $managedProfile $backupRoot }
 if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }

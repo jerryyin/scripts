@@ -41,8 +41,8 @@ try {
     Ensure-Checkout $sourceRc $environment.rcRepository
     # Pending shared Vim changes are tested before publication. The source Git
     # clone otherwise contains only upstream-tracked files, never local secrets.
-    $candidateFiles = @('vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')
-    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/mux.ps1')
+    $candidateFiles = @('vim/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')
+    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')
     foreach ($relative in $candidateFiles) {
         $destination = Join-Path $sourceRc $relative
         [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
@@ -87,7 +87,7 @@ $env:NPM_CONFIG_CACHE = Join-Path $job.userRoot 'cache/npm'
 $env:PATH = ($job.toolPaths -join ';') + ';' + $env:PATH
 Import-Module (Join-Path $job.root 'Devenv.psm1') -Force -DisableNameChecking
 function Snapshot {
-    $paths = @('_vimrc', '.psmux.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/install-plugins.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Local/Microsoft/PowerToys/settings.json', 'AppData/Local/Microsoft/PowerToys/Awake/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
+    $paths = @('_vimrc', '.psmux.conf', '.psmux/generated.conf', '.gitconfig', '.vim/machine-paths.json', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Local/Microsoft/PowerToys/settings.json', 'AppData/Local/Microsoft/PowerToys/Awake/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
     $files = @($paths | ForEach-Object { Join-Path $job.userRoot $_ })
     $files += @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'PersonalDevenv') -File | Select-Object -ExpandProperty FullName)
     $files += @(Get-ChildItem -LiteralPath (Join-Path $job.userRoot 'notes/.obsidian') -Recurse -File | Select-Object -ExpandProperty FullName)

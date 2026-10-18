@@ -138,7 +138,7 @@ qall!
     }
 
     $config = Join-Path $fixture '.psmux.conf'
-    if (!$UseExistingDeployment) { Set-NativeMux $fixture $RcRoot $managed '' }
+    if (!$UseExistingDeployment) { Set-NativeMux $fixture $RcRoot '' }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine
     # provisioning installs PowerShell 7 and makes it the default pane shell.
     Invoke-Native $PsmuxExe @('-L', $socket, '-f', $config, 'new-session', '-d', '-s', 'work', '--', $ShellExe, '-NoLogo', '-NoProfile')

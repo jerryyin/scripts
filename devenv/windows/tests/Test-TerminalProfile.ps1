@@ -19,6 +19,12 @@ if ($settings.profiles.list[0].commandline -ne 'powershell.exe') { throw 'Hidden
 $before = (Get-Item $path).LastWriteTimeUtc.Ticks
 Set-Terminal $path $defaults 'pwsh.exe -NoLogo' 'Test Font' ''
 if ((Get-Item $path).LastWriteTimeUtc.Ticks -ne $before) { throw 'Terminal rerun rewrote settings' }
+$defaults.profiles.list[0].font.size = 13
+$defaults.profiles.list[0].opacity = 88
+$defaults.profiles.list[0].padding = '9'
+Set-Terminal $path $defaults 'pwsh.exe -NoLogo' 'Test Font' ''
+$configured = @((Read-Json $path).profiles.list | Where-Object { $_.guid -eq $defaults.defaultProfile })[0]
+if ($configured.font.size -ne 13 -or $configured.opacity -ne 88 -or $configured.padding -ne '9') { throw 'Installer overrides tracked Terminal preferences' }
 $originalLocalAppData = $env:LOCALAPPDATA
 try {
     $env:LOCALAPPDATA = Join-Path $fixture 'AppData/Local'
