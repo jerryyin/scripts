@@ -43,7 +43,8 @@ try {
     $managed = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     [void][IO.Directory]::CreateDirectory($managed)
     if (!$UseExistingDeployment) {
-        Set-ProfileLoader (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot '.powershell/profile.ps1') ''
+        Set-ProfileLoader (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
+        Set-TrackedFile (Join-Path $fixture '_vimrc') (Join-Path $RcRoot 'vim/.windows/_vimrc') ''
         Set-NativeVim $fixture $RcRoot $GitBash (Join-Path $fixture 'backups') $PythonRoot
         Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
@@ -138,7 +139,10 @@ qall!
     }
 
     $config = Join-Path $fixture '.psmux.conf'
-    if (!$UseExistingDeployment) { Set-NativeMux $fixture $RcRoot '' }
+    if (!$UseExistingDeployment) {
+        Set-TrackedFile $config (Join-Path $RcRoot 'tmux/.windows/.psmux.conf') ''
+        Set-NativeMux $fixture $RcRoot ''
+    }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine
     # provisioning installs PowerShell 7 and makes it the default pane shell.
     Invoke-Native $PsmuxExe @('-L', $socket, '-f', $config, 'new-session', '-d', '-s', 'work', '--', $ShellExe, '-NoLogo', '-NoProfile')

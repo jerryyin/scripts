@@ -31,6 +31,7 @@ $clangd = @(Get-ChildItem -LiteralPath (Join-Path $ToolsRoot 'clangd') -Recurse 
 $gh = @(Get-ChildItem -LiteralPath (Join-Path $ToolsRoot 'gh') -Recurse -Filter gh.exe)[0].FullName
 $pwsh = Join-Path $ToolsRoot 'pwsh/pwsh.exe'
 foreach ($exe in @($psmux, $vim, $node, $clangd, $gh, $pwsh)) { if (!(Test-Path -LiteralPath $exe)) { throw "Missing real test tool: $exe" } }
+. (Join-Path $PSScriptRoot 'RcFixture.ps1')
 $script:passed = 0
 function Assert($Ok, [string]$Message) {
     if (!$Ok) { throw "FAIL: $Message. Inspect $fixture" }
@@ -40,16 +41,7 @@ try {
     $environment = Read-Json (Join-Path $root 'defaults/environment.json')
     $sourceRc = Join-Path $fixture 'sources/rc_files'
     Ensure-Checkout $sourceRc $environment.rcRepository
-    # Pending shared Vim changes are tested before publication. The source Git
-    # clone otherwise contains only upstream-tracked files, never local secrets.
-    $candidateFiles = @('vim/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/theme.vim', 'vim/.vim/config/tools.vim', 'vim/.vim/config/ui.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')
-    $candidateFiles += @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', '.powertoys/Awake/settings.json', 'git/.gitconfig.common', 'git/.gitignore', 'tmux/.tmux.conf', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')
-    foreach ($relative in $candidateFiles) {
-        $destination = Join-Path $sourceRc $relative
-        [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
-        Copy-Item -LiteralPath (Join-Path $RcCandidate $relative) -Destination $destination -Force
-        Invoke-Native git @('-C', $sourceRc, 'add', '-f', '--', $relative)
-    }
+    Copy-RcFixture $RcCandidate $sourceRc
     Invoke-Native git @('-C', $sourceRc, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'candidate Windows configuration')
     $sourceNotes = Join-Path $fixture 'sources/notes'
     [void][IO.Directory]::CreateDirectory((Join-Path $sourceNotes '.obsidian'))

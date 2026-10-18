@@ -4,9 +4,9 @@ $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
 $fixture = Join-Path $env:TEMP ('terminal-profile-' + [guid]::NewGuid().ToString('N'))
 $path = Join-Path $fixture 'settings.json'
-$source = Join-Path $fixture 'rc_files/.windows-terminal/settings.json'
+$source = Join-Path $fixture 'rc_files/terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
 [void][IO.Directory]::CreateDirectory((Split-Path $source -Parent))
-Copy-Item -LiteralPath (Join-Path $RcRoot '.windows-terminal/settings.json') -Destination $source
+Copy-Item -LiteralPath (Join-Path $RcRoot 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json') -Destination $source
 Set-Terminal $path $source ''
 if (!(Test-TrackedFile $path $source)) { throw 'Terminal configuration is not linked to rc_files' }
 $settings = Read-Json $path
@@ -30,7 +30,7 @@ $originalLocalAppData = $env:LOCALAPPDATA
 try {
     $env:LOCALAPPDATA = Join-Path $fixture 'AppData/Local'
     Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') ([ordered]@{vimExe='vim.exe';psmuxExe='psmux.exe'}) ''
-    . (Join-Path $RcRoot '.powershell/profile.ps1')
+    . (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1')
 } finally { $env:LOCALAPPDATA = $originalLocalAppData }
 $global:LASTEXITCODE = 42
 $text = prompt

@@ -137,7 +137,7 @@ The status bar reuses the shared background and colored time/host
 format; its Linux shell variable for the nested-session indicator is omitted.
 The native PowerShell prompt inside each pane uses the same Gruvbox colors,
 folder, Git branch/change marker and `➜`; psmux draws the pane borders and status
-bar. The prompt is defined in `rc_files/.powershell/profile.ps1`. No external
+bar. The prompt is defined in `rc_files/powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1`. No external
 prompt engine is required or installed by the bootstrap.
 
 The native keyboard audit uses real key input in an isolated Windows home:
@@ -257,13 +257,13 @@ engine, PSReadLine or security-check costs.
   theme choice and settings. Setup preserves these Git-tracked files.
 * `rc_files/vim/.vimrc`: the shared entry point; `config/plugins.vim` owns plugin
   and CoC extension choices, and `config/windows.vim` holds native OS settings.
-* `rc_files/.powershell/profile.ps1`: authored PowerShell
+* `rc_files/powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1`: authored PowerShell
   configuration, loaded directly from the checkout without an AppData copy.
-* `rc_files/.windows-terminal/settings.json`: the actual Terminal settings file, linked from AppData. The default font face is selected here.
-* `rc_files/.powertoys/settings.json` and `Awake/settings.json`: the actual
+* `rc_files/terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json`: the actual Terminal settings file, linked from AppData. The default font face is selected here.
+* `rc_files/powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json` and `Awake/settings.json`: the actual
   PowerToys settings files, linked individually from AppData. PowerToys may
   update its schema/version fields when it saves these files.
-* `rc_files/vim/_vimrc` and `rc_files/tmux/.psmux.conf`: static native entry
+* `rc_files/vim/.windows/_vimrc` and `rc_files/tmux/.windows/.psmux.conf`: static native entry
   files. Their installed home paths are file symlinks to these sources.
 * `rc_files/tmux/.tmux/psmux-compat.conf` and `mux.ps1`: Windows equivalents of
   the shared tmux plugin bindings and their runtime clipboard helper.
@@ -276,7 +276,7 @@ engine, PSReadLine or security-check costs.
   PowerShell profile. Conflicting local content stops setup so it can be moved into the tracked source before linking.
 * Agent instructions and skills come from tracked `rc_files/claude/.claude`
   files. `.codex/AGENTS.md` is a file symlink; each managed `.agents/skills/<name>`
-  directory is a junction to the corresponding tracked skill directory.
+  directory is a directory link to the corresponding tracked skill directory.
   Editing installed instructions or skills changes the Git source immediately,
   including new files and atomic editor saves within skill directories.
   Existing identical copies are backed up before conversion; differing copies
@@ -286,12 +286,11 @@ engine, PSReadLine or security-check costs.
   from `scripts`. Its generated extension choices and plugin/npm installations
   remain runtime data outside Git.
 
-`scripts` owns installation and deployment; `rc_files` owns authored settings.
-Each application owns its configuration. The new hidden application directories
-are skipped by the Linux installer's package scan. Native tmux configuration
-stays in the existing `tmux` package beside `.tmux.conf`; Linux tmux does not
-source `.psmux.conf` or the PowerShell helper. Linux installer and tmux behavior
-are unchanged.
+`scripts` installs system prerequisites. `rc_files` owns authored settings,
+placement conventions and the shared Python deployer. Both Linux and Windows
+use `rc_files/deploy.py`; a scripts checkout is not needed to deploy rc_files.
+Platform directories select Linux or Windows without a per-file installer list.
+See [the repository conventions](../../../rc_files/README.md) for standalone use.
 No ignore rules are widened, and no runtime app directory is linked into Git.
 Terminal and PowerToys GUI edits write directly into rc_files. Restart an app if it does not observe a change through the link. PowerShell reads its source in the next shell. Rerun setup after changing tmux preferences to refresh the generated native translation.
 The local Codex `config.toml` is initialized from its tracked template only when
@@ -306,20 +305,18 @@ Linking does not stage, commit or push anything.
 
 ### Linking and shared Git settings
 
-Windows follows the existing Stow model: real application directories and links
-from installed files to their package sources. The bootstrap uses native Windows
-symlink creation, so no extra Perl/MSYS installation is required. Existing correct
-links are untouched. Conflicting authored files stop setup. The first transition
-from the old merged Terminal/PowerToys setup backs up those app files once; later
-runs never replace detached edited copies automatically.
+Both platforms call the repository-local Python deployer. It discovers tracked
+package files by placement, creates direct native links, keeps correct links
+untouched and stops before deployment when a conflicting file needs review.
+There is no saved installation database, duplicate mapping list, Perl or Stow
+dependency. Explicit source migration uses a backup before replacing a destination.
 
-`~/.gitconfig` on Windows links to `rc_files/git/.gitconfig.common`; Linux's
-existing `.gitconfig` includes the same file. Both use `git/.gitignore` directly.
-Identity, aliases, ignore rules and other portable preferences have one source.
-Windows Git credentials and executable paths live in the untracked local include
-`~/.config/git/windows-machine.conf`. The credential utility writes machine-only
-Git settings there. `git config --global` changes portable preferences through
-the source symlink; Git preserves that link when saving.
+Both platforms link `~/.gitconfig` to `rc_files/git/.gitconfig` and use
+`git/.gitignore` directly. The shared file includes `~/.config/git/platform.conf`,
+which links to the tracked platform-specific settings in `git/.linux` or
+`git/.windows`. Identity, aliases, ignore rules and helper choices are tracked;
+authentication tokens and private keys remain outside Git. Authentication no
+longer generates a second, untracked Git configuration.
 
 `-Check` refreshes process PATH and validates all managed file/skill link targets,
 required executable-path data, the rendered native tmux configuration and ACP
@@ -333,7 +330,7 @@ adapter. It reports detached copies as drift even if their bytes match the sourc
 * Linking whole application directories would send runtime files into the Git
   checkout. Only authored settings files are linked; app runtime directories remain real directories.
 * Copies would let edits drift outside Git. Developer Mode and file symlinks
-  keep installed configuration attached to its source. Per-skill junctions also
+  keep installed configuration attached to its source. Per-skill directory links also
   survive editors replacing files, without linking application runtime folders.
 
 The installer does not pull/reset existing checkouts, replace a separate WSL

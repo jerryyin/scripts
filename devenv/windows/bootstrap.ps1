@@ -43,10 +43,10 @@ if (!$TerminalPath) {
 }
 $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
 $backupRoot = Join-Path $stateRoot ('backups/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$managedProfile = Join-Path $RcPath '.powershell/profile.ps1'
+$managedProfile = Join-Path $RcPath 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1'
 $documents = if ($DocumentsPath) { $DocumentsPath } else { [Environment]::GetFolderPath('MyDocuments') }
 if (!$documents) { $documents = Join-Path $env:USERPROFILE 'Documents' }
-$terminalSource = Join-Path $RcPath '.windows-terminal/settings.json'
+$terminalSource = Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
 
 if (!$Apply -and !$Check) {
     Write-Output "PLAN: install $($manifest.packages.id -join ', ') with WinGet"
@@ -177,9 +177,7 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
-foreach ($file in @('.powershell/profile.ps1', '.windows-terminal/settings.json', '.powertoys/settings.json', '.powertoys/Awake/settings.json', 'git/.gitconfig.common', 'git/.gitignore', 'vim/_vimrc', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1')) {
-    if (!(Test-Path -LiteralPath (Join-Path $RcPath $file))) { throw "Update rc_files: $file is missing." }
-}
+if (!(Test-Path -LiteralPath (Join-Path $RcPath 'deploy.py'))) { throw 'Update rc_files: deploy.py is required.' }
 Set-NativeGit $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
@@ -192,20 +190,16 @@ $pwshExe = (Get-Command pwsh.exe).Source
 if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
 if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
 
-$priorState = Read-Json (Join-Path $stateRoot 'state.json')
-$firstLinks = !$priorState.Contains('linkedPreferences') -or !$priorState.linkedPreferences
-Set-PowerToys (Join-Path $env:LOCALAPPDATA 'Microsoft/PowerToys') $RcPath $backupRoot -ReplaceExisting:$firstLinks
-$fontFace = (Read-Json (Join-Path $RcPath '.windows-terminal/settings.json')).profiles.defaults.font.face
+Set-ConfigurationLinks $env:USERPROFILE $RcPath $documents $TerminalPath $backupRoot
+$fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
-Set-Terminal $TerminalPath (Join-Path $RcPath '.windows-terminal/settings.json') $backupRoot -ReplaceExisting:$firstLinks
-Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath; linkedPreferences = $true }) $backupRoot
+Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
 Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
 Set-NativeMux $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
-foreach ($shell in @('WindowsPowerShell', 'PowerShell')) { Set-ProfileLoader (Join-Path $documents "$shell/profile.ps1") $managedProfile $backupRoot }
 if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }
 
 if (!$SkipAddons) {

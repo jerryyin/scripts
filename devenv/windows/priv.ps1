@@ -51,10 +51,12 @@ if ($Status) {
 # GitHub CLI uses the Windows credential store. Do not render the Linux hosts.yml
 # token template or replace native credentials with a second plaintext copy.
 function Invoke-GhConfiguration([string[]]$Arguments) {
+    $platformConfig = Join-Path $env:USERPROFILE '.config/git/platform.conf'
+    $item = Get-Item -LiteralPath $platformConfig -Force -ErrorAction SilentlyContinue
+    if (!$item -or $item.LinkType -ne 'SymbolicLink') { throw 'Deploy the tracked Git platform configuration before configuring GitHub authentication.' }
     $previous = $env:GIT_CONFIG_GLOBAL
     try {
-        $env:GIT_CONFIG_GLOBAL = Join-Path $env:USERPROFILE '.config/git/windows-machine.conf'
-        [void][IO.Directory]::CreateDirectory((Split-Path $env:GIT_CONFIG_GLOBAL -Parent))
+        $env:GIT_CONFIG_GLOBAL = $platformConfig
         Invoke-Native gh $Arguments
     } finally { $env:GIT_CONFIG_GLOBAL = $previous }
 }
@@ -111,12 +113,6 @@ elseif (!$SkipSshAgent) {
         $fingerprint = if (Test-Path -LiteralPath $public) { (Invoke-CredentialCommand (Join-Path $sshBin 'ssh-keygen.exe') @('-lf', $public) '').Output } else { '' }
         $id = if ($fingerprint) { ($fingerprint -split '\s+')[1] } else { '' }
         if (!$id -or !$loaded.Contains($id)) { Invoke-Native $sshAdd @($key.FullName) }
-    }
-    $sshCommand = Invoke-CredentialCommand git.exe @('config', '--global', '--includes', '--get', 'core.sshCommand') ''
-    if ($sshCommand.ExitCode -ne 0) {
-        $machineConfig = Join-Path $env:USERPROFILE '.config/git/windows-machine.conf'
-        [void][IO.Directory]::CreateDirectory((Split-Path $machineConfig -Parent))
-        Invoke-Native git @('config', '--file', $machineConfig, 'core.sshCommand', ((Join-Path $sshBin 'ssh.exe') -replace '\\', '/'))
     }
     Write-Output 'OK SSH: native Windows agent enabled; existing keys and config preserved.'
 }

@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
 Update-ProcessPath
+. (Join-Path $PSScriptRoot 'RcFixture.ps1')
 $psmux = (Get-Command psmux.exe).Source
 $vim = Get-NativeVim
 Add-Type -Path (Join-Path $PSScriptRoot 'ConPty.cs')
@@ -23,23 +24,20 @@ function Assert($Ok, [string]$Message) {
 }
 try {
     Assert ((Read-Json (Join-Path $root 'defaults/environment.json')).packages.id -notcontains 'JanDeDobbeleer.OhMyPosh') 'Fresh setup does not require the unused prompt engine'
-    foreach ($file in @('.powershell/profile.ps1', 'tmux/.psmux.conf', 'tmux/.tmux/psmux-compat.conf', 'tmux/.tmux/mux.ps1', 'tmux/.tmux.conf', 'vim/_vimrc', 'git/.gitconfig.common', 'git/.gitignore')) {
-        $destination = Join-Path $candidate $file
-        [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
-        Copy-Item -LiteralPath (Join-Path $RcRoot $file) -Destination $destination
-    }
+    Copy-RcFixture $RcRoot $candidate
     $env:USERPROFILE=$userRoot; $env:HOME=$userRoot; $env:LOCALAPPDATA=$local
     Assert (!(Test-Path -LiteralPath (Join-Path $candidate '.windows'))) 'Deployment uses application-owned configuration without a shared Windows directory'
     $profile = Join-Path $userRoot 'Documents/PowerShell/profile.ps1'
-    $source = Join-Path $candidate '.powershell/profile.ps1'
+    $source = Join-Path $candidate 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1'
     Set-ProfileLoader $profile $source ''
+    Set-TrackedFile (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
     Set-NativeMux $userRoot $candidate ''
     $entry = Join-Path $userRoot '.psmux.conf'
     Assert (([IO.File]::ReadAllLines($entry)).Count -eq 2) 'Home psmux entry contains only a comment and source loader'
-    Assert ((Get-FileHash -LiteralPath $entry).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'tmux/.psmux.conf')).Hash) 'Home psmux entry comes verbatim from rc_files'
+    Assert ((Get-FileHash -LiteralPath $entry).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'tmux/.windows/.psmux.conf')).Hash) 'Home psmux entry comes verbatim from rc_files'
     Assert ((Get-Item -LiteralPath $entry).LinkType -eq 'SymbolicLink') 'Home psmux entry is a live link, never a copy'
-    Set-TrackedFile (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/_vimrc') ''
-    Assert ((Get-FileHash -LiteralPath (Join-Path $userRoot '_vimrc')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'vim/_vimrc')).Hash) 'Home Vim entry comes verbatim from rc_files'
+    Set-TrackedFile (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/.windows/_vimrc') ''
+    Assert ((Get-FileHash -LiteralPath (Join-Path $userRoot '_vimrc')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'vim/.windows/_vimrc')).Hash) 'Home Vim entry comes verbatim from rc_files'
     Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink') 'Home Vim entry is a live link, never a copy'
     Assert (!(Test-Path -LiteralPath (Join-Path $state 'profile.ps1'))) 'No copied PowerShell profile in AppData'
     . $profile
@@ -58,8 +56,9 @@ try {
     $paths = @($profile, $entry, (Join-Path $userRoot '.psmux/generated.conf'), (Join-Path $userRoot '_vimrc'))
     $times = @($paths | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc.Ticks })
     Set-ProfileLoader $profile $source ''
+    Set-TrackedFile (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
     Set-NativeMux $userRoot $candidate ''
-    Set-TrackedFile (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/_vimrc') ''
+    Set-TrackedFile (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/.windows/_vimrc') ''
     for ($i=0; $i -lt $paths.Count; $i++) {
         Assert ((Get-Item -LiteralPath $paths[$i]).LastWriteTimeUtc.Ticks -eq $times[$i]) ('Rerun leaves timestamp unchanged: ' + (Split-Path $paths[$i] -Leaf))
     }
@@ -70,6 +69,7 @@ try {
     $preferences = Join-Path $candidate 'tmux/.tmux/psmux-compat.conf'
     $updated = [IO.File]::ReadAllText($preferences).Replace('bind r source-file ~/.psmux.conf', "bind r source-file ~/.psmux.conf`nbind-key F9 display-message from-rc-files")
     Save-Text $preferences $updated ''
+    Set-TrackedFile (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
     Set-NativeMux $userRoot $candidate ''
     Invoke-Native $psmux @('-L', $socket, 'source-file', $entry)
     $keys = Invoke-Native $psmux @('-L', $socket, 'list-keys') -Capture
@@ -91,17 +91,19 @@ try {
     while (!(Test-Path -LiteralPath $reportPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
     $report = Read-Json $reportPath
     Assert ($report.loaded -eq 1 -and $report.bash -ceq 'C:/Native Bash/bash.exe' -and $report.python.EndsWith('python399.dll')) 'Real Vim loads its tracked entry, machine data and shared vimrc with spaces and apostrophes in paths'
-    Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink' -and [IO.File]::ReadAllText((Join-Path $candidate 'vim/_vimrc')).Contains('saved from native Vim')) 'Saving the installed entry in real Vim preserves its link and edits the Git source'
+    Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink' -and [IO.File]::ReadAllText((Join-Path $candidate 'vim/.windows/_vimrc')).Contains('saved from native Vim')) 'Saving the installed entry in real Vim preserves its link and edits the Git source'
     $time = (Get-Item -LiteralPath $dataPath).LastWriteTimeUtc.Ticks
     Set-NativeVim $userRoot $candidate 'C:/Native Bash/bash.exe' '' $python
     Assert ((Get-Item -LiteralPath $dataPath).LastWriteTimeUtc.Ticks -eq $time) 'Rerunning Vim setup does not rewrite machine paths'
     $instructions = Join-Path $candidate 'claude/.claude/CLAUDE.md'
     Save-Text $instructions 'tracked instructions v1' ''
+    Set-TrackedFile (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
     Set-NativeCodex $userRoot $candidate ''
     $agents = Join-Path $userRoot '.codex/AGENTS.md'
     Assert ((Get-Item -LiteralPath $agents).LinkType -eq 'SymbolicLink') 'Agent instructions link directly to their tracked source'
     [IO.File]::WriteAllText($agents, 'local instructions')
     Assert ([IO.File]::ReadAllText($instructions) -ceq 'local instructions') 'Local instruction edits immediately reach rc_files'
+    Set-TrackedFile (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
     Set-NativeCodex $userRoot $candidate ''
     Assert ([IO.File]::ReadAllText($agents) -ceq 'local instructions') 'Local instruction edits are preserved'
     $skillSource = Join-Path $fixture 'tracked-skills/example'
@@ -110,7 +112,7 @@ try {
     Save-Text (Join-Path $skillTarget 'SKILL.md') 'skill v1' ''
     $backups = Join-Path $fixture 'backups'
     Set-TrackedDirectory $skillTarget $skillSource $backups
-    Assert ((Get-Item -LiteralPath $skillTarget).LinkType -eq 'Junction') 'Existing identical copied skills migrate to directory junctions'
+    Assert ((Get-Item -LiteralPath $skillTarget).LinkType -in @('Junction','SymbolicLink')) 'Existing identical copied skills migrate to directory links'
     Save-Text (Join-Path $skillTarget 'SKILL.md') 'edited with an atomic save' ''
     Save-Text (Join-Path $skillTarget 'helper.ps1') '# a new helper' ''
     Assert ([IO.File]::ReadAllText((Join-Path $skillSource 'SKILL.md')) -ceq 'edited with an atomic save') 'Skill edits reach their source even when an editor replaces a file'
@@ -121,24 +123,28 @@ try {
     $conflict = Join-Path $userRoot '.agents/skills/conflicting-copy'
     Save-Text (Join-Path $conflict 'SKILL.md') 'local-only edits' ''
     $rejected = $false
-    try { Set-TrackedDirectory $conflict $skillSource $backups } catch { $rejected = $_.Exception.Message.Contains('Local skill edits need recovery') }
+    try { Set-TrackedDirectory $conflict $skillSource $backups } catch { $rejected = $_.Exception.Message.Contains('Configuration conflict') }
     Assert ($rejected -and [IO.File]::ReadAllText((Join-Path $conflict 'SKILL.md')) -ceq 'local-only edits') 'Differing copied skills stop setup without losing local edits'
     $env:GIT_CONFIG_GLOBAL = Join-Path $userRoot '.gitconfig'
-    Save-Text $env:GIT_CONFIG_GLOBAL "[user]`nname = old name`n[core]`nsshCommand = fixture-ssh.exe`n" ''
+    Save-Text $env:GIT_CONFIG_GLOBAL "[user]`nname = old name`n" ''
+    $rejected = $false
+    try { Set-NativeGit $userRoot $candidate $backups } catch { $rejected = $_.Exception.Message.Contains('Configuration conflict') }
+    Assert $rejected 'Git deployment preserves a differing local configuration for review'
+    Set-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig') $backups -ReplaceExisting
     Set-NativeGit $userRoot $candidate $backups
-    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig.common')) 'Windows global Git configuration links to shared preferences'
+    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig')) 'Windows global Git configuration links to shared preferences'
     Assert ((Invoke-Native git @('config','--global','--get','alias.cmt') -Capture) -ceq 'commit --signoff') 'Windows inherits the Linux Git aliases'
-    Assert ((Invoke-Native git @('config','--get','core.sshCommand') -Capture) -ceq 'fixture-ssh.exe') 'Machine Git settings survive in a separate local include'
+    Assert (Test-TrackedFile (Join-Path $userRoot '.config/git/platform.conf') (Join-Path $candidate 'git/.windows/.config/git/platform.conf')) 'Windows Git helper choices are linked to tracked platform settings'
     Invoke-Native git @('config','--global','alias.windows-link-proof','status')
-    Assert ([IO.File]::ReadAllText((Join-Path $candidate 'git/.gitconfig.common')).Contains('windows-link-proof')) 'git config --global edits the tracked source through its symlink'
-    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig.common')) 'Git preserves its configuration symlink when saving'
+    Assert ([IO.File]::ReadAllText((Join-Path $candidate 'git/.gitconfig')).Contains('windows-link-proof')) 'git config --global edits the tracked source through its symlink'
+    Assert (Test-TrackedFile $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig')) 'Git preserves its configuration symlink when saving'
     Set-NativeGit $userRoot $candidate $backups
     Assert (Test-TrackedFile (Join-Path $userRoot '.gitignore') (Join-Path $candidate 'git/.gitignore')) 'Windows global ignore rules link directly to the shared source'
     $healthHome = Join-Path $fixture 'health home'
     $env:USERPROFILE=$healthHome; $env:HOME=$healthHome; $env:LOCALAPPDATA=Join-Path $healthHome 'AppData/Local'
     $healthDocuments = Join-Path $healthHome 'Documents'
     $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
-    foreach ($link in @(Get-ConfigurationLinks $healthHome $RcRoot $healthDocuments $healthTerminal)) { Set-TrackedFile $link.Path $link.Source '' }
+    Set-ConfigurationLinks $healthHome $RcRoot $healthDocuments $healthTerminal ''
     Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') $nativeState ''
     Save-Json (Join-Path $healthHome '.vim/machine-paths.json') $nativeVimPaths ''
     Set-NativeCodex $healthHome $RcRoot ''

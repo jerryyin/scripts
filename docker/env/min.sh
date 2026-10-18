@@ -67,18 +67,11 @@ wait_for_dpkg_lock
 # compiles its fuzzyMatch C extension; without them it silently falls back to
 # the slow pure-Python matcher.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
-     git zsh fonts-powerline tmux silversearcher-ag less stow neovim vim wget \
+     git zsh fonts-powerline tmux silversearcher-ag less neovim vim wget \
      python-is-python3 gdb gist openssh-client gcc python3-dev
 
-# rc files. Clone once, but ALWAYS re-run install.sh: it is idempotent (stow -R,
-# backs up real-file conflicts) and is what re-heals a partial prior setup — e.g.
-# a pod reusing persistent $HOME where rc_files/ exists but a previous install.sh
-# died midway. Gating install.sh on the directory would skip that repair forever.
-#
-# Anchored to $HOME rather than the cwd: install.sh resolves the repo as
-# $HOME/rc_files and clones it itself when missing, so running min.sh from any
-# other directory would leave two divergent checkouts — one here that nothing
-# stows from, and one in $HOME that install.sh silently created.
+# Clone once, then rerun the repository's self-contained installer to repair
+# incomplete deployment. Correct links are left intact; local conflicts stop setup.
 if [ ! -d "$HOME/rc_files" ]; then
     git clone https://github.com/jerryyin/rc_files.git "$HOME/rc_files"
     git -C "$HOME/rc_files" remote set-url origin git@github.com:jerryyin/rc_files.git

@@ -20,7 +20,7 @@ try {
     $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'bootstrap.ps1') 2>&1
     Assert ($LASTEXITCODE -eq 0 -and ($plan -join "`n") -match 'PLAN: install') 'Documented powershell -File entry point resolves its default manifest'
     $sourceRc = Join-Path $testRoot 'rc_files'
-    foreach ($file in @('.windows-terminal/settings.json','.powertoys/settings.json','.powertoys/Awake/settings.json')) {
+    foreach ($file in @('terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json','powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json','powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) {
         $destination=Join-Path $sourceRc $file
         [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
         Copy-Item -LiteralPath (Join-Path $RcRoot $file) -Destination $destination
@@ -32,7 +32,7 @@ try {
     Save-Text $arrayPath '["calendar"]' ''
     Assert (@(Read-Json $arrayPath).Count -eq 1) 'Single-plugin JSON arrays remain iterable'
     $terminal = Join-Path $testRoot 'Terminal/settings.json'
-    $terminalSource = Join-Path $sourceRc '.windows-terminal/settings.json'
+    $terminalSource = Join-Path $sourceRc 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
     Set-Terminal $terminal $terminalSource ''
     Assert (Test-TrackedFile $terminal $terminalSource) 'Terminal directly links to tracked preferences'
     $hash=(Get-FileHash -LiteralPath $terminal).Hash
@@ -65,8 +65,8 @@ try {
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
     $powerToys = Join-Path $testRoot 'PowerToys'
     Set-PowerToys $powerToys $sourceRc ''
-    Assert (Test-TrackedFile (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc '.powertoys/settings.json')) 'PowerToys general settings directly link to rc_files'
-    Assert (Test-TrackedFile (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc '.powertoys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
+    Assert (Test-TrackedFile (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json')) 'PowerToys general settings directly link to rc_files'
+    Assert (Test-TrackedFile (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
     $awake=Read-Json (Join-Path $powerToys 'Awake/settings.json')
     Assert ($awake.properties.mode -eq 1 -and !$awake.properties.keepDisplayOn) 'Awake keeps the requested preferences'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
@@ -98,6 +98,7 @@ try {
     Save-Text (Join-Path $rc 'codex/.codex.config.toml.template') "[projects.`"/home/zhuoryin`"]`ntrust_level = `"trusted`"`n" ''
     Save-Text (Join-Path $rc 'claude/.claude/CLAUDE.md') 'shared instructions' ''
     $fakeUser = Join-Path $testRoot 'WindowsUser'
+    Set-TrackedFile (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'claude/.claude/CLAUDE.md') ''
     Set-NativeCodex $fakeUser $rc ''
     $codexPath = Join-Path $fakeUser '.codex/config.toml'
     Assert (![IO.File]::ReadAllText($codexPath).Contains('/home/zhuoryin')) 'New Codex config renders a native Windows trust path'
@@ -136,13 +137,14 @@ try {
     Assert (Test-Path -LiteralPath (Join-Path $empty '.git')) 'An explicitly created empty directory can receive a Git checkout'
 
     $vimRc = Join-Path $testRoot 'shared-vim-rc'
-    foreach ($relative in @('vim/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
+    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''
+    Set-TrackedFile (Join-Path $vimUser '_vimrc') (Join-Path $vimRc 'vim/.windows/_vimrc') ''
     Set-NativeVim $vimUser $vimRc 'C:/Program Files/Git/bin/bash.exe' '' $python
     $loader = [IO.File]::ReadAllText((Join-Path $vimUser '_vimrc'))
-    Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/_vimrc'))) 'Native Vim entry is deployed from rc_files'
+    Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/.windows/_vimrc'))) 'Native Vim entry is deployed from rc_files'
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/config'))) 'Windows setup does not copy a second Vim configuration tree'
     Assert ((Read-Json (Join-Path $vimUser '.vim/machine-paths.json')).pythonDll.EndsWith('python399.dll')) 'Native Python DLL is discovered without a fixed version in Vim configuration'
     Assert ($environment.packages.id -contains 'LLVM.clangd' -and $environment.packages.id -contains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap installs clangd, GitHub CLI and 7-Zip without Ctags'

@@ -112,48 +112,36 @@ try {
     Write-Host 'Developer Mode enabled.'
 }
 
+$script:RcDeployer = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'rc_files/deploy.py'
+
+function Invoke-RcDeploy([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems) {
+    $deployer = if ($RcRoot) { Join-Path $RcRoot 'deploy.py' } else { $script:RcDeployer }
+    if (!(Test-Path -LiteralPath $deployer)) { throw "Update rc_files: deploy.py is missing: $deployer" }
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    $prefix = @()
+    if ($launcher) { $prefix = @('-3') }
+    else { $launcher = Get-Command python.exe -ErrorAction Stop }
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $launcher.Source @prefix $deployer @Arguments 2>&1)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($code -ne 0 -and !($AllowProblems -and $code -eq 1 -and $output.Count)) { throw "rc_files deployment failed (exit $code): $($output -join "`n")" }
+    if ($Capture) { return $output -join "`n" }
+    $output | Out-Host
+}
+
 function Test-TrackedFile([string]$Path, [string]$Source) {
-    if (!(Test-Path -LiteralPath $Source -PathType Leaf)) { return $false }
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if (!$item -or $item.LinkType -ne 'SymbolicLink') { return $false }
-    $target = [string](@($item.Target)[0])
-    if (![IO.Path]::IsPathRooted($target)) { $target = Join-Path $item.DirectoryName $target }
-    return [IO.Path]::GetFullPath($target) -ieq [IO.Path]::GetFullPath($Source)
+    $result = Invoke-RcDeploy '' @('check', '--source', $Source, '--target', $Path, '--json') -Capture -AllowProblems
+    return @((ConvertFrom-Json $result).problems).Count -eq 0
 }
 
 function Set-TrackedFile([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
-    $sourcePath = [IO.Path]::GetFullPath($Source)
-    if (!(Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Tracked configuration is missing: $sourcePath" }
-    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if ($existing -and $existing.PSIsContainer) { throw "Configuration destination is a directory: $Path" }
-    if (Test-TrackedFile $Path $sourcePath) { return }
-    if ($existing -and !$ReplaceExisting -and ($existing.LinkType -or (Get-FileHash -LiteralPath $Path).Hash -ne (Get-FileHash -LiteralPath $sourcePath).Hash)) {
-        throw "Configuration conflict: $Path differs from $sourcePath. Recover local edits into rc_files before relinking; nothing was replaced."
-    }
-    if ($existing -and $ReplaceExisting -and !$BackupRoot) { throw "A backup directory is required before replacing $Path." }
-    if (!('DevenvFileLinks' -as [type])) { Add-Type -TypeDefinition @'
-using System.Runtime.InteropServices;
-public static class DevenvFileLinks {
- [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
- [return: MarshalAs(UnmanagedType.I1)]
- public static extern bool CreateSymbolicLinkW(string link, string target, int flags);
-}
-'@ }
-    [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent))
-    $candidate = $Path + '.link-' + [guid]::NewGuid().ToString('N')
-    try {
-        $linked = [DevenvFileLinks]::CreateSymbolicLinkW($candidate, $sourcePath, 2)
-        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        if (!$linked) { throw "Cannot link $Path to rc_files: $((New-Object ComponentModel.Win32Exception($code)).Message). Enable Developer Mode; configuration is never silently copied." }
-        if ($existing) {
-            if ($BackupRoot) {
-                [void][IO.Directory]::CreateDirectory($BackupRoot)
-                Copy-Item -LiteralPath $Path -Destination (Join-Path $BackupRoot ($existing.Name + '.' + [guid]::NewGuid().ToString('N')))
-            }
-            if ($existing.LinkType) { Remove-Item -LiteralPath $Path -Force }
-        }
-        Move-Item -LiteralPath $candidate -Destination $Path -Force
-    } finally { if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force } }
+    $arguments = @('link', '--source', $Source, '--target', $Path)
+    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
+    if ($ReplaceExisting) { $arguments += '--replace-existing' }
+    Invoke-RcDeploy '' $arguments
 }
 
 function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
@@ -162,33 +150,7 @@ function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
 }
 
 function Set-TrackedDirectory([string]$Path, [string]$Source, [string]$BackupRoot) {
-    $sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd('\')
-    if (!(Test-Path -LiteralPath $sourcePath -PathType Container)) { throw "Tracked directory is missing: $sourcePath" }
-    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if ($existing -and $existing.LinkType -in @('Junction', 'SymbolicLink')) {
-        if ([IO.Path]::GetFullPath([string](@($existing.Target)[0])).TrimEnd('\') -ieq $sourcePath) { return }
-        throw "Directory already links elsewhere: $Path. Reconcile its contents with $sourcePath before rerunning."
-    }
-    if ($existing) {
-        if (!$existing.PSIsContainer) { throw "Directory destination is a file: $Path" }
-        $entries = @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
-        $originals = @(Get-ChildItem -LiteralPath $sourcePath -Recurse -Force)
-        $different = $entries.Count -ne $originals.Count
-        foreach ($entry in $entries) {
-            $relative = $entry.FullName.Substring($existing.FullName.TrimEnd('\').Length + 1)
-            $original = Join-Path $sourcePath $relative
-            if ($entry.LinkType -or !(Test-Path -LiteralPath $original) -or $entry.PSIsContainer -ne (Get-Item -LiteralPath $original -Force).PSIsContainer) { $different = $true; break }
-            if (!$entry.PSIsContainer -and (Get-FileHash -LiteralPath $entry.FullName).Hash -ne (Get-FileHash -LiteralPath $original).Hash) { $different = $true; break }
-        }
-        if ($different) { throw "Local skill edits need recovery: $Path differs from $sourcePath. Merge them into rc_files before rerunning; nothing was replaced." }
-        if (!$BackupRoot) { throw "A backup directory is required to replace $Path with a junction." }
-    }
-    [void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent))
-    if ($existing) {
-        [void][IO.Directory]::CreateDirectory($BackupRoot)
-        Move-Item -LiteralPath $existing.FullName -Destination (Join-Path $BackupRoot ($existing.Name + '.' + [guid]::NewGuid().ToString('N')))
-    }
-    [void](New-Item -ItemType Junction -Path $Path -Target $sourcePath)
+    Set-TrackedFile $Path $Source $BackupRoot
 }
 
 function Set-Terminal([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
@@ -196,50 +158,39 @@ function Set-Terminal([string]$Path, [string]$Source, [string]$BackupRoot, [swit
 }
 
 function Set-PowerToys([string]$SettingsRoot, [string]$RcRoot, [string]$BackupRoot, [switch]$ReplaceExisting) {
-    Set-TrackedFile (Join-Path $SettingsRoot 'settings.json') (Join-Path $RcRoot '.powertoys/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
-    Set-TrackedFile (Join-Path $SettingsRoot 'Awake/settings.json') (Join-Path $RcRoot '.powertoys/Awake/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
+    Set-TrackedFile (Join-Path $SettingsRoot 'settings.json') (Join-Path $RcRoot 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
+    Set-TrackedFile (Join-Path $SettingsRoot 'Awake/settings.json') (Join-Path $RcRoot 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
 }
 
 function Set-NativeGit([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
-    $common = Join-Path $RcRoot 'git/.gitconfig.common'
-    $globalPath = Join-Path $UserRoot '.gitconfig'
-    $machinePath = Join-Path $UserRoot '.config/git/windows-machine.conf'
-    if ((Test-Path -LiteralPath $globalPath) -and !(Test-TrackedFile $globalPath $common) -and
-        (Get-FileHash -LiteralPath $globalPath).Hash -ne (Get-FileHash -LiteralPath $common).Hash) {
-        if (Test-Path -LiteralPath $machinePath) { throw "Reconcile existing $globalPath with $machinePath before migrating Git configuration." }
-        $text = [IO.File]::ReadAllText($globalPath)
-        Save-Text $machinePath $text $BackupRoot
-        $keys = @(& git config --file $common --name-only --list | Where-Object { $_ -ne 'include.path' })
-        if ($LASTEXITCODE) { throw 'Cannot read shared Git preferences.' }
-        foreach ($key in $keys) {
-            & git config --file $machinePath --get-all $key | Out-Null
-            if ($LASTEXITCODE -eq 0) { Invoke-Native git @('config', '--file', $machinePath, '--unset-all', $key) }
-        }
-        Set-TrackedFile $globalPath $common $BackupRoot -ReplaceExisting
-    } else { Set-TrackedFile $globalPath $common $BackupRoot }
-    Set-TrackedFile (Join-Path $UserRoot '.gitignore') (Join-Path $RcRoot 'git/.gitignore') $BackupRoot
+    $script:RcDeployer = Join-Path $RcRoot 'deploy.py'
+    $arguments = @('apply', '--repo', $RcRoot, '--home', $UserRoot, '--package', 'git')
+    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
+    Invoke-RcDeploy $RcRoot $arguments
+}
+
+function Get-DeploymentArguments([string]$Action, [string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
+    return @($Action, '--repo', $RcRoot, '--home', $UserRoot,
+        '--root', "DOCUMENTS=$DocumentsPath", '--root', ('LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState=' + (Split-Path $TerminalPath -Parent)))
 }
 
 function Get-ConfigurationLinks([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
-    $homeFiles = [ordered]@{
-        '_vimrc'='vim/_vimrc'; '.psmux.conf'='tmux/.psmux.conf'
-        '.gitconfig'='git/.gitconfig.common'; '.gitignore'='git/.gitignore'
-        '.codex/AGENTS.md'='claude/.claude/CLAUDE.md'
-    }
-    foreach ($name in $homeFiles.Keys) { [pscustomobject]@{Path=(Join-Path $UserRoot $name); Source=(Join-Path $RcRoot $homeFiles[$name])} }
-    foreach ($shell in @('PowerShell','WindowsPowerShell')) {
-        [pscustomobject]@{Path=(Join-Path $DocumentsPath "$shell/profile.ps1"); Source=(Join-Path $RcRoot '.powershell/profile.ps1')}
-    }
-    [pscustomobject]@{Path=$TerminalPath; Source=(Join-Path $RcRoot '.windows-terminal/settings.json')}
-    foreach ($name in @('settings.json','Awake/settings.json')) {
-        [pscustomobject]@{Path=(Join-Path $env:LOCALAPPDATA "Microsoft/PowerToys/$name"); Source=(Join-Path $RcRoot ".powertoys/$name")}
-    }
+    $arguments = @(Get-DeploymentArguments 'plan' $UserRoot $RcRoot $DocumentsPath $TerminalPath) + @('--json')
+    $result = ConvertFrom-Json (Invoke-RcDeploy $RcRoot $arguments -Capture)
+    foreach ($link in $result.links) { [pscustomobject]@{Path=$link.target; Source=$link.source; Directory=$link.directory} }
+}
+
+function Set-ConfigurationLinks([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath, [string]$BackupRoot) {
+    $script:RcDeployer = Join-Path $RcRoot 'deploy.py'
+    $arguments = @(Get-DeploymentArguments 'apply' $UserRoot $RcRoot $DocumentsPath $TerminalPath)
+    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
+    Invoke-RcDeploy $RcRoot $arguments
 }
 
 function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
-    foreach ($link in @(Get-ConfigurationLinks $UserRoot $RcRoot $DocumentsPath $TerminalPath)) {
-        if (!(Test-TrackedFile $link.Path $link.Source)) { "Link missing or detached: $($link.Path) -> $($link.Source)" }
-    }
+    $arguments = @(Get-DeploymentArguments 'check' $UserRoot $RcRoot $DocumentsPath $TerminalPath) + @('--json')
+    $report = ConvertFrom-Json (Invoke-RcDeploy $RcRoot $arguments -Capture -AllowProblems)
+    $report.problems
     foreach ($entry in @(
         @{Path=(Join-Path $UserRoot '.vim/machine-paths.json'); Fields=@('gitBash','pythonRoot','pythonDll','vimrc')},
         @{Path=(Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json'); Fields=@('vimExe','psmuxExe','rcRoot','notes')}
@@ -259,14 +210,7 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
             'Native tmux configuration is missing or differs from rc_files; rerun setup to render it.'
         }
     } catch { 'Cannot validate native tmux configuration against rc_files.' }
-    $tracked = @(& git -C $RcRoot ls-files -- 'claude/.claude/skills/')
-    if ($LASTEXITCODE) { 'Cannot inventory tracked skills.'; return }
-    foreach ($name in @($tracked | ForEach-Object { $_.Substring('claude/.claude/skills/'.Length).Split('/')[0] } | Sort-Object -Unique)) {
-        $path = Join-Path $UserRoot ".agents/skills/$name"
-        $source = Join-Path $RcRoot "claude/.claude/skills/$name"
-        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-        if (!$item -or $item.LinkType -notin @('Junction','SymbolicLink') -or [string](@($item.Target)[0]) -ine $source) { "Skill link missing or detached: $path" }
-    }
+
 }
 
 function Get-VaultPath([string]$RegistryPath, [string]$Fallback) {
@@ -545,12 +489,11 @@ function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
 function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
     $generated = Join-Path $UserRoot '.psmux/generated.conf'
     Save-Text $generated (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf')) $BackupRoot
-    Set-TrackedFile (Join-Path $UserRoot '.psmux.conf') (Join-Path $RcRoot 'tmux/.psmux.conf') $BackupRoot
 }
 
 function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [string]$BackupRoot, [string]$PythonRoot = '') {
     if (!(Test-Path -LiteralPath (Join-Path $RcRoot 'vim/.vimrc'))) { throw 'Shared vim/.vimrc is missing from rc_files' }
-    foreach ($relative in @('vim/_vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
+    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required shared configuration is missing: $relative" }
     }
     $pythonDll = ''
@@ -562,7 +505,6 @@ function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [st
     Save-Json (Join-Path $UserRoot '.vim/machine-paths.json') ([ordered]@{
         gitBash=$GitBash.Replace('\','/'); pythonRoot=$PythonRoot.Replace('\','/'); pythonDll=$pythonDll.Replace('\','/'); vimrc=(Join-Path $RcRoot 'vim/.vimrc').Replace('\','/')
     }) $BackupRoot
-    Set-TrackedFile (Join-Path $UserRoot '_vimrc') (Join-Path $RcRoot 'vim/_vimrc') $BackupRoot
     [void][IO.Directory]::CreateDirectory((Join-Path $UserRoot '.vim/session'))
 }
 
@@ -690,27 +632,7 @@ function Set-NativeCodex([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot
         $text = [IO.File]::ReadAllText($template).Replace('/home/zhuoryin', $UserRoot.Replace('\', '\\'))
         Save-Text $target $text $BackupRoot
     }
-    $instructions = 'claude/.claude/CLAUDE.md'
-    if (Test-Path -LiteralPath (Join-Path $RcRoot $instructions)) {
-        $destination = Join-Path $UserRoot '.codex/AGENTS.md'
-        $source = Join-Path $RcRoot $instructions
-        $existing = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
-        if ($existing -and !$existing.LinkType -and (Get-FileHash -LiteralPath $destination).Hash -ne (Get-FileHash -LiteralPath $source).Hash) {
-            throw "Local instruction edits need recovery: $destination differs from $source. Merge them into rc_files before rerunning."
-        }
-        Set-TrackedFile $destination $source $BackupRoot
-    }
-    $skillsSource = Join-Path $RcRoot 'claude/.claude/skills'
-    if (Test-Path -LiteralPath $skillsSource) {
-        $skillsTarget = Join-Path $UserRoot '.agents/skills'
-        [void][IO.Directory]::CreateDirectory($skillsTarget)
-        $tracked = @(& git -C $RcRoot ls-files -- 'claude/.claude/skills/')
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot list tracked rc_files skills.' }
-        $names = @($tracked | ForEach-Object { $_.Substring('claude/.claude/skills/'.Length).Split('/')[0] } | Sort-Object -Unique)
-        foreach ($name in $names) {
-            Set-TrackedDirectory (Join-Path $skillsTarget $name) (Join-Path $skillsSource $name) $BackupRoot
-        }
-    }
+
 }
 
 function Get-FontFiles($Font, [string]$Directory) {
