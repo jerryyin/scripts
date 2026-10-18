@@ -13,8 +13,10 @@
 #   cursor.sh   # Refresh rules for every project workspace that already
 #                 exists under $HOME (safe no-op if none do yet)
 #
-# Rules live in rc_files (stow-managed), so the source directory below is
+# Rules live in rc_files (Git-managed), so the source directory below is
 # populated by rc_files/install.sh, not by this script.
+# Python and the rc_files deployer create the links; RC_ROOT can select a
+# checkout outside the usual ~/rc_files location.
 #
 # Rules are authored in the Claude set (claude/.claude/rules/*.md) now; the old
 # cursor/.cursor/rules/*.mdc tree was migrated into it. Cursor only reads `.mdc`
@@ -24,7 +26,8 @@
 
 set -e
 
-CURSOR_RULES_SOURCE="$HOME/rc_files/claude/.claude/rules"
+CURSOR_RULES_SOURCE="$HOME/.claude/rules"
+RC_ROOT="${RC_ROOT:-$HOME/rc_files}"
 
 # Does this rule apply to a workspace? Decided from its frontmatter `globs:`, not
 # its filename. Note the sense is inverted from the old .mdc convention, where
@@ -53,7 +56,6 @@ rule_applies() {
     [[ "$name" == $core || "${name%%-*}" == $core ]]
 }
 
-# Uses hardlinks for better compatibility with Cursor's file watching.
 setup_cursor_rules() {
     local pattern="$1"
     local workspace_dir="$2"
@@ -78,9 +80,8 @@ setup_cursor_rules() {
         local rulename
         rulename="$(basename "$rule" .md).mdc"
 
-        # Hardlink, so editing either path keeps the rule in sync with rc_files.
-        rm -f "$rules_dest/$rulename"
-        ln "$rule" "$rules_dest/$rulename"
+        python3 "$RC_ROOT/.deploy/deploy.py" link \
+            --source "$rule" --target "$rules_dest/$rulename"
         echo "   Linked Cursor rule: $rulename"
         count=$((count + 1))
     done

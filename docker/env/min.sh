@@ -86,7 +86,7 @@ fi
 bash "$SCRIPT_DIR/node.sh"
 
 # install.sh, claude.sh, and codex.sh each self-sufficiently source
-# rc_files/lib/node-ca-cert.sh (Node's corporate-TLS-proxy CA workaround)
+# ~/.config/node/ca-cert.sh (Node's corporate-TLS-proxy CA workaround)
 # right before they run npm, so nothing needs to be pre-sourced here.
 bash "$HOME/rc_files/install.sh"
 

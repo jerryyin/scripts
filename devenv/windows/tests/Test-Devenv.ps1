@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
+. (Join-Path $PSScriptRoot 'RcFixture.ps1')
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('personal-devenv-test-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($testRoot)
 $script:passed = 0
@@ -33,11 +34,11 @@ try {
     Assert (@(Read-Json $arrayPath).Count -eq 1) 'Single-plugin JSON arrays remain iterable'
     $terminal = Join-Path $testRoot 'Terminal/settings.json'
     $terminalSource = Join-Path $sourceRc 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
-    Set-Terminal $terminal $terminalSource ''
-    Assert (Test-TrackedFile $terminal $terminalSource) 'Terminal directly links to tracked preferences'
+    Invoke-TestLink $terminal $terminalSource ''
+    Assert (Test-InstalledLink $terminal $terminalSource) 'Terminal directly links to tracked preferences'
     $hash=(Get-FileHash -LiteralPath $terminal).Hash
     $time=(Get-Item -LiteralPath $terminal).CreationTimeUtc.Ticks
-    Set-Terminal $terminal $terminalSource ''
+    Invoke-TestLink $terminal $terminalSource ''
     Assert ((Get-FileHash -LiteralPath $terminal).Hash -ceq $hash -and (Get-Item -LiteralPath $terminal).CreationTimeUtc.Ticks -eq $time) 'Terminal rerun leaves source and link unchanged'
 
     $formatted = Join-Path $testRoot 'formatted.json'
@@ -64,9 +65,11 @@ try {
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
     $powerToys = Join-Path $testRoot 'PowerToys'
-    Set-PowerToys $powerToys $sourceRc ''
-    Assert (Test-TrackedFile (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json')) 'PowerToys general settings directly link to rc_files'
-    Assert (Test-TrackedFile (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
+    foreach ($file in @('settings.json', 'Awake/settings.json')) {
+        Invoke-TestLink (Join-Path $powerToys $file) (Join-Path $sourceRc "powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/$file") ''
+    }
+    Assert (Test-InstalledLink (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json')) 'PowerToys general settings directly link to rc_files'
+    Assert (Test-InstalledLink (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
     $awake=Read-Json (Join-Path $powerToys 'Awake/settings.json')
     Assert ($awake.properties.mode -eq 1 -and !$awake.properties.keepDisplayOn) 'Awake keeps the requested preferences'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
@@ -74,11 +77,11 @@ try {
     Save-Text $sharedProfile '# tracked profile' ''
     Save-Text $profile '# unrelated local edit' ''
     $rejected=$false
-    try { Set-ProfileLoader $profile $sharedProfile '' } catch { $rejected=$_.Exception.Message.Contains('Configuration conflict') }
+    try { Invoke-TestLink $profile $sharedProfile '' } catch { $rejected=$_.Exception.Message.Contains('Configuration conflict') }
     Assert ($rejected -and [IO.File]::ReadAllText($profile) -ceq '# unrelated local edit') 'Conflicting PowerShell content is preserved and reported'
     Save-Text $profile '# tracked profile' ''
-    Set-ProfileLoader $profile $sharedProfile ''
-    Assert (Test-TrackedFile $profile $sharedProfile) 'An identical profile copy becomes a direct link'
+    Invoke-TestLink $profile $sharedProfile ''
+    Assert (Test-InstalledLink $profile $sharedProfile) 'An identical profile copy becomes a direct link'
     [IO.File]::WriteAllText($profile,'# local edit through linked profile')
     Assert ([IO.File]::ReadAllText($sharedProfile) -ceq '# local edit through linked profile') 'Installed profile edits reach rc_files'
     $jsonc=Join-Path $testRoot 'jsonc.json'
@@ -98,7 +101,7 @@ try {
     Save-Text (Join-Path $rc 'codex/.codex.config.toml.template') "[projects.`"/home/zhuoryin`"]`ntrust_level = `"trusted`"`n" ''
     Save-Text (Join-Path $rc 'claude/.claude/CLAUDE.md') 'shared instructions' ''
     $fakeUser = Join-Path $testRoot 'WindowsUser'
-    Set-TrackedFile (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'claude/.claude/CLAUDE.md') ''
+    Invoke-TestLink (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'claude/.claude/CLAUDE.md') ''
     Set-NativeCodex $fakeUser $rc ''
     $codexPath = Join-Path $fakeUser '.codex/config.toml'
     Assert (![IO.File]::ReadAllText($codexPath).Contains('/home/zhuoryin')) 'New Codex config renders a native Windows trust path'
@@ -141,7 +144,7 @@ try {
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''
-    Set-TrackedFile (Join-Path $vimUser '_vimrc') (Join-Path $vimRc 'vim/.windows/_vimrc') ''
+    Invoke-TestLink (Join-Path $vimUser '_vimrc') (Join-Path $vimRc 'vim/.windows/_vimrc') ''
     Set-NativeVim $vimUser $vimRc 'C:/Program Files/Git/bin/bash.exe' '' $python
     $loader = [IO.File]::ReadAllText((Join-Path $vimUser '_vimrc'))
     Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/.windows/_vimrc'))) 'Native Vim entry is deployed from rc_files'

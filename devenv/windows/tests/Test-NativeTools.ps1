@@ -15,6 +15,7 @@ Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
+. (Join-Path $PSScriptRoot 'RcFixture.ps1')
 $fixture = if ($FixturePath) { $FixturePath } else { Join-Path ([IO.Path]::GetTempPath()) ('personal-devenv-native-' + [guid]::NewGuid().ToString('N')) }
 $originalHome = $env:HOME; $originalProfile = $env:USERPROFILE; $originalLocal = $env:LOCALAPPDATA
 $originalPath = $env:PATH
@@ -43,8 +44,8 @@ try {
     $managed = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     [void][IO.Directory]::CreateDirectory($managed)
     if (!$UseExistingDeployment) {
-        Set-ProfileLoader (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
-        Set-TrackedFile (Join-Path $fixture '_vimrc') (Join-Path $RcRoot 'vim/.windows/_vimrc') ''
+        Invoke-TestLink (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
+        Invoke-TestLink (Join-Path $fixture '_vimrc') (Join-Path $RcRoot 'vim/.windows/_vimrc') ''
         Set-NativeVim $fixture $RcRoot $GitBash (Join-Path $fixture 'backups') $PythonRoot
         Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
@@ -140,7 +141,7 @@ qall!
 
     $config = Join-Path $fixture '.psmux.conf'
     if (!$UseExistingDeployment) {
-        Set-TrackedFile $config (Join-Path $RcRoot 'tmux/.windows/.psmux.conf') ''
+        Invoke-TestLink $config (Join-Path $RcRoot 'tmux/.windows/.psmux.conf') ''
         Set-NativeMux $fixture $RcRoot ''
     }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine

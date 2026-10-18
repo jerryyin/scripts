@@ -12,9 +12,4 @@ endif
 if !empty(filter(values(g:plugs), '!filereadable(v:val.dir . ''/.git/HEAD'')'))
   cquit 1
 endif
-let s:choices = $DEVENV_VIM_HOME . '/.vim/coc-extensions.json'
-let s:extensions = json_encode(g:coc_global_extensions)
-if !filereadable(s:choices) || join(readfile(s:choices), '') !=# s:extensions
-  call writefile([s:extensions], s:choices)
-endif
 cquit 0

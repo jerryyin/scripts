@@ -37,8 +37,8 @@ echo "✓ Keypair permissions set"
 #
 # HTTPS-only, never SSH: anything SSH here races its own prerequisite,
 # since the key-backup step moves ~/.ssh aside on every run -- taking
-# known_hosts and rc_files' stowed ~/.ssh/config, which is what makes
-# git@github.com work at all, and isn't re-stowed until min.sh runs after
+# known_hosts and rc_files' linked ~/.ssh/config, which is what makes
+# git@github.com work at all, and isn't redeployed until min.sh runs after
 # this. Staying on HTTPS takes both an explicit URL (origin is an SSH
 # remote once min.sh has run) and GIT_CONFIG_GLOBAL=/dev/null, because
 # rc_files' .gitconfig rewrites https://github.com/ back to

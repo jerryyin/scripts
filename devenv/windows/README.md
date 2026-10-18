@@ -283,14 +283,15 @@ engine, PSReadLine or security-check costs.
   stop setup so their edits can be merged into rc_files. Other installed skills,
   existing Codex preferences and credentials are preserved.
 * `install-vim-plugins.vim` in this utility is installation code, run directly
-  from `scripts`. Its generated extension choices and plugin/npm installations
-  remain runtime data outside Git.
+  from `scripts`. Extension choices come from the tracked
+  `rc_files/vim/.vim/coc-extensions.json`; plugin/npm installations remain
+  runtime data outside Git.
 
 `scripts` installs system prerequisites. `rc_files` owns authored settings,
 placement conventions and the shared Python deployer. Both Linux and Windows
-use `rc_files/deploy.py`; a scripts checkout is not needed to deploy rc_files.
+use `rc_files/.deploy/deploy.py`; a scripts checkout is not needed to deploy rc_files.
 Platform directories select Linux or Windows without a per-file installer list.
-See [the repository conventions](../../../rc_files/README.md) for standalone use.
+See [the deployer conventions](../../../rc_files/.deploy/README.md) for standalone use.
 No ignore rules are widened, and no runtime app directory is linked into Git.
 Terminal and PowerToys GUI edits write directly into rc_files. Restart an app if it does not observe a change through the link. PowerShell reads its source in the next shell. Rerun setup after changing tmux preferences to refresh the generated native translation.
 The local Codex `config.toml` is initialized from its tracked template only when

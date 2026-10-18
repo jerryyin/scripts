@@ -34,7 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # This list is for runtime-authenticated SECRETS (OAuth / login tokens that are
 # refreshed in-session). Non-secret config does NOT belong here — it is owned by
-# rc_files (stow) so it stays portable and reviewable in version control.
+# rc_files (direct links) so it stays portable and reviewable in version control.
 CREDENTIAL_PATHS=(
     # NOTE: .gist and .config/gh are intentionally NOT here. Both are now sourced
     # from vault (vault.sh gist -> ~/.gist, reusing the gh jerryyin PAT;

@@ -10,12 +10,12 @@
 # refresh.
 #
 # The local config file (~/.codex/config.toml) is generated from the template
-# (~/.codex.config.toml.template, deployed by rc_files/install.sh via stow).
+# (~/.codex.config.toml.template, deployed by rc_files/install.sh via direct links).
 # Keep the real config untracked because Codex may add local runtime state.
 #
 # Prerequisites:
 #   - nodejs + npm installed (handled by min.sh)
-#   - ~/.codex.config.toml.template deployed by rc_files/install.sh (stow)
+#   - ~/.codex.config.toml.template deployed by rc_files/install.sh (direct links)
 
 set -e
 # Without pipefail, `npm install ... | tail -1` always reports tail's exit
@@ -24,8 +24,6 @@ set -o pipefail
 
 CODEX_CONFIG="$HOME/.codex/config.toml"
 CODEX_TEMPLATE="$HOME/.codex.config.toml.template"
-CODEX_AGENTS_SOURCE="$HOME/rc_files/claude/.claude/CLAUDE.md"
-CODEX_SKILLS_SOURCE="$HOME/rc_files/claude/.claude/skills"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/../lib/npm_global_bin.sh"
@@ -41,12 +39,12 @@ install_codex_cli() {
 
     # Some environments (corporate proxies, WSL) present a TLS chain npm
     # cannot verify, causing UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Prefer a
-    # configured CA bundle (see rc_files/zsh/.zshrc) so npm can verify the
+    # configured CA bundle so npm can verify the
     # proxy's cert instead of failing closed. Self-sufficient here (doesn't
     # assume min.sh already set this) since this script can run standalone;
-    # no-ops if rc_files hasn't been cloned yet.
-    if [ -f "$HOME/rc_files/lib/node-ca-cert.sh" ]; then
-        . "$HOME/rc_files/lib/node-ca-cert.sh"
+    # no-ops if the Node environment configuration is not deployed yet.
+    if [ -f "$HOME/.config/node/ca-cert.sh" ]; then
+        . "$HOME/.config/node/ca-cert.sh"
     fi
     local -a NPM_TLS_FLAGS=()
     if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f "${NODE_EXTRA_CA_CERTS}" ]; then
@@ -100,19 +98,12 @@ patch_codex_config() {
 
     mkdir -p "$(dirname "$CODEX_CONFIG")"
 
-    # Copy template if config doesn't exist or template is newer.
-    if [ ! -f "$CODEX_CONFIG" ] || [ "$CODEX_TEMPLATE" -nt "$CODEX_CONFIG" ]; then
+    # Existing config may contain machine-specific paths and user edits.
+    if [ ! -f "$CODEX_CONFIG" ]; then
         cp "$CODEX_TEMPLATE" "$CODEX_CONFIG"
         chmod 600 "$CODEX_CONFIG" 2>/dev/null || true
         echo "✓ Copied $CODEX_TEMPLATE → $CODEX_CONFIG"
     fi
-}
-
-link_shared_agent_config() {
-    mkdir -p "$HOME/.codex" "$HOME/.agents"
-    ln -sfnT "$CODEX_AGENTS_SOURCE" "$HOME/.codex/AGENTS.md"
-    ln -sfnT "$CODEX_SKILLS_SOURCE" "$HOME/.agents/skills"
-    echo "✓ Linked shared instructions and skills for Codex"
 }
 
 main() {
@@ -130,7 +121,6 @@ main() {
     echo "──────────────────"
     install_codex_cli
     patch_codex_config
-    link_shared_agent_config
     echo ""
 }
 

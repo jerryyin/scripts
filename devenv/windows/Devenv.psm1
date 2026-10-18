@@ -112,10 +112,8 @@ try {
     Write-Host 'Developer Mode enabled.'
 }
 
-$script:RcDeployer = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'rc_files/deploy.py'
-
 function Invoke-RcDeploy([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems) {
-    $deployer = if ($RcRoot) { Join-Path $RcRoot 'deploy.py' } else { $script:RcDeployer }
+    $deployer = Join-Path $RcRoot '.deploy/deploy.py'
     if (!(Test-Path -LiteralPath $deployer)) { throw "Update rc_files: deploy.py is missing: $deployer" }
     $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
     $prefix = @()
@@ -132,59 +130,14 @@ function Invoke-RcDeploy([string]$RcRoot, [string[]]$Arguments, [switch]$Capture
     $output | Out-Host
 }
 
-function Test-TrackedFile([string]$Path, [string]$Source) {
-    $result = Invoke-RcDeploy '' @('check', '--source', $Source, '--target', $Path, '--json') -Capture -AllowProblems
-    return @((ConvertFrom-Json $result).problems).Count -eq 0
-}
-
-function Set-TrackedFile([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
-    $arguments = @('link', '--source', $Source, '--target', $Path)
-    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
-    if ($ReplaceExisting) { $arguments += '--replace-existing' }
-    Invoke-RcDeploy '' $arguments
-}
-
 function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
     if ((Test-Path -LiteralPath $Path) -and (Test-JsonEquivalent (Read-Json $Path) (ConvertTo-Map $Value))) { return }
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
 }
 
-function Set-TrackedDirectory([string]$Path, [string]$Source, [string]$BackupRoot) {
-    Set-TrackedFile $Path $Source $BackupRoot
-}
-
-function Set-Terminal([string]$Path, [string]$Source, [string]$BackupRoot, [switch]$ReplaceExisting) {
-    Set-TrackedFile $Path $Source $BackupRoot -ReplaceExisting:$ReplaceExisting
-}
-
-function Set-PowerToys([string]$SettingsRoot, [string]$RcRoot, [string]$BackupRoot, [switch]$ReplaceExisting) {
-    Set-TrackedFile (Join-Path $SettingsRoot 'settings.json') (Join-Path $RcRoot 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
-    Set-TrackedFile (Join-Path $SettingsRoot 'Awake/settings.json') (Join-Path $RcRoot 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json') $BackupRoot -ReplaceExisting:$ReplaceExisting
-}
-
-function Set-NativeGit([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
-    $script:RcDeployer = Join-Path $RcRoot 'deploy.py'
-    $arguments = @('apply', '--repo', $RcRoot, '--home', $UserRoot, '--package', 'git')
-    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
-    Invoke-RcDeploy $RcRoot $arguments
-}
-
 function Get-DeploymentArguments([string]$Action, [string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
     return @($Action, '--repo', $RcRoot, '--home', $UserRoot,
         '--root', "DOCUMENTS=$DocumentsPath", '--root', ('LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState=' + (Split-Path $TerminalPath -Parent)))
-}
-
-function Get-ConfigurationLinks([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
-    $arguments = @(Get-DeploymentArguments 'plan' $UserRoot $RcRoot $DocumentsPath $TerminalPath) + @('--json')
-    $result = ConvertFrom-Json (Invoke-RcDeploy $RcRoot $arguments -Capture)
-    foreach ($link in $result.links) { [pscustomobject]@{Path=$link.target; Source=$link.source; Directory=$link.directory} }
-}
-
-function Set-ConfigurationLinks([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath, [string]$BackupRoot) {
-    $script:RcDeployer = Join-Path $RcRoot 'deploy.py'
-    $arguments = @(Get-DeploymentArguments 'apply' $UserRoot $RcRoot $DocumentsPath $TerminalPath)
-    if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
-    Invoke-RcDeploy $RcRoot $arguments
 }
 
 function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
@@ -360,10 +313,6 @@ function Install-LatestAddon($Addon, [string]$Directory, [string]$BackupRoot) {
     }
 }
 
-function Set-ProfileLoader([string]$Path, [string]$ManagedProfile, [string]$BackupRoot) {
-    Set-TrackedFile $Path $ManagedProfile $BackupRoot
-}
-
 function Invoke-Native([string]$Program, [string[]]$Arguments, [switch]$Capture) {
     if ($Capture) { $result = & $Program @Arguments; $code = $LASTEXITCODE }
     else { & $Program @Arguments | Out-Host; $code = $LASTEXITCODE }
@@ -516,7 +465,7 @@ function Install-VimPlugins([string]$VimExe, [string]$UserRoot, [string]$BackupR
         Get-Download 'https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim' $download
         Save-Text $plugPath ([IO.File]::ReadAllText($download)) $BackupRoot
     } finally { if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download } } }
-    $choices = Join-Path $UserRoot '.vim/coc-extensions.json'
+    $choices = Join-Path $RcRoot 'vim/.vim/coc-extensions.json'
     $previous = @($env:DEVENV_RC_ROOT, $env:DEVENV_VIM_HOME, $env:DEVENV_UPDATE)
     try {
         $env:DEVENV_RC_ROOT = $RcRoot; $env:DEVENV_VIM_HOME = $UserRoot; $env:DEVENV_UPDATE = [string][int][bool]$Update

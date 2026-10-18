@@ -61,7 +61,7 @@ vault_available() {
 # Setup SSH keys from persistent storage. GitHub host-key trust (the
 # ssh.github.com:443 redirect this network needs) is handled declaratively by
 # rc_files' ~/.ssh/config (StrictHostKeyChecking accept-new on the github.com
-# block) once it's stowed, so it doesn't need any imperative setup here.
+# block) once it's linked, so it doesn't need any imperative setup here.
 setup_ssh() {
     local persistent_root="$1"
 
