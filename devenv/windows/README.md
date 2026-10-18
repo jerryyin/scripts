@@ -169,7 +169,7 @@ enabled on Linux. There is no plugin-autocommand rewriting and no separate
 selecting `rg`/`psmux` on Windows and the existing `ag`/`tmux` on Linux.
 Windows Vim uses `cmd.exe` quoting, matching native async plugins such as
 Grepper. LeaderF's Unix file-list command explicitly invokes Git Bash through
-the shared `leaderf-files.sh`, preserving the IREE/Triton filters. Outside a
+the Windows helper `leaderf-files.sh`, preserving the IREE/Triton filters. Outside a
 Git checkout it falls back to ripgrep file discovery.
 
 `Test-VimShortcuts.ps1` executes search mappings against known files in a path
@@ -265,7 +265,7 @@ engine, PSReadLine or security-check costs.
   update its schema/version fields when it saves these files.
 * `rc_files/vim/.windows/_vimrc` and `rc_files/tmux/.windows/.psmux.conf`: static native entry
   files. Their installed home paths are file symlinks to these sources.
-* `rc_files/tmux/.tmux/psmux-compat.conf` and `mux.ps1`: Windows equivalents of
+* `rc_files/tmux/.windows/.tmux/psmux-compat.conf` and `mux.ps1`: Windows equivalents of
   the shared tmux plugin bindings and their runtime clipboard helper.
 * `%LOCALAPPDATA%\PersonalDevenv`: discovered machine paths (`state.json`),
   downloaded plugin source and backups.
@@ -289,9 +289,10 @@ engine, PSReadLine or security-check costs.
 
 `scripts` installs system prerequisites. `rc_files` owns authored settings,
 placement conventions and the shared Python deployer. Both Linux and Windows
-use `rc_files/.deploy/deploy.py`; a scripts checkout is not needed to deploy rc_files.
+use `rc_files/.setup/install.py` for configuration setup; a scripts checkout is
+not needed to deploy rc_files. Lower-level link operations use `.setup/deploy.py`.
 Platform directories select Linux or Windows without a per-file installer list.
-See [the deployer conventions](../../../rc_files/.deploy/README.md) for standalone use.
+See [the deployer conventions](../../../rc_files/.setup/README.md) for standalone use.
 No ignore rules are widened, and no runtime app directory is linked into Git.
 Terminal and PowerToys GUI edits write directly into rc_files. Restart an app if it does not observe a change through the link. PowerShell reads its source in the next shell. Rerun setup after changing tmux preferences to refresh the generated native translation.
 The local Codex `config.toml` is initialized from its tracked template only when

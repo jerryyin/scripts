@@ -80,7 +80,7 @@ setup_cursor_rules() {
         local rulename
         rulename="$(basename "$rule" .md).mdc"
 
-        python3 "$RC_ROOT/.deploy/deploy.py" link \
+        python3 "$RC_ROOT/.setup/deploy.py" link \
             --source "$rule" --target "$rules_dest/$rulename"
         echo "   Linked Cursor rule: $rulename"
         count=$((count + 1))

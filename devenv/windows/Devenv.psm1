@@ -112,9 +112,10 @@ try {
     Write-Host 'Developer Mode enabled.'
 }
 
-function Invoke-RcDeploy([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems) {
-    $deployer = Join-Path $RcRoot '.deploy/deploy.py'
-    if (!(Test-Path -LiteralPath $deployer)) { throw "Update rc_files: deploy.py is missing: $deployer" }
+function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems,
+    [ValidateSet('deploy','install')][string]$Tool = 'deploy') {
+    $entry = Join-Path $RcRoot ('.setup/' + $Tool + '.py')
+    if (!(Test-Path -LiteralPath $entry)) { throw "Update rc_files: setup tool is missing: $entry" }
     $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
     $prefix = @()
     if ($launcher) { $prefix = @('-3') }
@@ -122,10 +123,10 @@ function Invoke-RcDeploy([string]$RcRoot, [string[]]$Arguments, [switch]$Capture
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& $launcher.Source @prefix $deployer @Arguments 2>&1)
+        $output = @(& $launcher.Source @prefix $entry @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previousPreference }
-    if ($code -ne 0 -and !($AllowProblems -and $code -eq 1 -and $output.Count)) { throw "rc_files deployment failed (exit $code): $($output -join "`n")" }
+    if ($code -ne 0 -and !($AllowProblems -and $code -eq 1 -and $output.Count)) { throw "rc_files $Tool failed (exit $code): $($output -join "`n")" }
     if ($Capture) { return $output -join "`n" }
     $output | Out-Host
 }
@@ -136,13 +137,15 @@ function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
 }
 
 function Get-DeploymentArguments([string]$Action, [string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
-    return @($Action, '--repo', $RcRoot, '--home', $UserRoot,
+    $arguments = @('--repo', $RcRoot, '--home', $UserRoot,
         '--root', "DOCUMENTS=$DocumentsPath", '--root', ('LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState=' + (Split-Path $TerminalPath -Parent)))
+    if ($Action) { return @($Action) + $arguments }
+    return $arguments
 }
 
 function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
     $arguments = @(Get-DeploymentArguments 'check' $UserRoot $RcRoot $DocumentsPath $TerminalPath) + @('--json')
-    $report = ConvertFrom-Json (Invoke-RcDeploy $RcRoot $arguments -Capture -AllowProblems)
+    $report = ConvertFrom-Json (Invoke-RcSetup $RcRoot $arguments -Capture -AllowProblems)
     $report.problems
     foreach ($entry in @(
         @{Path=(Join-Path $UserRoot '.vim/machine-paths.json'); Fields=@('gitBash','pythonRoot','pythonDll','vimrc')},
@@ -399,14 +402,14 @@ function Install-PsmuxPlugins([string]$TmuxPath, [string]$UserRoot, [string]$Sta
 }
 
 function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
-    # Reuse portable settings directly from the existing Linux configuration.
+    # Reuse portable settings directly from the shared tmux configuration.
     # Shell snippets, TPM and zsh startup commands belong to their OS adapter.
     $lines = New-Object Collections.ArrayList
     [void]$lines.Add('# Generated from rc_files/tmux/.tmux.conf; native PowerShell panes.')
     if (!$TmuxRoot) { $TmuxRoot = Split-Path $TmuxPath -Parent }
     $sections = @{}
     $section = ''
-    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.tmux/psmux-compat.conf'))) {
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.windows/.tmux/psmux-compat.conf'))) {
         if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
         elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
     }
@@ -428,7 +431,7 @@ function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
     foreach ($name in $names) {
         if ($sections.ContainsKey($name)) {
             foreach ($line in $sections[$name]) {
-                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $TmuxRoot '.tmux/mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
+                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $TmuxRoot '.windows/.tmux/mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
             }
         }
     }
@@ -442,8 +445,8 @@ function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) 
 
 function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [string]$BackupRoot, [string]$PythonRoot = '') {
     if (!(Test-Path -LiteralPath (Join-Path $RcRoot 'vim/.vimrc'))) { throw 'Shared vim/.vimrc is missing from rc_files' }
-    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
-        if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required shared configuration is missing: $relative" }
+    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
+        if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required configuration is missing: $relative" }
     }
     $pythonDll = ''
     if ($PythonRoot) {

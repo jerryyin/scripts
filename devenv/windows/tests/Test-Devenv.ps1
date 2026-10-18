@@ -140,7 +140,7 @@ try {
     Assert (Test-Path -LiteralPath (Join-Path $empty '.git')) 'An explicitly created empty directory can receive a Git checkout'
 
     $vimRc = Join-Path $testRoot 'shared-vim-rc'
-    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vimrc', 'vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
+    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vimrc', 'vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''

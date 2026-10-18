@@ -177,8 +177,8 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
-if (!(Test-Path -LiteralPath (Join-Path $RcPath '.deploy/deploy.py'))) { throw 'Update rc_files: .deploy/deploy.py is required.' }
-Invoke-RcDeploy $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
+if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/deploy.py'))) { throw 'Update rc_files: .setup/deploy.py is required.' }
+Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
@@ -190,8 +190,8 @@ $pwshExe = (Get-Command pwsh.exe).Source
 if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
 if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
 
-$deployment = @(Get-DeploymentArguments 'migrate' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--backup', $backupRoot)
-Invoke-RcDeploy $RcPath $deployment
+$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot)
+Invoke-RcSetup $RcPath $deployment -Tool install
 $fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
 Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot

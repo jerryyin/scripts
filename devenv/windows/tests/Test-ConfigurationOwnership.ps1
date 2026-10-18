@@ -65,8 +65,8 @@ try {
     Invoke-Native $psmux @('-L', $socket, '-f', $entry, 'new-session', '-d', '-s', 'ownership', '--', 'powershell.exe', '-NoProfile')
     $keys = Invoke-Native $psmux @('-L', $socket, 'list-keys') -Capture
     Assert ($keys.Contains('h select-pane -L') -and $keys.Contains('l select-pane -R')) 'Real psmux loads familiar bindings through the source loader'
-    Assert ($keys.Contains('/tmux/.tmux/mux.ps1') -and !$keys.Contains('/devenv/windows/')) 'Runtime bindings use rc_files without importing installation scripts'
-    $preferences = Join-Path $candidate 'tmux/.tmux/psmux-compat.conf'
+    Assert ($keys.Contains('/tmux/.windows/.tmux/mux.ps1') -and !$keys.Contains('/devenv/windows/')) 'Runtime bindings use rc_files without importing installation scripts'
+    $preferences = Join-Path $candidate 'tmux/.windows/.tmux/psmux-compat.conf'
     $updated = [IO.File]::ReadAllText($preferences).Replace('bind r source-file ~/.psmux.conf', "bind r source-file ~/.psmux.conf`nbind-key F9 display-message from-rc-files")
     Save-Text $preferences $updated ''
     Invoke-TestLink (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
@@ -74,7 +74,7 @@ try {
     Invoke-Native $psmux @('-L', $socket, 'source-file', $entry)
     $keys = Invoke-Native $psmux @('-L', $socket, 'list-keys') -Capture
     Assert ($keys.Contains('from-rc-files')) 'Changing rc_files preferences is reflected when setup renders and psmux reloads'
-    foreach ($file in @('vim/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.sh', 'vim/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
+    foreach ($file in @('vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         Save-Text (Join-Path $candidate $file) 'fixture' ''
     }
     Save-Text (Join-Path $candidate 'vim/.vimrc') 'let g:tracked_entry_loaded = 1' ''
@@ -128,23 +128,23 @@ try {
     $env:GIT_CONFIG_GLOBAL = Join-Path $userRoot '.gitconfig'
     Save-Text $env:GIT_CONFIG_GLOBAL "[user]`nname = old name`n" ''
     $rejected = $false
-    try { Invoke-RcDeploy $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups) } catch { $rejected = $_.Exception.Message.Contains('Configuration conflict') }
+    try { Invoke-RcSetup $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups) } catch { $rejected = $_.Exception.Message.Contains('Configuration conflict') }
     Assert $rejected 'Git deployment preserves a differing local configuration for review'
     Invoke-TestLink $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig') $backups -ReplaceExisting
-    Invoke-RcDeploy $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups)
+    Invoke-RcSetup $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups)
     Assert (Test-InstalledLink $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig')) 'Windows global Git configuration links to shared preferences'
     Assert ((Invoke-Native git @('config','--global','--get','alias.cmt') -Capture) -ceq 'commit --signoff') 'Windows inherits the Linux Git aliases'
     Assert (Test-InstalledLink (Join-Path $userRoot '.config/git/platform.conf') (Join-Path $candidate 'git/.windows/.config/git/platform.conf')) 'Windows Git helper choices are linked to tracked platform settings'
     Invoke-Native git @('config','--global','alias.windows-link-proof','status')
     Assert ([IO.File]::ReadAllText((Join-Path $candidate 'git/.gitconfig')).Contains('windows-link-proof')) 'git config --global edits the tracked source through its symlink'
     Assert (Test-InstalledLink $env:GIT_CONFIG_GLOBAL (Join-Path $candidate 'git/.gitconfig')) 'Git preserves its configuration symlink when saving'
-    Invoke-RcDeploy $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups)
+    Invoke-RcSetup $candidate @('apply', '--package', 'git', '--home', $userRoot, '--backup', $backups)
     Assert (Test-InstalledLink (Join-Path $userRoot '.gitignore') (Join-Path $candidate 'git/.gitignore')) 'Windows global ignore rules link directly to the shared source'
     $healthHome = Join-Path $fixture 'health home'
     $env:USERPROFILE=$healthHome; $env:HOME=$healthHome; $env:LOCALAPPDATA=Join-Path $healthHome 'AppData/Local'
     $healthDocuments = Join-Path $healthHome 'Documents'
     $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
-    Invoke-RcDeploy $RcRoot @(Get-DeploymentArguments 'apply' $healthHome $RcRoot $healthDocuments $healthTerminal)
+    Invoke-RcSetup $RcRoot @(Get-DeploymentArguments 'apply' $healthHome $RcRoot $healthDocuments $healthTerminal)
     Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') $nativeState ''
     Save-Json (Join-Path $healthHome '.vim/machine-paths.json') $nativeVimPaths ''
     Set-NativeCodex $healthHome $RcRoot ''

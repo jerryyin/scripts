@@ -63,7 +63,7 @@ add_ppa_if_available ppa:neovim-ppa/stable
 
 wait_for_dpkg_lock
 # Install misc pkgs (For macos: the_silver_searcher)
-# gcc + python3-dev: LeaderF's vim-plug `do` hook (run by rc_files/install.sh)
+# gcc + python3-dev: LeaderF's vim-plug `do` hook (run by rc_files/install.py)
 # compiles its fuzzyMatch C extension; without them it silently falls back to
 # the slow pure-Python matcher.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
@@ -80,15 +80,15 @@ fi
 # Everything Node-related (NodeSource repo setup, version guard, the
 # apt-fetch-error shielding workaround, and the final version verification)
 # lives in node.sh so it can be reasoned about/tested on its own. Must run
-# before rc_files/install.sh below: its coc.nvim extensions step checks
+# before rc_files/install.py below: its coc.nvim extensions step checks
 # `command -v npm` and silently skips (soft warning, not a failure) if node
 # isn't installed yet.
 bash "$SCRIPT_DIR/node.sh"
 
-# install.sh, claude.sh, and codex.sh each self-sufficiently source
+# The Vim setup script, claude.sh, and codex.sh each self-sufficiently source
 # ~/.config/node/ca-cert.sh (Node's corporate-TLS-proxy CA workaround)
 # right before they run npm, so nothing needs to be pre-sourced here.
-bash "$HOME/rc_files/install.sh"
+python3 "$HOME/rc_files/install.py"
 
 # Clone scripts
 if [ ! -d "$HOME/scripts" ]; then

@@ -37,10 +37,10 @@ function Invoke-TestLink([string]$Path, [string]$Source, [string]$BackupRoot, [s
     $arguments = @('link', '--source', $Source, '--target', $Path)
     if ($BackupRoot) { $arguments += @('--backup', $BackupRoot) }
     if ($ReplaceExisting) { $arguments += '--replace-existing' }
-    Invoke-RcDeploy $script:TestRcRoot $arguments
+    Invoke-RcSetup $script:TestRcRoot $arguments
 }
 
 function Test-InstalledLink([string]$Path, [string]$Source) {
-    $report = ConvertFrom-Json (Invoke-RcDeploy $script:TestRcRoot @('check', '--source', $Source, '--target', $Path, '--json') -Capture -AllowProblems)
+    $report = ConvertFrom-Json (Invoke-RcSetup $script:TestRcRoot @('check', '--source', $Source, '--target', $Path, '--json') -Capture -AllowProblems)
     return @($report.problems).Count -eq 0
 }
