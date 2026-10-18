@@ -86,6 +86,8 @@ bash "$SCRIPT_DIR/node.sh"
 # Python setup uses the system CA bundle for npm. CLI installers source
 # ~/.config/node/ca-cert.sh themselves when they need it.
 python3 "$HOME/rc_files/.setup"
+. "$SCRIPT_DIR/../lib/login_shell.sh"
+configure_login_shell
 
 # Clone scripts
 if [ ! -d "$HOME/scripts" ]; then

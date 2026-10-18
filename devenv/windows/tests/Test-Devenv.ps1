@@ -139,17 +139,11 @@ try {
     Ensure-Checkout $empty $source
     Assert (Test-Path -LiteralPath (Join-Path $empty '.git')) 'An explicitly created empty directory can receive a Git checkout'
 
-    $vimRc = Join-Path $testRoot 'shared-vim-rc'
-    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.vimrc', 'vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) { Save-Text (Join-Path $vimRc $relative) 'fixture' '' }
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
-    $python = Join-Path $testRoot 'python-runtime'
-    Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''
-    Invoke-TestLink (Join-Path $vimUser '_vimrc') (Join-Path $vimRc 'vim/.windows/_vimrc') ''
-    Invoke-RcSetup $RcRoot @('vim', '--repo', $vimRc, '--home', $vimUser, '--git-bash', 'C:/Program Files/Git/bin/bash.exe', '--python-root', $python, '--configure-only')
-    $loader = [IO.File]::ReadAllText((Join-Path $vimUser '_vimrc'))
-    Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/.windows/_vimrc'))) 'Native Vim entry is deployed from rc_files'
-    Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/config'))) 'Windows setup does not copy a second Vim configuration tree'
-    Assert ((Read-Json (Join-Path $vimUser '.vim/machine-paths.json')).pythonDll.EndsWith('python399.dll')) 'Native Python DLL is discovered without a fixed version in Vim configuration'
+    Invoke-RcSetup $RcRoot @('apply', '--package', 'vim', '--home', $vimUser)
+    Assert (Test-InstalledLink (Join-Path $vimUser '_vimrc') (Join-Path $RcRoot 'vim/.vimrc')) 'Native Vim entry links directly to the shared vimrc'
+    Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/machine-paths.json'))) 'Vim configuration requires no generated executable-path file'
+    Assert (Test-InstalledLink (Join-Path $vimUser '.vim/config/plugins.vim') (Join-Path $RcRoot 'vim/.vim/config/plugins.vim')) 'Vim plugin declarations link to their shared source'
     Assert ($environment.packages.id -contains 'LLVM.clangd' -and $environment.packages.id -contains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap installs clangd, GitHub CLI and 7-Zip without Ctags'
 
     $module = Get-Module Devenv

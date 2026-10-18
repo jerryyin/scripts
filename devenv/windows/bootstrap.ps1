@@ -16,7 +16,6 @@ param(
     [string]$SshSource,
     [string]$TerminalPath,
     [string]$DocumentsPath,
-    [string]$PythonRoot,
     [string]$EnvironmentPath,
     [switch]$Update,
     [switch]$SkipPackages,
@@ -181,33 +180,25 @@ if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
-$gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
-$gitBash = Join-Path $gitRoot 'bin/bash.exe'
-if (!(Test-Path -LiteralPath $gitBash)) { throw 'Git for Windows Bash could not be found; required by the existing Vim shell commands.' }
 $vimExe = Get-NativeVim
 $psmuxExe = (Get-Command psmux.exe).Source
-$pwshExe = (Get-Command pwsh.exe).Source
-if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys; print(sys.base_prefix)') -Capture }
-if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
-
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot)
 Invoke-RcSetup $RcPath $deployment
 $fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
 Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
-$vimArguments = @('vim', '--home', $env:USERPROFILE, '--backup', $backupRoot, '--vim-exe', $vimExe, '--git-bash', $gitBash, '--python-root', $PythonRoot)
-if ($SkipVimPlugins) { $vimArguments += '--configure-only' }
-if ($Update) { $vimArguments += '--update' }
-Invoke-RcSetup $RcPath $vimArguments
+if (!$SkipVimPlugins) {
+    $vimArguments = @('vim', '--home', $env:USERPROFILE, '--vim-exe', $vimExe)
+    if ($Update) { $vimArguments += '--update' }
+    Invoke-RcSetup $RcPath $vimArguments
+}
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
-$muxArguments = @('mux', '--home', $env:USERPROFILE, '--backup', $backupRoot)
-if ($SkipAddons) { $muxArguments += '--render-only' }
-if ($Update) { $muxArguments += '--update' }
-Invoke-RcSetup $RcPath $muxArguments
-
 if (!$SkipAddons) {
+    $muxArguments = @('mux', '--home', $env:USERPROFILE)
+    if ($Update) { $muxArguments += '--update' }
+    Invoke-RcSetup $RcPath $muxArguments
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
     Install-CodexAdapter -Update:$Update
     # Copilot's device ID lives in Obsidian localStorage. Use its Auto-detect

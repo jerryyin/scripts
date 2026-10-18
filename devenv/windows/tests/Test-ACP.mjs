@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 const packagePath = process.argv[2];
 const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
 const target = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin['codex-acp'];
@@ -39,5 +39,11 @@ try {
   let timer;
   const exited = await Promise.race([closed.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 5000); })]);
   clearTimeout(timer);
-  if (!exited && child.pid) { execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); }
+  if (!exited && child.pid && child.exitCode === null && child.signalCode === null) {
+    const cleanup = spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
+    await new Promise(setImmediate);
+    if (cleanup.status && child.exitCode === null && child.signalCode === null) { throw Error(`ACP cleanup failed: ${cleanup.stderr}`); }
+  }
+  child.stdout.destroy();
+  child.stderr.destroy();
 }

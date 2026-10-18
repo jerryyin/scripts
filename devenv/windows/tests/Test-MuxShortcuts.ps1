@@ -5,17 +5,14 @@ Update-ProcessPath
 Add-Type -Path (Join-Path $PSScriptRoot 'ConPty.cs')
 $exe=(Get-Command psmux.exe).Source
 $shell=(Get-Command pwsh.exe).Source
-$rc=Join-Path $env:USERPROFILE 'rc_files/tmux/.tmux.conf'
+$rc=Join-Path $env:USERPROFILE 'rc_files'
 $original=@{HOME=$env:HOME; USERPROFILE=$env:USERPROFILE; LOCALAPPDATA=$env:LOCALAPPDATA; APPDATA=$env:APPDATA}
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('mux-keys-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 $socket='mux-keys-'+[guid]::NewGuid().ToString('N')
 [void][IO.Directory]::CreateDirectory((Join-Path $fixture '.psmux/plugins'))
 foreach($name in @('ppm','psmux-resurrect')) { Copy-Item -LiteralPath (Join-Path $env:USERPROFILE ('.psmux/plugins/'+$name)) -Destination (Join-Path $fixture '.psmux/plugins') -Recurse }
-$configuration=if($ConfigurationPath){[IO.File]::ReadAllText($ConfigurationPath)}else{ConvertFrom-Json (Invoke-RcSetup (Split-Path (Split-Path $rc -Parent) -Parent) @('mux','--print-config','--json') -Capture)}
 $start='Set-Location -LiteralPath '''+$fixture.Replace("'","''")+'''; Set-PSReadLineOption -EditMode Emacs; function prompt { [Console]::Write(([string][char]27)+"]9;9;"+[char]34+$PWD.Path+[char]34+[char]7); "fixture '+[char]0x279c+' " }'
 $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($start))
-$configuration += [char]10+'set -g default-shell "'+$shell.Replace('\','/')+' -NoProfile"'+[char]10
-Save-Text (Join-Path $fixture '.psmux.conf') $configuration ''
 $script:passed=0
 $script:differences=New-Object Collections.ArrayList
 function Difference($ok,[string]$message) { if(!$ok){ [void]$script:differences.Add($message); Write-Output "DIFFERENCE: $message" } }
@@ -38,8 +35,11 @@ $console=$null
 $priorClipboard=if($Clipboard){Get-Clipboard -Raw}else{$null}
 try {
     $env:HOME=$fixture; $env:USERPROFILE=$fixture; $env:LOCALAPPDATA=Join-Path $fixture 'AppData/Local'; $env:APPDATA=Join-Path $fixture 'AppData/Roaming'
-    Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') ([ordered]@{psmuxExe=$exe}) ''
-    $command='"'+$exe+'" -L '+$socket+' -f "'+(Join-Path $fixture '.psmux.conf')+'" new-session -s habits -c "'+$fixture+'" -- "'+$shell+'" -NoProfile -NoExit -EncodedCommand '+$encoded
+    Invoke-RcSetup $rc @('apply', '--package', 'tmux', '--home', $fixture)
+    $configuration = 'source-file "' + $(if ($ConfigurationPath) { $ConfigurationPath } else { Join-Path $fixture '.psmux.conf' }).Replace('\','/') + '"' + [char]10 + 'set -g default-shell "' + $shell.Replace('\','/') + ' -NoProfile"' + [char]10
+    $configurationFile = Join-Path $fixture 'test.conf'
+    Save-Text $configurationFile $configuration ''
+    $command='"'+$exe+'" -L '+$socket+' -f "'+$configurationFile+'" new-session -s habits -c "'+$fixture+'" -- "'+$shell+'" -NoProfile -NoExit -EncodedCommand '+$encoded
     $console=[DevenvConsole]::new($command,$fixture)
     Assert (Until { try { (Mux @('list-sessions')).Contains('habits:') } catch { $false } } 20) 'isolated native session starts'
     Start-Sleep -Seconds 1

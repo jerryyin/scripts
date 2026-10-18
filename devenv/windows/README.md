@@ -111,7 +111,7 @@ rerun `priv.ps1 -Apply`. GitHub and Codex token refresh stays with their tools.
 | Vim plugins / CoC | One shared plugin/extension list in `rc_files/vim/.vim/config/plugins.vim`; Git for Windows Bash runs existing POSIX helpers |
 | Vim runtime | Native Python for LeaderF, Node >=22 for CoC, native ripgrep for search, native clangd for C/C++ semantic highlighting |
 | Multiplexer | Native `psmux`, exposed as `tmux` in PowerShell; uses Windows ConPTY and native PowerShell panes |
-| tmux keys | Generated from `rc_files/tmux/.tmux.conf`: backtick prefix, `v` / `S` / `s` splits, vi modes, `r` reload, `b` command-copy, F10 nested-session toggle, portable status settings |
+| tmux keys | Read directly from `rc_files/tmux/.config/tmux/common.conf`: backtick prefix, `v` / `S` / `s` splits, vi modes, `r` reload, `b` command-copy, F10 nested-session toggle, shared status settings |
 | PowerShell | `vim`/`vi`, `tmux`, `dev`, `ll`, `la`, history search and word navigation; a Gruvbox prompt |
 | Terminal | Direct link to the complete tracked settings file; GUI edits change rc_files |
 | Everyday Windows tools | PowerToys, KDE Connect, Rufus, WizTree, VLC, GitHub CLI and 7-Zip, installed through WinGet without release pins |
@@ -263,15 +263,15 @@ engine, PSReadLine or security-check costs.
 * `rc_files/powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json` and `Awake/settings.json`: the actual
   PowerToys settings files, linked individually from AppData. PowerToys may
   update its schema/version fields when it saves these files.
-* `rc_files/vim/.windows/_vimrc` and `rc_files/tmux/.windows/.psmux.conf`: static native entry
-  files. Their installed home paths are file symlinks to these sources.
-* `rc_files/tmux/.windows/.tmux/psmux-compat.conf` and `mux.ps1`: Windows equivalents of
-  the shared tmux plugin bindings and their runtime clipboard helper.
+* `rc_files/vim/.windows/_vimrc`: a repository symlink to the shared `.vimrc`.
+  Both installed Vim entries link directly to that shared source.
+* `rc_files/tmux/.config/tmux/common.conf`: shared tmux/psmux shortcuts and style.
+  `.linux/.tmux.conf` and `.windows/.psmux.conf` source it directly and declare
+  native plugins. `.windows/.tmux/mux.ps1` is the native clipboard runtime helper.
 * `%LOCALAPPDATA%\PersonalDevenv`: discovered machine paths (`state.json`),
   downloaded plugin source and backups.
-* `%USERPROFILE%\.vim/machine-paths.json`: discovered Vim executable paths.
-  `%USERPROFILE%\.psmux/generated.conf`: translated native tmux settings.
-  `.vim`, `_viminfo` and swap files are editor runtime state, not source config.
+* Vim discovers Python and Git natively; setup generates no Vim path file or
+  tmux translation. `.vim`, `_viminfo` and swap files are editor runtime state.
 * Both PowerShell 5 and PowerShell 7 all-host profiles link to the tracked
   PowerShell profile. Conflicting local content stops setup so it can be moved into the tracked source before linking.
 * Agent instructions and skills come from tracked `rc_files/claude/.claude`
@@ -408,7 +408,7 @@ Windows home, including CoC extensions. Use installed tools or portable builds:
 
 .\tests\Test-NativeTools.ps1 -VimExe C:\tools\vim\vim.exe `
   -PsmuxExe C:\tools\psmux\psmux.exe -RcRoot C:\dev\rc_files `
-  -PythonRoot C:\Python314 -NodeDirectory C:\tools\node -InstallPlugins
+  -NodeDirectory C:\tools\node -InstallPlugins
 ```
 
 Add `-ClangdExe C:\tools\clangd\bin\clangd.exe` to validate native clangd
@@ -449,7 +449,7 @@ inventory. All writable app, Git and npm locations are redirected to the fixture
 This is a real application/configuration deployment test. Host WinGet package
 installation, WSL, font registration and credentials are explicitly skipped;
 an empty folder does not isolate Windows installers, the registry or services.
-`-SkipPackages`, `-PythonRoot`, `-DocumentsPath` and `-EnvironmentPath` are also
+`-SkipPackages`, `-DocumentsPath` and `-EnvironmentPath` are also
 available on bootstrap for this purpose. Authentication/SSH permission tests
 run separately with fake credentials. A disposable clean Windows VM remains
 necessary to validate first-time machine installers, UAC, reboot, actual sign-in,

@@ -15,7 +15,6 @@ $state = Join-Path $local 'PersonalDevenv'
 $socket = 'config-owner-' + [guid]::NewGuid().ToString('N')
 $prior = @{USERPROFILE=$env:USERPROFILE; HOME=$env:HOME; LOCALAPPDATA=$env:LOCALAPPDATA; GIT_CONFIG_GLOBAL=$env:GIT_CONFIG_GLOBAL}
 $nativeState = Read-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json')
-$nativeVimPaths = Read-Json (Join-Path $env:USERPROFILE '.vim/machine-paths.json')
 $script:passed = 0
 $console = $null
 function Assert($Ok, [string]$Message) {
@@ -30,14 +29,12 @@ try {
     $profile = Join-Path $userRoot 'Documents/PowerShell/profile.ps1'
     $source = Join-Path $candidate 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1'
     Invoke-TestLink $profile $source ''
-    Invoke-TestLink (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
-    Invoke-RcSetup $candidate @('mux', '--home', $userRoot, '--render-only')
+    Invoke-RcSetup $candidate @('apply', '--package', 'tmux', '--package', 'vim', '--home', $userRoot)
     $entry = Join-Path $userRoot '.psmux.conf'
-    Assert (([IO.File]::ReadAllLines($entry)).Count -eq 2) 'Home psmux entry contains only a comment and source loader'
+    Assert ([IO.File]::ReadAllText($entry).Contains('source-file ~/.config/tmux/common.conf')) 'Native psmux entry loads the shared configuration directly'
     Assert ((Get-FileHash -LiteralPath $entry).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'tmux/.windows/.psmux.conf')).Hash) 'Home psmux entry comes verbatim from rc_files'
     Assert ((Get-Item -LiteralPath $entry).LinkType -eq 'SymbolicLink') 'Home psmux entry is a live link, never a copy'
-    Invoke-TestLink (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/.windows/_vimrc') ''
-    Assert ((Get-FileHash -LiteralPath (Join-Path $userRoot '_vimrc')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'vim/.windows/_vimrc')).Hash) 'Home Vim entry comes verbatim from rc_files'
+    Assert ((Get-FileHash -LiteralPath (Join-Path $userRoot '_vimrc')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $candidate 'vim/.vimrc')).Hash) 'Home Vim entry comes verbatim from rc_files'
     Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink') 'Home Vim entry is a live link, never a copy'
     Assert (!(Test-Path -LiteralPath (Join-Path $state 'profile.ps1'))) 'No copied PowerShell profile in AppData'
     . $profile
@@ -53,48 +50,39 @@ try {
     Assert ((Get-Item -LiteralPath $cleanProfile).LinkType -eq 'SymbolicLink') 'A managed-only PowerShell profile links directly to rc_files'
     [IO.File]::AppendAllText($cleanProfile, "`n# edited through installed profile`n")
     Assert ([IO.File]::ReadAllText($source).Contains('# edited through installed profile')) 'Edits through an installed PowerShell profile reach rc_files'
-    $paths = @($profile, $entry, (Join-Path $userRoot '.psmux/generated.conf'), (Join-Path $userRoot '_vimrc'))
+    $paths = @($profile, $entry, (Join-Path $userRoot '.config/tmux/common.conf'), (Join-Path $userRoot '_vimrc'))
     $times = @($paths | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc.Ticks })
     Invoke-TestLink $profile $source ''
     Invoke-TestLink (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
-    Invoke-RcSetup $candidate @('mux', '--home', $userRoot, '--render-only')
-    Invoke-TestLink (Join-Path $userRoot '_vimrc') (Join-Path $candidate 'vim/.windows/_vimrc') ''
+    Invoke-RcSetup $candidate @('apply', '--package', 'tmux', '--package', 'vim', '--home', $userRoot)
     for ($i=0; $i -lt $paths.Count; $i++) {
         Assert ((Get-Item -LiteralPath $paths[$i]).LastWriteTimeUtc.Ticks -eq $times[$i]) ('Rerun leaves timestamp unchanged: ' + (Split-Path $paths[$i] -Leaf))
     }
     Invoke-Native $psmux @('-L', $socket, '-f', $entry, 'new-session', '-d', '-s', 'ownership', '--', 'powershell.exe', '-NoProfile')
     $keys = Invoke-Native $psmux @('-L', $socket, 'list-keys') -Capture
     Assert ($keys.Contains('h select-pane -L') -and $keys.Contains('l select-pane -R')) 'Real psmux loads familiar bindings through the source loader'
-    Assert ($keys.Contains('/tmux/.windows/.tmux/mux.ps1') -and !$keys.Contains('/devenv/windows/')) 'Runtime bindings use rc_files without importing installation scripts'
-    $preferences = Join-Path $candidate 'tmux/.windows/.tmux/psmux-compat.conf'
-    $updated = [IO.File]::ReadAllText($preferences).Replace('bind r source-file ~/.psmux.conf', "bind r source-file ~/.psmux.conf`nbind-key F9 display-message from-rc-files")
-    Save-Text $preferences $updated ''
-    Invoke-TestLink (Join-Path $userRoot '.psmux.conf') (Join-Path $candidate 'tmux/.windows/.psmux.conf') ''
-    Invoke-RcSetup $candidate @('mux', '--home', $userRoot, '--render-only')
+    Assert ($keys.Contains('~/.tmux/mux.ps1') -and !$keys.Contains('/devenv/windows/')) 'Runtime bindings use rc_files without importing installation scripts'
+    $preferences = Join-Path $userRoot '.config/tmux/common.conf'
+    [IO.File]::AppendAllText($preferences, "`nset-option -g prefix C-a`nset -g base-index 1`nbind-key F9 display-message from-rc-files`n")
     Invoke-Native $psmux @('-L', $socket, 'source-file', $entry)
     $keys = Invoke-Native $psmux @('-L', $socket, 'list-keys') -Capture
-    Assert ($keys.Contains('from-rc-files')) 'Changing rc_files preferences is reflected when setup renders and psmux reloads'
+    Assert ($keys.Contains('from-rc-files')) 'Edits through the installed shared configuration take effect on reload without setup'
+    Assert ((Invoke-Native $psmux @('-L', $socket, 'show-options', '-g', 'prefix') -Capture).Contains('C-a')) 'Shared set-option preferences reach native psmux without a parser'
+    Assert ((Invoke-Native $psmux @('-L', $socket, 'show-options', '-g', 'base-index') -Capture).Contains('1')) 'Previously filtered shared options reach native psmux directly'
     foreach ($file in @('vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         Save-Text (Join-Path $candidate $file) 'fixture' ''
     }
     Save-Text (Join-Path $candidate 'vim/.vimrc') 'let g:tracked_entry_loaded = 1' ''
-    $python = Join-Path $fixture "Someone's Python"
-    Save-Text (Join-Path $python 'python399.dll') 'fixture' ''
-    Invoke-RcSetup $candidate @('vim', '--home', $userRoot, '--git-bash', 'C:/Native Bash/bash.exe', '--python-root', $python, '--configure-only')
-    $dataPath = Join-Path $userRoot '.vim/machine-paths.json'
-    Assert ((Read-Json $dataPath).pythonDll.EndsWith('python399.dll')) 'Discovered Vim paths are JSON data outside rc_files'
     $reportPath = (Join-Path $fixture 'vim-entry.json').Replace('\','/').Replace("'","''")
     $probe = Join-Path $fixture 'check-entry.vim'
-    Save-Text $probe ("execute 'edit ' . fnameescape(expand('~/_vimrc'))`ncall append(line('$'), '`" saved from native Vim')`nwrite`ncall writefile([json_encode({'loaded': g:tracked_entry_loaded, 'bash': g:personal_git_bash, 'python': g:personal_python_dll})], '$reportPath')`nqall!`n") ''
+    Save-Text $probe ("execute 'edit ' . fnameescape(expand('~/_vimrc'))`ncall append(line('$'), '`" saved from native Vim')`nwrite`ncall writefile([json_encode({'loaded': g:tracked_entry_loaded})], '$reportPath')`nqall!`n") ''
     $console = [DevenvConsole]::new(('"' + $vim + '" -n -i NONE -u "' + (Join-Path $userRoot '_vimrc') + '" -S "' + $probe + '"'), $userRoot)
     $deadline = (Get-Date).AddSeconds(20)
     while (!(Test-Path -LiteralPath $reportPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
     $report = Read-Json $reportPath
-    Assert ($report.loaded -eq 1 -and $report.bash -ceq 'C:/Native Bash/bash.exe' -and $report.python.EndsWith('python399.dll')) 'Real Vim loads its tracked entry, machine data and shared vimrc with spaces and apostrophes in paths'
-    Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink' -and [IO.File]::ReadAllText((Join-Path $candidate 'vim/.windows/_vimrc')).Contains('saved from native Vim')) 'Saving the installed entry in real Vim preserves its link and edits the Git source'
-    $time = (Get-Item -LiteralPath $dataPath).LastWriteTimeUtc.Ticks
-    Invoke-RcSetup $candidate @('vim', '--home', $userRoot, '--git-bash', 'C:/Native Bash/bash.exe', '--python-root', $python, '--configure-only')
-    Assert ((Get-Item -LiteralPath $dataPath).LastWriteTimeUtc.Ticks -eq $time) 'Rerunning Vim setup does not rewrite machine paths'
+    Assert ($report.loaded -eq 1) 'Real Vim loads the shared vimrc directly with spaces and apostrophes in paths'
+    Assert ((Get-Item -LiteralPath (Join-Path $userRoot '_vimrc')).LinkType -eq 'SymbolicLink' -and [IO.File]::ReadAllText((Join-Path $candidate 'vim/.vimrc')).Contains('saved from native Vim')) 'Saving the installed vimrc in real Vim preserves its link and edits the shared Git source'
+    Assert (!(Test-Path -LiteralPath (Join-Path $userRoot '.vim/machine-paths.json')) -and !(Test-Path -LiteralPath (Join-Path $userRoot '.psmux/generated.conf'))) 'Configuration deployment generates no Vim paths or tmux translation'
     $instructions = Join-Path $candidate 'claude/.claude/CLAUDE.md'
     Save-Text $instructions 'tracked instructions v1' ''
     Invoke-TestLink (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
@@ -146,10 +134,8 @@ try {
     $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
     Invoke-RcSetup $RcRoot @(Get-DeploymentArguments 'apply' $healthHome $RcRoot $healthDocuments $healthTerminal)
     Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') $nativeState ''
-    Save-Json (Join-Path $healthHome '.vim/machine-paths.json') $nativeVimPaths ''
     Set-NativeCodex $healthHome $RcRoot ''
-    Invoke-RcSetup $RcRoot @('mux', '--home', $healthHome, '--render-only')
-    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links, machine paths, skills and generated settings'
+    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links, executable state and skills'
     Save-Text $healthTerminal ([IO.File]::ReadAllText($healthTerminal)) ''
     # Save-Text skips identical content, so replace only this disposable link.
     $terminalCopy=[IO.File]::ReadAllText($healthTerminal)
@@ -157,8 +143,8 @@ try {
     [IO.File]::WriteAllText($healthTerminal,$terminalCopy)
     $problems=@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal)
     Assert ($problems.Count -eq 1 -and $problems[0].Contains($healthTerminal)) 'Readiness rejects a detached copy even when its content matches'
-    Remove-Item -LiteralPath (Join-Path $healthHome '.vim/machine-paths.json')
-    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal | Where-Object { $_ -like '*machine-paths.json*' }).Count -gt 0) 'Readiness reports missing executable-path data'
+    Remove-Item -LiteralPath (Join-Path $healthHome '.config/tmux/common.conf')
+    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal | Where-Object { $_ -like '*common.conf*' }).Count -gt 0) 'Readiness reports a missing shared configuration link'
     Assert (!(Get-ChildItem -LiteralPath $userRoot -Filter '*.link-*' -Recurse -Force)) 'File deployment leaves no temporary links or copies behind'
     Write-Output "$script:passed configuration ownership checks passed. Fixture: $fixture"
 } finally {

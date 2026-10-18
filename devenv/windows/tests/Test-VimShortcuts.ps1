@@ -22,19 +22,7 @@ try {
     $env:VIM_AUDIT_SCRIPTS = Split-Path (Split-Path $root -Parent) -Parent
     $env:VIM_AUDIT_RC = $RcRoot
     $vim = Get-NativeVim
-    $loader = Join-Path $fixture '_vimrc'
-    $machinePaths = Read-Json (Join-Path $env:USERPROFILE '.vim/machine-paths.json')
-    $machineSettings = @(
-        "let g:personal_git_bash = '" + $machinePaths.gitBash.Replace("'","''") + "'"
-        "let g:personal_python_root = '" + $machinePaths.pythonRoot.Replace("'","''") + "'"
-        "let g:personal_python_dll = '" + $machinePaths.pythonDll.Replace("'","''") + "'"
-    )
-    $sharedVimrc = (Join-Path $RcRoot 'vim/.vimrc').Replace('\','/')
-    if ($machinePaths.vimrc -ieq $sharedVimrc) { $loader = Join-Path $env:USERPROFILE '_vimrc' }
-    else {
-        $source = "execute 'source ' . fnameescape('" + $sharedVimrc.Replace("'","''") + "')"
-        Save-Text $loader (($machineSettings + $source) -join "`n") ''
-    }
+    $loader = Join-Path $RcRoot 'vim/.vimrc'
     $command = '"' + $vim + '" -n -i NONE -u "' + $loader + '" -V1"' + (Join-Path $fixture 'runtime.log') + '" -S "' + (Join-Path $PSScriptRoot 'vim-shortcuts.vim') + '" "' + (Join-Path $project 'first.txt') + '"'
     $console = [DevenvConsole]::new($command, $project)
     $deadline = (Get-Date).AddSeconds(45)

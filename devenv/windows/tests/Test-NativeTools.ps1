@@ -2,8 +2,6 @@ param(
     [Parameter(Mandatory=$true)][string]$VimExe,
     [Parameter(Mandatory=$true)][string]$PsmuxExe,
     [Parameter(Mandatory=$true)][string]$RcRoot,
-    [string]$GitBash = 'C:/Program Files/Git/bin/bash.exe',
-    [string]$PythonRoot = '',
     [string]$NodeDirectory = '',
     [string]$ClangdExe = '',
     [string]$FixturePath,
@@ -45,15 +43,11 @@ try {
     [void][IO.Directory]::CreateDirectory($managed)
     if (!$UseExistingDeployment) {
         Invoke-TestLink (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
-        Invoke-TestLink (Join-Path $fixture '_vimrc') (Join-Path $RcRoot 'vim/.windows/_vimrc') ''
-        $vimArguments = @('vim', '--home', $fixture, '--git-bash', $GitBash, '--backup', (Join-Path $fixture 'backups'), '--configure-only')
-        if ($PythonRoot) { $vimArguments += @('--python-root', $PythonRoot) }
-        Invoke-RcSetup $RcRoot $vimArguments
+        Invoke-RcSetup $RcRoot @('apply', '--package', 'vim', '--package', 'tmux', '--home', $fixture)
         Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
     $plugPath = Join-Path $fixture '.vim/autoload/plug.vim'
     [void][IO.Directory]::CreateDirectory((Split-Path $plugPath -Parent))
-    if (!$UseExistingDeployment) { Get-Download 'https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim' $plugPath }
     if ($InstallPlugins) {
         # Exercise the real installer under ConPTY, matching Windows Terminal.
         # Win32 Vim's color APIs require a console even for Ex-mode installs.
@@ -122,7 +116,7 @@ qall!
     Assert ($report.trueColor -eq 1) 'Native Vim enables true color without Linux terminal variables'
     Assert (![IO.File]::ReadAllText($runtimeLog).Contains('Error detected')) 'Interactive Vim starts in an unnamed buffer without a startup error'
     if (Test-Path -LiteralPath (Join-Path $fixture '.vim/plugged/gruvbox-material/colors/gruvbox-material.vim')) { Assert ($report.theme -ceq 'gruvbox-material') 'Native Vim actually loads the shared Gruvbox Material theme' }
-    if ($PythonRoot) { Assert ($report.python -eq 1) 'Native Python runtime loads inside Vim for LeaderF' }
+    Assert ($report.python -eq 1) 'Vim discovers the registered native Python runtime for LeaderF'
     Assert ($report.shellResult.Trim() -eq 'NATIVE_OK' -and $report.shell -match 'cmd.exe$') 'Windows plugin commands use native shell quoting'
     Assert ($report.prefixMap -like '*Grepper -tool rg*') 'Existing search shortcut uses native ripgrep'
     Assert ($report.pluginsDeclared -gt 20 -and !$report.leaderfHook) 'Shared plugins reused with Unix-only build hook adapted'
@@ -142,10 +136,6 @@ qall!
     }
 
     $config = Join-Path $fixture '.psmux.conf'
-    if (!$UseExistingDeployment) {
-        Invoke-TestLink $config (Join-Path $RcRoot 'tmux/.windows/.psmux.conf') ''
-        Invoke-RcSetup $RcRoot @('mux', '--home', $fixture, '--render-only')
-    }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine
     # provisioning installs PowerShell 7 and makes it the default pane shell.
     Invoke-Native $PsmuxExe @('-L', $socket, '-f', $config, 'new-session', '-d', '-s', 'work', '--', $ShellExe, '-NoLogo', '-NoProfile')

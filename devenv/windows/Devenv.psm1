@@ -147,7 +147,6 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
     $report = ConvertFrom-Json (Invoke-RcSetup $RcRoot $arguments -Capture -AllowProblems)
     $report.problems
     foreach ($entry in @(
-        @{Path=(Join-Path $UserRoot '.vim/machine-paths.json'); Fields=@('gitBash','pythonRoot','pythonDll','vimrc')},
         @{Path=(Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json'); Fields=@('vimExe','psmuxExe','rcRoot','notes')}
     )) {
         try {
@@ -156,15 +155,8 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
                 if (!$data.Contains($key) -or !$data[$key] -or !(Test-Path -LiteralPath $data[$key])) { "Missing or invalid $key in $($entry.Path)" }
             }
             if ($data.Contains('rcRoot') -and $data.rcRoot -ine $RcRoot) { "Configuration checkout differs from -RcPath: $($entry.Path)" }
-            if ($data.Contains('vimrc') -and [IO.Path]::GetFullPath($data.vimrc) -ine [IO.Path]::GetFullPath((Join-Path $RcRoot 'vim/.vimrc'))) { "Vim points at a different checkout: $($entry.Path)" }
         } catch { "Invalid configuration data: $($entry.Path)" }
     }
-    try {
-        $generated = Join-Path $UserRoot '.psmux/generated.conf'
-        if (!(Test-Path -LiteralPath $generated) -or [IO.File]::ReadAllText($generated) -cne (ConvertFrom-Json (Invoke-RcSetup $RcRoot @('mux', '--print-config', '--json', '--home', $UserRoot) -Capture))) {
-            'Native tmux configuration is missing or differs from rc_files; rerun setup to render it.'
-        }
-    } catch { 'Cannot validate native tmux configuration against rc_files.' }
 
 }
 
