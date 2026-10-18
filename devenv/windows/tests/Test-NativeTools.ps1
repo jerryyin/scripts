@@ -79,10 +79,20 @@ try {
     }
     $reportPath = (Join-Path $fixture 'vim-report.json').Replace('\', '/')
     $filePath = (Join-Path $fixture 'edited.txt').Replace('\', '/')
+    $pickerProject = (Join-Path $fixture 'picker project').Replace('\', '/')
+    Save-Text (Join-Path $pickerProject 'source file.cpp') 'fixture' ''
+    Save-Text (Join-Path $pickerProject 'build/generated.inc') 'fixture' ''
     $vimTest = @"
 call setline(1, ['native Windows editing works'])
 execute 'write! ' . fnameescape('$filePath')
-let report = {'clipboard': has('clipboard'), 'python': has('python3'), 'trueColor': &termguicolors, 'theme': get(g:, 'colors_name', ''), 'prefixMap': maparg('<leader>ss', 'n'), 'muxCopy': maparg('<leader>ty', 'v'), 'shellResult': system('echo NATIVE_OK'), 'shell': &shell, 'pluginsDeclared': len(g:plugs), 'leaderfHook': has_key(g:plugs.LeaderF, 'do'), 'polyglot': has_key(g:plugs, 'vim-polyglot'), 'ctags': has_key(g:plugs, 'vim-gutentags'), 'cocHome': !empty(globpath(&runtimepath, 'autoload/coc/util.vim')) ? coc#util#get_config_home() : g:coc_config_home, 'vista': g:vista_default_executive, 'clangd': executable('clangd'), 'scripts': execute('scriptnames')}
+let report = {'vimrc': resolve(`$MYVIMRC), 'clipboard': has('clipboard'), 'python': has('python3'), 'trueColor': &termguicolors, 'theme': get(g:, 'colors_name', ''), 'prefixMap': maparg('<leader>ss', 'n'), 'muxCopy': maparg('<leader>ty', 'v'), 'shellResult': system('echo NATIVE_OK'), 'shell': &shell, 'pluginsDeclared': len(g:plugs), 'leaderfHook': has_key(g:plugs.LeaderF, 'do'), 'polyglot': has_key(g:plugs, 'vim-polyglot'), 'ctags': has_key(g:plugs, 'vim-gutentags'), 'cocHome': !empty(globpath(&runtimepath, 'autoload/coc/util.vim')) ? coc#util#get_config_home() : g:coc_config_home, 'vista': g:vista_default_executive, 'clangd': executable('clangd'), 'scripts': execute('scriptnames')}
+call leaderf#versionCheck()
+let g:Lf_UseCache = 0
+let g:picker_project = '$pickerProject'
+python3 from leaderf.fileExpl import FileExplorer
+let report.leaderfFiles = py3eval("list(FileExplorer().getContent(arguments={'directory': [vim.eval('g:picker_project')]}))")
+execute 'cd ' . fnameescape(g:picker_project)
+let report.leaderfCurrentFiles = py3eval('list(FileExplorer().getContent())')
 call writefile([json_encode(report)], '$reportPath')
 qall!
 "@
@@ -93,7 +103,8 @@ qall!
     # can abort the shared vimrc when Win32 color APIs have no console.
     $runtimeLog = Join-Path $fixture 'vim-runtime.log'
     if (Test-Path -LiteralPath $runtimeLog) { Remove-Item -LiteralPath $runtimeLog }
-    Start-ConsoleVim 'vim-runtime' @('-n', ('-V1' + $runtimeLog), '-i', 'NONE', '-u', (Join-Path $fixture '_vimrc'), '-S', $vimScript)
+    Assert (!(Test-Path -LiteralPath (Join-Path $fixture '_vimrc'))) 'Native deployment has no redundant Windows vimrc alias'
+    Start-ConsoleVim 'vim-runtime' @('-n', ('-V1' + $runtimeLog), '-i', 'NONE', '-S', $vimScript)
     $deadline = (Get-Date).AddSeconds(90)
     $probeAt = Get-Date
     while (!(Test-Path -LiteralPath $reportPath) -and (Get-Date) -lt $deadline) {
@@ -111,12 +122,15 @@ qall!
     if (!(Test-Path -LiteralPath $reportPath)) { & $PsmuxExe -L $socket capture-pane -p -t vim-runtime | Out-Host }
     Assert (Test-Path -LiteralPath $reportPath) 'Native Vim sources the shared vimrc directly'
     $report = Read-Json $reportPath
+    $expectedVimrc = (Join-Path $RcRoot 'vim/.vimrc').Replace('\', '/').ToLowerInvariant()
+    Assert ($report.vimrc.Replace('\', '/').ToLowerInvariant() -ceq $expectedVimrc) 'Windows Vim automatically discovers the shared .vimrc without a -u override'
     Assert ([IO.File]::ReadAllText($filePath).Contains('native Windows editing works')) 'Native Vim edits and writes a Windows file'
     Assert ($report.clipboard -eq 1) 'Native Vim has Windows clipboard support'
     Assert ($report.trueColor -eq 1) 'Native Vim enables true color without Linux terminal variables'
     Assert (![IO.File]::ReadAllText($runtimeLog).Contains('Error detected')) 'Interactive Vim starts in an unnamed buffer without a startup error'
     if (Test-Path -LiteralPath (Join-Path $fixture '.vim/plugged/gruvbox-material/colors/gruvbox-material.vim')) { Assert ($report.theme -ceq 'gruvbox-material') 'Native Vim actually loads the shared Gruvbox Material theme' }
     Assert ($report.python -eq 1) 'Vim discovers the registered native Python runtime for LeaderF'
+    Assert (@($report.leaderfFiles).Count -eq 1 -and $report.leaderfFiles[0] -ceq 'source file.cpp' -and @($report.leaderfCurrentFiles).Count -eq 1 -and $report.leaderfCurrentFiles[0] -ceq 'source file.cpp') 'Real LeaderF lists explicit and current Windows folders through the shared Python helper'
     Assert ($report.shellResult.Trim() -eq 'NATIVE_OK' -and $report.shell -match 'cmd.exe$') 'Windows plugin commands use native shell quoting'
     Assert ($report.prefixMap -like '*Grepper -tool rg*') 'Existing search shortcut uses native ripgrep'
     Assert ($report.pluginsDeclared -gt 20 -and !$report.leaderfHook) 'Shared plugins reused with Unix-only build hook adapted'

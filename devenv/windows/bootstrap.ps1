@@ -80,7 +80,7 @@ if ($Check) {
         $version = Invoke-Native node @('--version') -Capture
         if ([version]$version.TrimStart('v') -lt [version]'22.19.0') { [void]$missing.Add('Node >=22.19'); Write-Output "OUTDATED Node $version (requires >=22.19)" }
     }
-    foreach ($path in @($TerminalPath, $managedProfile, (Join-Path $NotesPath '.git'), (Join-Path $RcPath 'vim/.vimrc'), (Join-Path $env:USERPROFILE '_vimrc'), (Join-Path $env:USERPROFILE '.psmux.conf'))) {
+    foreach ($path in @($TerminalPath, $managedProfile, (Join-Path $NotesPath '.git'), (Join-Path $RcPath 'vim/.vimrc'), (Join-Path $env:USERPROFILE '.vimrc'), (Join-Path $env:USERPROFILE '.psmux.conf'))) {
         if (Test-Path -LiteralPath $path) { Write-Output "OK $path" }
         else { [void]$missing.Add($path); Write-Output "MISSING $path" }
     }

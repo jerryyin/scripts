@@ -141,7 +141,8 @@ try {
 
     $vimUser = Join-Path $testRoot 'fresh-vim-home'
     Invoke-RcSetup $RcRoot @('apply', '--package', 'vim', '--home', $vimUser)
-    Assert (Test-InstalledLink (Join-Path $vimUser '_vimrc') (Join-Path $RcRoot 'vim/.vimrc')) 'Native Vim entry links directly to the shared vimrc'
+    Assert (Test-InstalledLink (Join-Path $vimUser '.vimrc') (Join-Path $RcRoot 'vim/.vimrc')) 'Native Vim entry links directly to the shared vimrc'
+    Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '_vimrc'))) 'Fresh Windows setup does not create a second vimrc entry'
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/machine-paths.json'))) 'Vim configuration requires no generated executable-path file'
     Assert (Test-InstalledLink (Join-Path $vimUser '.vim/config/plugins.vim') (Join-Path $RcRoot 'vim/.vim/config/plugins.vim')) 'Vim plugin declarations link to their shared source'
     Assert ($environment.packages.id -contains 'LLVM.clangd' -and $environment.packages.id -contains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap installs clangd, GitHub CLI and 7-Zip without Ctags'

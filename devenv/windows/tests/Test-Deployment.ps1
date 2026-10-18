@@ -80,7 +80,7 @@ $env:NPM_CONFIG_CACHE = Join-Path $job.userRoot 'cache/npm'
 $env:PATH = ($job.toolPaths -join ';') + ';' + $env:PATH
 Import-Module (Join-Path $job.root 'Devenv.psm1') -Force -DisableNameChecking
 function Snapshot {
-    $paths = @('_vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Local/Microsoft/PowerToys/settings.json', 'AppData/Local/Microsoft/PowerToys/Awake/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
+    $paths = @('.vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Local/Microsoft/PowerToys/settings.json', 'AppData/Local/Microsoft/PowerToys/Awake/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
     $files = @($paths | ForEach-Object { Join-Path $job.userRoot $_ })
     $files += @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'PersonalDevenv') -File | Select-Object -ExpandProperty FullName)
     $files += @(Get-ChildItem -LiteralPath (Join-Path $job.userRoot 'notes/.obsidian') -Recurse -File | Select-Object -ExpandProperty FullName)
@@ -105,6 +105,7 @@ try {
         $code = $LASTEXITCODE
         Stop-Transcript | Out-Null
         if ($code -ne 0) { throw "Bootstrap $pass run failed: exit $code" }
+        if (Test-Path -LiteralPath (Join-Path $job.userRoot '_vimrc')) { throw 'Bootstrap recreated the obsolete Windows vimrc alias' }
         Save-Json (Join-Path $job.fixture ($pass + '-snapshot.json')) (Snapshot) ''
     }
     & powershell.exe @common -Check

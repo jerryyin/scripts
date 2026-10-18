@@ -107,8 +107,8 @@ rerun `priv.ps1 -Apply`. GitHub and Codex token refresh stays with their tools.
 | Environment | Source / behavior |
 |---|---|
 | WSL | Ensures Ubuntu 24.04 is installed; existing distributions and Linux configuration are preserved |
-| Native Vim | A tracked `_vimrc` symlink reads discovered paths from JSON and sources `rc_files/vim/.vimrc` |
-| Vim plugins / CoC | One shared plugin/extension list in `rc_files/vim/.vim/config/plugins.vim`; Git for Windows Bash runs existing POSIX helpers |
+| Native Vim | A single `.vimrc` symlink points directly to `rc_files/vim/.vimrc`; Vim discovers Python and Git natively |
+| Vim plugins / CoC | Shared plugin and extension choices in `rc_files/vim/.vim`; installed runtime files stay outside Git |
 | Vim runtime | Native Python for LeaderF, Node >=22 for CoC, native ripgrep for search, native clangd for C/C++ semantic highlighting |
 | Multiplexer | Native `psmux`, exposed as `tmux` in PowerShell; uses Windows ConPTY and native PowerShell panes |
 | tmux keys | Read directly from `rc_files/tmux/.config/tmux/common.conf`: backtick prefix, `v` / `S` / `s` splits, vi modes, `r` reload, `b` command-copy, F10 nested-session toggle, shared status settings |
@@ -168,9 +168,9 @@ enabled on Linux. There is no plugin-autocommand rewriting and no separate
 `vim-windows.vim` shim. Search and multiplexer keys have one shared definition,
 selecting `rg`/`psmux` on Windows and the existing `ag`/`tmux` on Linux.
 Windows Vim uses `cmd.exe` quoting, matching native async plugins such as
-Grepper. LeaderF's Unix file-list command explicitly invokes Git Bash through
-the Windows helper `leaderf-files.sh`, preserving the IREE/Triton filters. Outside a
-Git checkout it falls back to ripgrep file discovery.
+Grepper. LeaderF runs the shared Python helper `leaderf-files.py` on both
+platforms, preserving the IREE/Triton filters and generated build includes.
+Outside a Git checkout it uses ripgrep, or the existing `ag` when ripgrep is absent.
 
 `Test-VimShortcuts.ps1` executes search mappings against known files in a path
 with spaces, checks Git search/signs, window navigation, quickfix, NERDTree and
@@ -263,8 +263,8 @@ engine, PSReadLine or security-check costs.
 * `rc_files/powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json` and `Awake/settings.json`: the actual
   PowerToys settings files, linked individually from AppData. PowerToys may
   update its schema/version fields when it saves these files.
-* `rc_files/vim/.windows/_vimrc`: a repository symlink to the shared `.vimrc`.
-  Both installed Vim entries link directly to that shared source.
+* `rc_files/vim/.vimrc`: the single startup file linked as `~/.vimrc` on both
+  platforms. Native Windows Vim discovers it automatically.
 * `rc_files/tmux/.config/tmux/common.conf`: shared tmux/psmux shortcuts and style.
   `.linux/.tmux.conf` and `.windows/.psmux.conf` source it directly and declare
   native plugins. `.windows/.tmux/mux.ps1` is the native clipboard runtime helper.
