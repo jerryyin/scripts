@@ -39,12 +39,9 @@ try {
     $env:PATH = (Split-Path $PsmuxExe -Parent) + ';' + $env:PATH
     if ($NodeDirectory) { $env:PATH = $NodeDirectory + ';' + $env:PATH }
     if ($ClangdExe) { $env:PATH = (Split-Path $ClangdExe -Parent) + ';' + $env:PATH }
-    $managed = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
-    [void][IO.Directory]::CreateDirectory($managed)
     if (!$UseExistingDeployment) {
         Invoke-TestLink (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
         Invoke-RcSetup $RcRoot @('apply', '--package', 'vim', '--package', 'tmux', '--home', $fixture)
-        Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
     $plugPath = Join-Path $fixture '.vim/autoload/plug.vim'
     [void][IO.Directory]::CreateDirectory((Split-Path $plugPath -Parent))

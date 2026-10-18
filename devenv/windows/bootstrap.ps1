@@ -74,8 +74,12 @@ if ($Check) {
         if (Get-Command $command -ErrorAction SilentlyContinue) { Write-Output "OK $command" }
         else { [void]$missing.Add($command); Write-Output "MISSING $command" }
     }
-    try { $nativeVim = Get-NativeVim; Write-Output "OK vim $nativeVim" }
-    catch { [void]$missing.Add('vim'); Write-Output 'MISSING native Vim' }
+    try {
+        $nativeVim = Get-NativeVim
+        $vimOnPath = Get-Command vim.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        if ($vimOnPath.Source -ine $nativeVim) { throw 'Native Vim is not the PATH command' }
+        Write-Output "OK vim $nativeVim"
+    } catch { [void]$missing.Add('vim'); Write-Output 'MISSING native Vim on PATH (rerun -Apply)' }
     if (Get-Command node -ErrorAction SilentlyContinue) {
         $version = Invoke-Native node @('--version') -Capture
         if ([version]$version.TrimStart('v') -lt [version]'22.19.0') { [void]$missing.Add('Node >=22.19'); Write-Output "OUTDATED Node $version (requires >=22.19)" }
@@ -181,12 +185,11 @@ Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $vimExe = Get-NativeVim
-$psmuxExe = (Get-Command psmux.exe).Source
+Add-ToolPath (Split-Path $vimExe -Parent) -Persist:($env:USERPROFILE -eq $nativeProfile)
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot)
 Invoke-RcSetup $RcPath $deployment
 $fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
-Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
 if (!$SkipVimPlugins) {
     $vimArguments = @('vim', '--home', $env:USERPROFILE, '--vim-exe', $vimExe)
     if ($Update) { $vimArguments += '--update' }

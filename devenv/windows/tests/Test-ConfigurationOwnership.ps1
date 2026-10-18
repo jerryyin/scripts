@@ -14,7 +14,6 @@ $local = Join-Path $userRoot 'AppData/Local'
 $state = Join-Path $local 'PersonalDevenv'
 $socket = 'config-owner-' + [guid]::NewGuid().ToString('N')
 $prior = @{USERPROFILE=$env:USERPROFILE; HOME=$env:HOME; LOCALAPPDATA=$env:LOCALAPPDATA; GIT_CONFIG_GLOBAL=$env:GIT_CONFIG_GLOBAL}
-$nativeState = Read-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json')
 $script:passed = 0
 $console = $null
 function Assert($Ok, [string]$Message) {
@@ -40,9 +39,18 @@ try {
     Assert (!(Test-Path -LiteralPath (Join-Path $state 'profile.ps1'))) 'No copied PowerShell profile in AppData'
     . $profile
     Assert (Test-InstalledLink $profile $source) 'PowerShell profile directly links to its tracked source'
-    Assert ($null -eq $script:DevenvState) 'Opening a shell does not read machine state'
-    Save-Json (Join-Path $state 'state.json') ([ordered]@{vimExe='unused'; psmuxExe=$psmux; rcRoot=$candidate}) ''
-    Assert ((Get-DevenvState).psmuxExe -eq $psmux) 'Machine paths load on demand'
+    $savedPath = $env:PATH
+    $savedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    try {
+        Add-ToolPath (Split-Path $vim -Parent)
+        $once = $env:PATH
+        Add-ToolPath (Split-Path $vim -Parent)
+        Assert ($env:PATH -ceq $once) 'Adding a native tool directory is unchanged on rerun'
+        Assert ([Environment]::GetEnvironmentVariable('Path', 'User') -ceq $savedUserPath) 'Redirected setup tests never change the account PATH'
+        Assert ((vim --version | Select-Object -First 1) -like 'VIM*') 'The tracked profile runs native Vim without generated machine state'
+        Assert ((tmux -V) -match 'psmux') 'The tracked profile runs native psmux without installation scripts'
+    } finally { $env:PATH = $savedPath }
+    Assert (!(Test-Path -LiteralPath (Join-Path $state 'state.json'))) 'The tracked shell needs no generated machine-path file'
     Add-Content -LiteralPath $source -Value '$global:TrackedProfileEdit = 456'
     . $profile
     Assert ($global:TrackedProfileEdit -eq 456) 'An rc_files edit takes effect without copying or reinstalling'
@@ -70,7 +78,7 @@ try {
     Assert ($keys.Contains('from-rc-files')) 'Edits through the installed shared configuration take effect on reload without setup'
     Assert ((Invoke-Native $psmux @('-L', $socket, 'show-options', '-g', 'prefix') -Capture).Contains('C-a')) 'Shared set-option preferences reach native psmux without a parser'
     Assert ((Invoke-Native $psmux @('-L', $socket, 'show-options', '-g', 'base-index') -Capture).Contains('1')) 'Previously filtered shared options reach native psmux directly'
-    foreach ($file in @('vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/leaderf-files.py', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
+    foreach ($file in @('vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.vim/config/project-files.py', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
         Save-Text (Join-Path $candidate $file) 'fixture' ''
     }
     Save-Text (Join-Path $candidate 'vim/.vimrc') 'let g:tracked_entry_loaded = 1' ''
@@ -134,9 +142,8 @@ try {
     $healthDocuments = Join-Path $healthHome 'Documents'
     $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
     Invoke-RcSetup $RcRoot @(Get-DeploymentArguments 'apply' $healthHome $RcRoot $healthDocuments $healthTerminal)
-    Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') $nativeState ''
     Set-NativeCodex $healthHome $RcRoot ''
-    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links, executable state and skills'
+    Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links and skills without a generated state file'
     Save-Text $healthTerminal ([IO.File]::ReadAllText($healthTerminal)) ''
     # Save-Text skips identical content, so replace only this disposable link.
     $terminalCopy=[IO.File]::ReadAllText($healthTerminal)

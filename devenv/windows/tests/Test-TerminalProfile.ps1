@@ -2,6 +2,7 @@ param([string]$RcRoot = (Join-Path $env:USERPROFILE 'rc_files'))
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $root 'Devenv.psm1') -Force -DisableNameChecking
+Update-ProcessPath
 . (Join-Path $PSScriptRoot 'RcFixture.ps1')
 $fixture = Join-Path $env:TEMP ('terminal-profile-' + [guid]::NewGuid().ToString('N'))
 $path = Join-Path $fixture 'settings.json'
@@ -30,7 +31,6 @@ if (!$rejected -or !(Read-Json $conflict).localEdit) { throw 'A conflicting loca
 $originalLocalAppData = $env:LOCALAPPDATA
 try {
     $env:LOCALAPPDATA = Join-Path $fixture 'AppData/Local'
-    Save-Json (Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json') ([ordered]@{vimExe='vim.exe';psmuxExe='psmux.exe'}) ''
     . (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1')
 } finally { $env:LOCALAPPDATA = $originalLocalAppData }
 $global:LASTEXITCODE = 42

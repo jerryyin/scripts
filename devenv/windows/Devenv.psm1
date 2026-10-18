@@ -146,18 +146,6 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
     $arguments = @(Get-DeploymentArguments 'check' $UserRoot $RcRoot $DocumentsPath $TerminalPath) + @('--json')
     $report = ConvertFrom-Json (Invoke-RcSetup $RcRoot $arguments -Capture -AllowProblems)
     $report.problems
-    foreach ($entry in @(
-        @{Path=(Join-Path $env:LOCALAPPDATA 'PersonalDevenv/state.json'); Fields=@('vimExe','psmuxExe','rcRoot','notes')}
-    )) {
-        try {
-            $data = Read-Json $entry.Path
-            foreach ($key in $entry.Fields) {
-                if (!$data.Contains($key) -or !$data[$key] -or !(Test-Path -LiteralPath $data[$key])) { "Missing or invalid $key in $($entry.Path)" }
-            }
-            if ($data.Contains('rcRoot') -and $data.rcRoot -ine $RcRoot) { "Configuration checkout differs from -RcPath: $($entry.Path)" }
-        } catch { "Invalid configuration data: $($entry.Path)" }
-    }
-
 }
 
 function Get-VaultPath([string]$RegistryPath, [string]$Fallback) {
@@ -380,6 +368,19 @@ function Update-ProcessPath {
     # discover binaries added by installers without discarding inherited PATH.
     $paths = @($env:PATH, [Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'))
     $env:PATH = ((($paths -join ';') -split ';' | Where-Object { $_ } | Select-Object -Unique) -join ';')
+}
+
+function Add-ToolPath([string]$Directory, [switch]$Persist) {
+    $directory = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    if (!(Test-Path -LiteralPath $directory -PathType Container)) { throw "Tool directory is missing: $directory" }
+    if ($Persist) {
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $entries = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') })
+        if ($entries -notcontains $directory) {
+            [Environment]::SetEnvironmentVariable('Path', (@($directory, $userPath) | Where-Object { $_ }) -join ';', 'User')
+        }
+    }
+    $env:PATH = (@($directory) + @($env:PATH -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $directory })) -join ';'
 }
 
 function Get-NativeVim {

@@ -168,7 +168,7 @@ enabled on Linux. There is no plugin-autocommand rewriting and no separate
 `vim-windows.vim` shim. Search and multiplexer keys have one shared definition,
 selecting `rg`/`psmux` on Windows and the existing `ag`/`tmux` on Linux.
 Windows Vim uses `cmd.exe` quoting, matching native async plugins such as
-Grepper. LeaderF runs the shared Python helper `leaderf-files.py` on both
+Grepper. LeaderF runs the shared Python helper `project-files.py` on both
 platforms, preserving the IREE/Triton filters and generated build includes.
 Outside a Git checkout it uses ripgrep, or the existing `ag` when ripgrep is absent.
 
@@ -268,8 +268,10 @@ engine, PSReadLine or security-check costs.
 * `rc_files/tmux/.config/tmux/common.conf`: shared tmux/psmux shortcuts and style.
   `.linux/.tmux.conf` and `.windows/.psmux.conf` source it directly and declare
   native plugins. `.windows/.tmux/mux.ps1` is the native clipboard runtime helper.
-* `%LOCALAPPDATA%\PersonalDevenv`: discovered machine paths (`state.json`),
-  downloaded plugin source and backups.
+* PowerShell's `vim`, `tmux` and `dev` commands use native executables on `PATH`.
+  The installer adds Vim's directory to the user `PATH`; the profile needs no
+  generated machine-path file or installation scripts.
+* `%LOCALAPPDATA%\PersonalDevenv`: setup backups and acceptance artifacts.
 * Vim discovers Python and Git natively; setup generates no Vim path file or
   tmux translation. `.vim`, `_viminfo` and swap files are editor runtime state.
 * Both PowerShell 5 and PowerShell 7 all-host profiles link to the tracked

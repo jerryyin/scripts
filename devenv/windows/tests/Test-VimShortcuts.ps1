@@ -127,6 +127,19 @@ try {
     Write-Output 'PASS: visual \ty copies selection into the native multiplexer buffer'
     $report.checks += [ordered]@{passed=$true;name='visual \ty copies selection into the native multiplexer buffer'}
     $console.Send([string][char]27)
+    $mlirProbe = Join-Path $fixture 'mlir-copy.vim'
+    Save-Text $mlirProbe "function! GetMLIRTestCommand() abort`n  return 'mlir_copy_marker'`nendfunction`n" ''
+    $console.Send(":execute 'source ' . fnameescape('" + $mlirProbe.Replace('\','/').Replace("'","''") + "')" + [char]13)
+    $console.Send('\tc')
+    $end = (Get-Date).AddSeconds(5)
+    do {
+        $copied = ((& $mux show-buffer) -join "`n").Trim()
+        if ($copied -eq 'mlir_copy_marker') { break }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $end)
+    if ($copied -ne 'mlir_copy_marker') { throw 'MLIR command copy did not use the native multiplexer' }
+    Write-Output 'PASS: \tc copies the MLIR command through the shared native multiplexer selection'
+    $report.checks += [ordered]@{passed=$true;name='\tc copies the MLIR command through the shared native multiplexer selection'}
     Start-Sleep -Milliseconds 100
     & $mux set-buffer paste_bridge_marker | Out-Null
     $console.Send(':call cursor(4,1)' + [char]13)
