@@ -46,7 +46,9 @@ try {
     if (!$UseExistingDeployment) {
         Invoke-TestLink (Join-Path $fixture 'Documents/PowerShell/profile.ps1') (Join-Path $RcRoot 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1') ''
         Invoke-TestLink (Join-Path $fixture '_vimrc') (Join-Path $RcRoot 'vim/.windows/_vimrc') ''
-        Set-NativeVim $fixture $RcRoot $GitBash (Join-Path $fixture 'backups') $PythonRoot
+        $vimArguments = @('vim', '--home', $fixture, '--git-bash', $GitBash, '--backup', (Join-Path $fixture 'backups'), '--configure-only')
+        if ($PythonRoot) { $vimArguments += @('--python-root', $PythonRoot) }
+        Invoke-RcSetup $RcRoot $vimArguments
         Save-Json (Join-Path $managed 'state.json') ([ordered]@{ vimExe=$VimExe; psmuxExe=$PsmuxExe; notes=$fixture; rcRoot=$RcRoot }) ''
     }
     $plugPath = Join-Path $fixture '.vim/autoload/plug.vim'
@@ -65,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 $job = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-job.json') -Raw | ConvertFrom-Json
 try {
     Import-Module $job.module -Force -DisableNameChecking
-    Install-VimPlugins $job.vim $job.userRoot (Join-Path $job.userRoot 'backups') $job.rcRoot
+    Invoke-RcSetup $job.rcRoot @('vim', '--home', $job.userRoot, '--vim-exe', $job.vim, '--backup', (Join-Path $job.userRoot 'backups'))
     $result = @{ ok=$true }
 } catch { $result = @{ ok=$false; error=$_.Exception.Message } }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'install-result.json'), ($result | ConvertTo-Json))
@@ -142,7 +144,7 @@ qall!
     $config = Join-Path $fixture '.psmux.conf'
     if (!$UseExistingDeployment) {
         Invoke-TestLink $config (Join-Path $RcRoot 'tmux/.windows/.psmux.conf') ''
-        Set-NativeMux $fixture $RcRoot ''
+        Invoke-RcSetup $RcRoot @('mux', '--home', $fixture, '--render-only')
     }
     # Explicitly run installed Windows PowerShell in this test. Fresh-machine
     # provisioning installs PowerShell 7 and makes it the default pane shell.

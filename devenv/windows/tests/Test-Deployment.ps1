@@ -87,11 +87,13 @@ function Snapshot {
     $files += @(Get-ChildItem -LiteralPath (Join-Path $job.userRoot '.vim/plugged') -Directory | ForEach-Object { Join-Path $_.FullName '.git/HEAD' })
     $files += @(Get-ChildItem -LiteralPath (Join-Path $job.userRoot '.config/coc/extensions/node_modules') -Directory | Where-Object { $_.Name -like 'coc-*' } | ForEach-Object { Join-Path $_.FullName 'package.json' })
     $snapshot = [ordered]@{}
-    foreach ($path in $files | Sort-Object -Unique) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { foreach ($path in $files | Sort-Object -Unique) {
         if (!(Test-Path -LiteralPath $path)) { throw "Missing deployed file: $path" }
         $file = Get-Item -LiteralPath $path
-        $snapshot[$path] = @{hash=(Get-FileHash -LiteralPath $path).Hash; writeTime=$file.LastWriteTimeUtc.Ticks}
-    }
+        $hash = [BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($path))).Replace('-', '')
+        $snapshot[$path] = @{hash=$hash; writeTime=$file.LastWriteTimeUtc.Ticks}
+    } } finally { $sha256.Dispose() }
     return $snapshot
 }
 try {

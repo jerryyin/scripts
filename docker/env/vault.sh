@@ -207,7 +207,7 @@ config_is_template_shaped() {
 
 patch_config() {
     if [ ! -f "$TEMPLATE_FILE" ]; then
-        echo "Warning: $TEMPLATE_FILE not found; run rc_files/install.sh first"
+        echo "Warning: $TEMPLATE_FILE not found; run python3 ~/rc_files/.setup first"
         return 0
     fi
 

@@ -177,7 +177,7 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
     if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 }
 Ensure-Checkout $RcPath $manifest.rcRepository
-if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/deploy.py'))) { throw 'Update rc_files: .setup/deploy.py is required.' }
+if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
 Ensure-Checkout $NotesPath $manifest.notesRepository
@@ -191,17 +191,21 @@ if (!$PythonRoot) { $PythonRoot = Invoke-Native py @('-3.14', '-c', 'import sys;
 if (!(Test-Path -LiteralPath (Join-Path $pythonRoot 'python3.dll'))) { throw 'Python 3.14 runtime DLL could not be located for native Vim.' }
 
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot)
-Invoke-RcSetup $RcPath $deployment -Tool install
+Invoke-RcSetup $RcPath $deployment
 $fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
 Save-Json (Join-Path $stateRoot 'state.json') ([ordered]@{ vimExe = $vimExe; psmuxExe = $psmuxExe; rcRoot = $RcPath; notes = $NotesPath }) $backupRoot
-Set-NativeVim $env:USERPROFILE $RcPath $gitBash $backupRoot $pythonRoot
+$vimArguments = @('vim', '--home', $env:USERPROFILE, '--backup', $backupRoot, '--vim-exe', $vimExe, '--git-bash', $gitBash, '--python-root', $PythonRoot)
+if ($SkipVimPlugins) { $vimArguments += '--configure-only' }
+if ($Update) { $vimArguments += '--update' }
+Invoke-RcSetup $RcPath $vimArguments
 $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
-Set-NativeMux $env:USERPROFILE $RcPath $backupRoot
-if (!$SkipAddons) { Install-PsmuxPlugins (Join-Path $RcPath 'tmux/.tmux.conf') $env:USERPROFILE $stateRoot -Update:$Update }
-if (!$SkipVimPlugins) { Install-VimPlugins $vimExe $env:USERPROFILE $backupRoot $RcPath -Update:$Update }
+$muxArguments = @('mux', '--home', $env:USERPROFILE, '--backup', $backupRoot)
+if ($SkipAddons) { $muxArguments += '--render-only' }
+if ($Update) { $muxArguments += '--update' }
+Invoke-RcSetup $RcPath $muxArguments
 
 if (!$SkipAddons) {
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update

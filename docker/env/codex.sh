@@ -10,12 +10,12 @@
 # refresh.
 #
 # The local config file (~/.codex/config.toml) is generated from the template
-# (~/.codex.config.toml.template, deployed by rc_files/install.sh via direct links).
+# (~/.codex.config.toml.template, deployed by python3 ~/rc_files/.setup via direct links).
 # Keep the real config untracked because Codex may add local runtime state.
 #
 # Prerequisites:
 #   - nodejs + npm installed (handled by min.sh)
-#   - ~/.codex.config.toml.template deployed by rc_files/install.sh (direct links)
+#   - ~/.codex.config.toml.template deployed by python3 ~/rc_files/.setup (direct links)
 
 set -e
 # Without pipefail, `npm install ... | tail -1` always reports tail's exit
@@ -92,7 +92,7 @@ install_codex_cli() {
 
 patch_codex_config() {
     if [ ! -f "$CODEX_TEMPLATE" ]; then
-        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CODEX_TEMPLATE not found — run rc_files/install.sh first"
+        [ "${QUIET_NOOP:-0}" = "1" ] || echo "⚠️  $CODEX_TEMPLATE not found — run python3 ~/rc_files/.setup first"
         return 0
     fi
 

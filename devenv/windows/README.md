@@ -282,16 +282,17 @@ engine, PSReadLine or security-check costs.
   Existing identical copies are backed up before conversion; differing copies
   stop setup so their edits can be merged into rc_files. Other installed skills,
   existing Codex preferences and credentials are preserved.
-* `install-vim-plugins.vim` in this utility is installation code, run directly
-  from `scripts`. Extension choices come from the tracked
-  `rc_files/vim/.vim/coc-extensions.json`; plugin/npm installations remain
+* Vim and tmux/psmux setup live in `rc_files/.setup`. Both platforms use
+  the same Python Vim installer and Vimscript driver. Extension choices come
+  from `rc_files/vim/.vim/coc-extensions.json`; plugin/npm installations remain
   runtime data outside Git.
 
 `scripts` installs system prerequisites. `rc_files` owns authored settings,
 placement conventions and the shared Python deployer. Both Linux and Windows
-use `rc_files/.setup/install.py` for configuration setup; a scripts checkout is
-not needed to deploy rc_files. Lower-level link operations use `.setup/deploy.py`.
-Platform directories select Linux or Windows without a per-file installer list.
+use `python3 ~/rc_files/.setup` (`py -3 ~/rc_files/.setup` on Windows) for setup;
+a scripts checkout is not needed. Link operations such as `check` and app
+operations such as `vim` are actions of that same command. Platform directories
+select Linux or Windows without a per-file installer list.
 See [the deployer conventions](../../../rc_files/.setup/README.md) for standalone use.
 No ignore rules are widened, and no runtime app directory is linked into Git.
 Terminal and PowerToys GUI edits write directly into rc_files. Restart an app if it does not observe a change through the link. PowerShell reads its source in the next shell. Rerun setup after changing tmux preferences to refresh the generated native translation.
@@ -381,7 +382,7 @@ family name in memory.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1 -Network
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MuxConfiguration.ps1
+py -3 -B -m unittest discover -s "$HOME/rc_files/.setup/tests"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
 pwsh -NoProfile -File .\tests\Test-VimShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1

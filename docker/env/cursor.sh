@@ -14,7 +14,7 @@
 #                 exists under $HOME (safe no-op if none do yet)
 #
 # Rules live in rc_files (Git-managed), so the source directory below is
-# populated by rc_files/install.sh, not by this script.
+# populated by python3 ~/rc_files/.setup, not by this script.
 # Python and the rc_files deployer create the links; RC_ROOT can select a
 # checkout outside the usual ~/rc_files location.
 #
@@ -80,7 +80,7 @@ setup_cursor_rules() {
         local rulename
         rulename="$(basename "$rule" .md).mdc"
 
-        python3 "$RC_ROOT/.setup/deploy.py" link \
+        python3 "$RC_ROOT/.setup" link \
             --source "$rule" --target "$rules_dest/$rulename"
         echo "   Linked Cursor rule: $rulename"
         count=$((count + 1))

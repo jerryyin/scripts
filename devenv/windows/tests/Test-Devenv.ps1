@@ -145,7 +145,7 @@ try {
     $python = Join-Path $testRoot 'python-runtime'
     Save-Text (Join-Path $python 'python399.dll') 'fixture, not an executable DLL' ''
     Invoke-TestLink (Join-Path $vimUser '_vimrc') (Join-Path $vimRc 'vim/.windows/_vimrc') ''
-    Set-NativeVim $vimUser $vimRc 'C:/Program Files/Git/bin/bash.exe' '' $python
+    Invoke-RcSetup $RcRoot @('vim', '--repo', $vimRc, '--home', $vimUser, '--git-bash', 'C:/Program Files/Git/bin/bash.exe', '--python-root', $python, '--configure-only')
     $loader = [IO.File]::ReadAllText((Join-Path $vimUser '_vimrc'))
     Assert ($loader -ceq [IO.File]::ReadAllText((Join-Path $vimRc 'vim/.windows/_vimrc'))) 'Native Vim entry is deployed from rc_files'
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/config'))) 'Windows setup does not copy a second Vim configuration tree'

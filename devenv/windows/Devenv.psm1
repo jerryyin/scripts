@@ -112,9 +112,8 @@ try {
     Write-Host 'Developer Mode enabled.'
 }
 
-function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems,
-    [ValidateSet('deploy','install')][string]$Tool = 'deploy') {
-    $entry = Join-Path $RcRoot ('.setup/' + $Tool + '.py')
+function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems) {
+    $entry = Join-Path $RcRoot '.setup'
     if (!(Test-Path -LiteralPath $entry)) { throw "Update rc_files: setup tool is missing: $entry" }
     $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
     $prefix = @()
@@ -126,7 +125,7 @@ function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture,
         $output = @(& $launcher.Source @prefix $entry @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previousPreference }
-    if ($code -ne 0 -and !($AllowProblems -and $code -eq 1 -and $output.Count)) { throw "rc_files $Tool failed (exit $code): $($output -join "`n")" }
+    if ($code -ne 0 -and !($AllowProblems -and $code -eq 1 -and $output.Count)) { throw "rc_files setup failed (exit $code): $($output -join "`n")" }
     if ($Capture) { return $output -join "`n" }
     $output | Out-Host
 }
@@ -162,7 +161,7 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
     }
     try {
         $generated = Join-Path $UserRoot '.psmux/generated.conf'
-        if (!(Test-Path -LiteralPath $generated) -or [IO.File]::ReadAllText($generated) -cne (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf'))) {
+        if (!(Test-Path -LiteralPath $generated) -or [IO.File]::ReadAllText($generated) -cne (ConvertFrom-Json (Invoke-RcSetup $RcRoot @('mux', '--print-config', '--json', '--home', $UserRoot) -Capture))) {
             'Native tmux configuration is missing or differs from rc_files; rerun setup to render it.'
         }
     } catch { 'Cannot validate native tmux configuration against rc_files.' }
@@ -372,130 +371,6 @@ function Ensure-Wsl([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$Di
     # Some Windows versions finish registration only after restart/first launch.
     # Do not claim readiness, launch Linux, or automatically reboot the machine.
     return 'PendingInitialization'
-}
-
-function Install-PsmuxPlugins([string]$TmuxPath, [string]$UserRoot, [string]$StateRoot, [switch]$Update) {
-    $source = [IO.File]::ReadAllText($TmuxPath)
-    $plugins = @()
-    if ($source -match '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/tpm[''"]') { $plugins += 'ppm' }
-    if ($source -match '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/tmux-resurrect[''"]') { $plugins += 'psmux-resurrect' }
-    $required = @{ ppm=@('ppm.ps1','scripts/install_plugins.ps1','scripts/update_plugins.ps1','scripts/clean_plugins.ps1'); 'psmux-resurrect'=@('psmux-resurrect.ps1','scripts/save.ps1','scripts/restore.ps1') }
-    $pending = @($plugins | Where-Object {
-        $name = $_
-        @($required[$name] | Where-Object { !(Test-Path -LiteralPath (Join-Path $UserRoot ('.psmux/plugins/' + $name + '/' + $_))) }).Count
-    })
-    if (!$Update -and !$pending.Count) { Write-Host 'SKIP native psmux plugins (installed)'; return }
-    if (!$plugins.Count) { return }
-    $cache = Join-Path $StateRoot 'psmux-plugin-source'
-    Ensure-Checkout $cache 'https://github.com/psmux/psmux-plugins.git'
-    if ($Update) { Invoke-Native git @('-C',$cache,'pull','--ff-only') }
-    foreach ($name in $plugins) {
-        if (!$Update -and $pending -notcontains $name) { continue }
-        $target = Join-Path $UserRoot ('.psmux/plugins/' + $name)
-        [void][IO.Directory]::CreateDirectory($target)
-        Copy-Item -Path (Join-Path $cache ($name + '/*')) -Destination $target -Recurse -Force
-        Save-Json (Join-Path $target '.monorepo.json') ([ordered]@{monorepo='psmux/psmux-plugins'; org='psmux-plugins'; name=$name; url='https://github.com/psmux/psmux-plugins.git'; branch=$null}) ''
-        foreach ($file in $required[$name]) {
-            if (!(Test-Path -LiteralPath (Join-Path $target $file))) { throw "Incomplete psmux plugin: $name/$file" }
-        }
-    }
-}
-
-function Get-PsmuxConfiguration([string]$TmuxPath, [string]$TmuxRoot = '') {
-    # Reuse portable settings directly from the shared tmux configuration.
-    # Shell snippets, TPM and zsh startup commands belong to their OS adapter.
-    $lines = New-Object Collections.ArrayList
-    [void]$lines.Add('# Generated from rc_files/tmux/.tmux.conf; native PowerShell panes.')
-    if (!$TmuxRoot) { $TmuxRoot = Split-Path $TmuxPath -Parent }
-    $sections = @{}
-    $section = ''
-    foreach ($line in [IO.File]::ReadAllLines((Join-Path $TmuxRoot '.windows/.tmux/psmux-compat.conf'))) {
-        if ($line -match '^# \[([^]]+)\]$') { $section = $Matches[1]; $sections[$section] = New-Object Collections.ArrayList }
-        elseif ($section -and $line -and !$line.StartsWith('#')) { [void]$sections[$section].Add($line) }
-    }
-    foreach ($line in $sections.navigation) { [void]$lines.Add($line) }
-    $source = [IO.File]::ReadAllText($TmuxPath) -replace '\\\r?\n\s*', ' '
-    $nativePrefix = ([regex]::Match($source, '(?m)^set(?:-option)? -g prefix\s+([^\r\n]+)')).Groups[1].Value.Trim()
-    foreach ($line in $source -split '\r?\n') {
-        if ($line -match '^unbind(-key)? |^bind(-key)? |^set -g prefix |^(set|set-option|setw|set-window-option) -g (status-right|status-style|status-keys|mode-keys|mouse|status-justify|status|status-left-style|message-command-style|status-right-style|message-style|pane-active-border-style|pane-border-style|status-right-length|status-left-length|window-status-activity-style|window-status-separator|status-left|window-status-format|window-status-current-format) ') {
-            $line = $line.Replace('set prefix None', 'set -g prefix None').Replace('set key-table off', 'set -g key-table off')
-            $line = $line.Replace('set -u prefix', ('set -g prefix ' + $nativePrefix)).Replace('set -u key-table', 'set -g key-table root')
-            $line = $line.Replace('~/.tmux.conf', '~/.psmux.conf') -replace '\s*\\;\s*', ' \; '
-            $line = $line.Replace('$wg_is_keys_off', '')
-            [void]$lines.Add($line)
-        }
-    }
-    $resize = '5'
-    if ($source -match '(?m)^set(?:-option)? -g @pane_resize\s+[''"]?(\d+)') { $resize = $Matches[1] }
-    $names = @('native') + @([regex]::Matches($source, '(?m)^set(?:-option)? -g @plugin\s+[''"]tmux-plugins/([^''"]+)[''"]') | ForEach-Object { $_.Groups[1].Value })
-    foreach ($name in $names) {
-        if ($sections.ContainsKey($name)) {
-            foreach ($line in $sections[$name]) {
-                [void]$lines.Add($line.Replace('%PANE_RESIZE%', $resize).Replace('%MUX_SCRIPT%', ((Join-Path $TmuxRoot '.windows/.tmux/mux.ps1').Replace('\','/'))).Replace('%PLUGIN_ROOT%', ((Join-Path $env:USERPROFILE '.psmux/plugins').Replace('\','/'))))
-            }
-        }
-    }
-    return ($lines -join "`n") + "`n"
-}
-
-function Set-NativeMux([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
-    $generated = Join-Path $UserRoot '.psmux/generated.conf'
-    Save-Text $generated (Get-PsmuxConfiguration (Join-Path $RcRoot 'tmux/.tmux.conf')) $BackupRoot
-}
-
-function Set-NativeVim([string]$UserRoot, [string]$RcRoot, [string]$GitBash, [string]$BackupRoot, [string]$PythonRoot = '') {
-    if (!(Test-Path -LiteralPath (Join-Path $RcRoot 'vim/.vimrc'))) { throw 'Shared vim/.vimrc is missing from rc_files' }
-    foreach ($relative in @('vim/.windows/_vimrc', 'vim/.windows/.vim/config/windows.vim', 'vim/.vim/config/plugins.vim', 'vim/.windows/.vim/config/leaderf-files.sh', 'vim/.windows/.vim/config/ai-processes.ps1', 'vim/.vim/coc-settings.json')) {
-        if (!(Test-Path -LiteralPath (Join-Path $RcRoot $relative))) { throw "Update rc_files: required configuration is missing: $relative" }
-    }
-    $pythonDll = ''
-    if ($PythonRoot) {
-        $dll = Get-ChildItem -LiteralPath $PythonRoot -Filter 'python*.dll' -File | Where-Object { $_.Name -match '^python[0-9]{2,}\.dll$' } | Select-Object -First 1
-        if (!$dll) { throw 'The native Python runtime DLL could not be found' }
-        $pythonDll = $dll.FullName
-    }
-    Save-Json (Join-Path $UserRoot '.vim/machine-paths.json') ([ordered]@{
-        gitBash=$GitBash.Replace('\','/'); pythonRoot=$PythonRoot.Replace('\','/'); pythonDll=$pythonDll.Replace('\','/'); vimrc=(Join-Path $RcRoot 'vim/.vimrc').Replace('\','/')
-    }) $BackupRoot
-    [void][IO.Directory]::CreateDirectory((Join-Path $UserRoot '.vim/session'))
-}
-
-function Install-VimPlugins([string]$VimExe, [string]$UserRoot, [string]$BackupRoot, [string]$RcRoot, [switch]$Update) {
-    $plugPath = Join-Path $UserRoot '.vim/autoload/plug.vim'
-    [void][IO.Directory]::CreateDirectory((Split-Path $plugPath -Parent))
-    $download = $plugPath + '.download'
-    if ($Update -or !(Test-Path -LiteralPath $plugPath)) { try {
-        Get-Download 'https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim' $download
-        Save-Text $plugPath ([IO.File]::ReadAllText($download)) $BackupRoot
-    } finally { if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download } } }
-    $choices = Join-Path $RcRoot 'vim/.vim/coc-extensions.json'
-    $previous = @($env:DEVENV_RC_ROOT, $env:DEVENV_VIM_HOME, $env:DEVENV_UPDATE)
-    try {
-        $env:DEVENV_RC_ROOT = $RcRoot; $env:DEVENV_VIM_HOME = $UserRoot; $env:DEVENV_UPDATE = [string][int][bool]$Update
-        Invoke-Native $VimExe @('-n', '-E', '-s', ('-V1' + (Join-Path $UserRoot '.vim/plugin-install.log')), '-u', 'NONE', '-S', (Join-Path $PSScriptRoot 'install-vim-plugins.vim'))
-    } finally { $env:DEVENV_RC_ROOT=$previous[0]; $env:DEVENV_VIM_HOME=$previous[1]; $env:DEVENV_UPDATE=$previous[2] }
-    $extensions = Join-Path $UserRoot '.config/coc/extensions'
-    $packagePath = Join-Path $extensions 'package.json'
-    $changed = !(Test-Path -LiteralPath $packagePath)
-    $package = Read-Json $packagePath
-    if (!$package.Contains('dependencies')) { $package.dependencies = [ordered]@{} }
-    foreach ($extension in @($package.dependencies.Keys)) {
-        if ($package.dependencies[$extension] -cne 'latest') { $package.dependencies[$extension] = 'latest'; $changed = $true }
-    }
-    $pending = $false
-    foreach ($extension in @(Read-Json $choices)) {
-        if (!$package.dependencies.Contains($extension)) { $package.dependencies[$extension] = 'latest'; $changed = $true }
-        $installed = Join-Path $extensions "node_modules/$extension/package.json"
-        if (!(Test-Path -LiteralPath $installed)) { $pending = $true }
-    }
-    if ($changed) { Save-Json $packagePath $package $BackupRoot }
-    Write-Host 'CoC extensions: checking latest versions (existing choices are retained).'
-    # On Windows, npm install --prefix <dir> can select a global install.
-    Push-Location -LiteralPath $extensions
-    try {
-        $command = if ($pending) { 'install' } else { 'update' }
-        Invoke-Native npm.cmd @($command, '--no-save', '--no-package-lock')
-    } finally { Pop-Location }
 }
 
 function Install-CodexAdapter([switch]$Update) {

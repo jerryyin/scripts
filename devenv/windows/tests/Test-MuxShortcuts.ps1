@@ -11,7 +11,7 @@ $fixture=Join-Path ([IO.Path]::GetTempPath()) ('mux-keys-'+[guid]::NewGuid().ToS
 $socket='mux-keys-'+[guid]::NewGuid().ToString('N')
 [void][IO.Directory]::CreateDirectory((Join-Path $fixture '.psmux/plugins'))
 foreach($name in @('ppm','psmux-resurrect')) { Copy-Item -LiteralPath (Join-Path $env:USERPROFILE ('.psmux/plugins/'+$name)) -Destination (Join-Path $fixture '.psmux/plugins') -Recurse }
-$configuration=if($ConfigurationPath){[IO.File]::ReadAllText($ConfigurationPath)}else{Get-PsmuxConfiguration $rc}
+$configuration=if($ConfigurationPath){[IO.File]::ReadAllText($ConfigurationPath)}else{ConvertFrom-Json (Invoke-RcSetup (Split-Path (Split-Path $rc -Parent) -Parent) @('mux','--print-config','--json') -Capture)}
 $start='Set-Location -LiteralPath '''+$fixture.Replace("'","''")+'''; Set-PSReadLineOption -EditMode Emacs; function prompt { [Console]::Write(([string][char]27)+"]9;9;"+[char]34+$PWD.Path+[char]34+[char]7); "fixture '+[char]0x279c+' " }'
 $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($start))
 $configuration += [char]10+'set -g default-shell "'+$shell.Replace('\','/')+' -NoProfile"'+[char]10
