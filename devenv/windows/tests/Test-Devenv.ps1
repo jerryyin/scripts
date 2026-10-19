@@ -99,9 +99,9 @@ try {
 
     $rc = Join-Path $testRoot 'rc'
     Save-Text (Join-Path $rc 'codex/.codex.config.toml.template') "[projects.`"/home/zhuoryin`"]`ntrust_level = `"trusted`"`n" ''
-    Save-Text (Join-Path $rc 'claude/.claude/CLAUDE.md') 'shared instructions' ''
+    Save-Text (Join-Path $rc 'agents/.agents/AGENTS.md') 'shared instructions' ''
     $fakeUser = Join-Path $testRoot 'WindowsUser'
-    Invoke-TestLink (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'claude/.claude/CLAUDE.md') ''
+    Invoke-TestLink (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'agents/.agents/AGENTS.md') ''
     Set-NativeCodex $fakeUser $rc ''
     $codexPath = Join-Path $fakeUser '.codex/config.toml'
     Assert (![IO.File]::ReadAllText($codexPath).Contains('/home/zhuoryin')) 'New Codex config renders a native Windows trust path'

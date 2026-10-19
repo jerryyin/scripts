@@ -276,8 +276,8 @@ engine, PSReadLine or security-check costs.
   tmux translation. `.vim`, `_viminfo` and swap files are editor runtime state.
 * Both PowerShell 5 and PowerShell 7 all-host profiles link to the tracked
   PowerShell profile. Conflicting local content stops setup so it can be moved into the tracked source before linking.
-* Agent instructions and skills come from tracked `rc_files/claude/.claude`
-  files. `.codex/AGENTS.md` is a file symlink; each managed `.agents/skills/<name>`
+* Agent instructions and skills come from tracked `rc_files/agents/.agents`
+  files. `.agents/AGENTS.md`, `.codex/AGENTS.md` and `.claude/CLAUDE.md` link to the same source; each managed `.agents/skills/<name>` and `.claude/skills/<name>`
   directory is a directory link to the corresponding tracked skill directory.
   Editing installed instructions or skills changes the Git source immediately,
   including new files and atomic editor saves within skill directories.

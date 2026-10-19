@@ -92,7 +92,7 @@ try {
     Assert ($report.loaded -eq 1) 'Real Vim loads the shared vimrc directly with spaces and apostrophes in paths'
     Assert ((Get-Item -LiteralPath (Join-Path $userRoot '.vimrc')).LinkType -eq 'SymbolicLink' -and [IO.File]::ReadAllText((Join-Path $candidate 'vim/.vimrc')).Contains('saved from native Vim')) 'Saving the installed vimrc in real Vim preserves its link and edits the shared Git source'
     Assert (!(Test-Path -LiteralPath (Join-Path $userRoot '.vim/machine-paths.json')) -and !(Test-Path -LiteralPath (Join-Path $userRoot '.psmux/generated.conf'))) 'Configuration deployment generates no Vim paths or tmux translation'
-    $instructions = Join-Path $candidate 'claude/.claude/CLAUDE.md'
+    $instructions = Join-Path $candidate 'agents/.agents/AGENTS.md'
     Save-Text $instructions 'tracked instructions v1' ''
     Invoke-TestLink (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
     Set-NativeCodex $userRoot $candidate ''

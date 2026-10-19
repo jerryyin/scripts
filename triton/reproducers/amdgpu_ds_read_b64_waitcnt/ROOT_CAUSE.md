@@ -6,7 +6,7 @@ localized in software to the exact victim instruction (oracle-free, no RTL/chick
 access needed), then independently confirmed with a hardware chicken bit.
 
 Full write-up of the localization *method* (reusable on the next hardware race, not
-specific to this bug): `hw-rtl-root-cause` skill in `~/rc_files/claude/.claude/skills/`.
+specific to this bug): `hw-rtl-root-cause` skill in `~/.agents/skills/`.
 
 ## The chain
 

@@ -11,7 +11,7 @@ LDS-read race as originally suspected. Localized in software to the exact
 victim instruction (oracle-free, no RTL/chicken-bit access) and independently
 confirmed with the `SQ_CONFIG1.DISABLE_SP_MFMA_SRCAB_VGPR_READ_SKIP` hardware
 chicken bit. The reusable methodology is distilled in the `hw-rtl-root-cause`
-Claude Code skill (`~/rc_files/claude/.claude/skills/hw-rtl-root-cause/SKILL.md`
+Claude Code skill (`~/.agents/skills/hw-rtl-root-cause/SKILL.md`
 — tracked in the dotfiles repo, not here).
 
 Paste-ready ticket: [`ISSUE.md`](ISSUE.md).
