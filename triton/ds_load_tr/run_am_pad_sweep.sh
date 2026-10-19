@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUN_ON_MODEL="$(cd "$SCRIPT_DIR/../../tools" && pwd)/run_on_model.sh"
+RUN_ON_MODEL="$(cd "$SCRIPT_DIR/../../am" && pwd)/run_on_model.sh"
 DEMO_SRC="$SCRIPT_DIR/ds_load_tr_demo.hpp"
 AM_TIMEOUT_S="${AM_TIMEOUT_S:-600}"
 

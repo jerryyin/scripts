@@ -72,6 +72,17 @@ same population, and a difference of a few percent should not be read as a findi
 
 ## Tests
 
+Decoder discovery works without a simulator package:
+
 ```bash
-cd am && python3 -m pytest test_run_on_model_profiles.py -q   # no simulator required
+python3 -B -m unittest discover -s am -p test_att_paths.py -v
 ```
+
+To check the simulator wrapper's profile selection:
+
+```bash
+cd am && python3 -m pytest test_run_on_model_profiles.py -q
+```
+
+These tests read the AM package's environment files and version metadata from
+`/am-ffm` or `/ffm`; they execute no simulator workloads.

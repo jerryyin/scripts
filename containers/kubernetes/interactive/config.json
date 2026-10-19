@@ -1,0 +1,38 @@
+{
+  "namespace": "iree-dev",
+  "pvc": "iree-dev-zyin-pvc",
+  "public_ssh_key_path": "/home/zyin/.ssh/id_rsa.pub",
+  "default_cluster": "conductor-mi35x.conf",
+  "default_service": "iree",
+  "services": {
+    "base": {
+      "image": "rocm/dev-ubuntu-24.04:latest",
+      "setup_profile": "base"
+    },
+    "rocmlir": {
+      "image": "rocm/mlir:latest",
+      "setup_profile": "base"
+    },
+    "ck": {
+      "image": "rocm/composable_kernel:ck_ub24.04_rocm7.0.1_amd-staging",
+      "setup_profile": "base"
+    },
+    "triton": {
+      "image": "rocm/pytorch:latest",
+      "setup_profile": "triton"
+    },
+    "triton-mi450": {
+      "image": "mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.4",
+      "setup_profile": "triton",
+      "image_env": "TRITON_MI450_BASE_IMAGE"
+    },
+    "triton-b0": {
+      "image": "registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.11.0-rocm7.15.0a20260728-7.15.0a20260728-nightly-ubuntu24.04-gfx1250",
+      "setup_profile": "triton"
+    },
+    "iree": {
+      "image": "rocm/dev-ubuntu-24.04:latest",
+      "setup_profile": "iree"
+    }
+  }
+}

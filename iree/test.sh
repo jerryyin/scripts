@@ -3,7 +3,7 @@ set -e
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLS_DIR="$(cd "$SCRIPT_DIR/../tools" && pwd)"
+NUMERICS_DIR="$(cd "$SCRIPT_DIR/../numerics" && pwd)"
 
 # =============================================================================
 # Help
@@ -146,7 +146,7 @@ generate_inputs() {
         local file="${shape}x${dtype}.bin"
         if [ ! -f "${file}" ]; then
             log_info "[INFO] Generating input: ${file}" >&2
-            python "$TOOLS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
+            python "$NUMERICS_DIR/genRandInput.py" "${file}" --shape ${shape} --dtype $dtype
             [ -f "${file}" ] || { log_always "[ERROR] Failed to generate: ${file}" >&2; exit 1; }
         else
             log_info "[INFO] Using existing: ${file}" >&2
@@ -166,13 +166,13 @@ compare_outputs() {
     local thresh="$6"
 
     log_info "[INFO] Comparing ${label1} vs ${label2}..."
-    if python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} > /dev/null 2>&1; then
+    if python "$NUMERICS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} > /dev/null 2>&1; then
         log_always "[RESULT] ✓ ${label1} and ${label2} match (threshold=${thresh})"
         return 0
     else
         log_always "[RESULT] ✗ ${label1} and ${label2} differ"
         # Show details on failure even in quiet mode
-        python "$TOOLS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} 2>&1 || true
+        python "$NUMERICS_DIR/compare.py" "${file1}" "${file2}" --dtype ${dtype} --threshold ${thresh} 2>&1 || true
         return 1
     fi
 }
@@ -265,7 +265,7 @@ check_determinism() {
     local failures=0
     for i in $(seq 2 $num_runs); do
         log_info -n "  Run $i vs Run 1: "
-        if python "$TOOLS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/cmp_${i}.txt 2>&1; then
+        if python "$NUMERICS_DIR/compare.py" "run1_output.bin" "run${i}_output.bin" --dtype ${dtype} --threshold 0.0 > /tmp/cmp_${i}.txt 2>&1; then
             log_info "✓ IDENTICAL"
         else
             log_always "✗ DIFFERENT"

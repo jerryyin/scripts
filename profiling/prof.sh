@@ -98,7 +98,7 @@ att() {
   local DECODER="$ROCM_DIR/lib/librocprof-trace-decoder.so"
   if [[ ! -f "$DECODER" ]]; then
     echo "[WARN] trace decoder not found at $DECODER"
-    echo "[HINT] normal ROCm images: run ~/scripts/docker/env/att.sh to install it"
+    echo "[HINT] normal ROCm images: run ~/scripts/setup/linux/packages/att.sh to install it"
   fi
 
   # Optional capture overrides.  Kernel iteration selection is important for ATT:

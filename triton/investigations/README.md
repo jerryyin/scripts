@@ -18,6 +18,7 @@ To find a tool these records mention, use the mapping below.
 | `tools/run_on_model.sh`, `tools/ffm_teardown.py` | `am/` |
 | `tools/gpu-lock` | `board/gpu-lock` |
 | `tools/compare.py`, `tools/genRandInput.py` | `numerics/` |
-| everything else that was in `tools/` | `devenv/` |
+| other utilities formerly in `tools/` | See the [repository directory map](../../README.md) |
 
-Each destination folder has a `README.md` listing its contents.
+The directory map describes the current owners of installation, agent, debugger,
+and container helpers.

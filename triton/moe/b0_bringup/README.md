@@ -27,7 +27,7 @@ tool finalizer (rocprofiler-sdk-tool `tool.cpp`, the loop over `att_filenames` t
 only when the AM/FFM simulator is present (`/am-ffm` or `/ffm`), else exits normally.
 
 How this was diagnosed (in case it regresses): build the decoder from source (see
-`docker/env/build_trace_decoder.sh`), instrument `rocprof_trace_decoder_parse_data` — it is called Nx for a
+`setup/linux/packages/trace-decoder.sh`), instrument `rocprof_trace_decoder_parse_data` — it is called Nx for a
 normally-exiting kernel and **0x** for an `os._exit` one. That 0-vs-N is the signature.
 
 ---
@@ -46,7 +46,7 @@ col_offset, dst)`. The 0623 therock image's Triton (`shared/gfx1250 @ 3068565`) 
   commit with `swizzle_scales_gfx1250` (pre-#3823, e.g. `5c058d5`).
 
 If you instead want the *latest* upstream to triage a tooling problem, use
-`docker/env/build_trace_decoder.sh` (separate, throwaway env).
+`setup/linux/packages/trace-decoder.sh` (separate, throwaway env).
 
 ## Shapes (N×K = 7168×2048, 256 experts, 8 active; dim1=K=2048, dim2=N=7168)
 - decode  M=128   (a8w4 block_m=16;  moe `-b 4`)
@@ -102,7 +102,7 @@ which are "not found" on gfx1250; harmless (decode still works).
 Both memory-bound, but **gluon is far more barrier-bound** (35% vs ~5%) with a much
 higher overall stall rate — a concrete, actionable gluon-vs-triton difference.
 
-## Files (kept minimal — generic functionality lives in profiling/ and docker/env/)
+## Files (kept minimal — generic functionality lives in profiling/ and setup/linux/)
 - `att_collect.sh` — thin orchestrator over `profiling/prof.sh att`; collects all four traces.
 - `README.md` — this doc.
 
@@ -111,5 +111,5 @@ Reused generic pieces (not duplicated here):
   for the ATT loop; auto-picks `os._exit` under the simulator vs normal exit on hardware).
 - ATT wrapper: `profiling/prof.sh att` (therock-aware ROCm resolution).
 - ATT analysis: `profiling/att_analyze.py`.
-- Fresh upstream/decoder build for triage: `docker/env/build_trace_decoder.sh`.
+- Fresh upstream/decoder build for triage: `setup/linux/packages/trace-decoder.sh`.
 - Payloads (`moe_*.pt`) are **regenerable scratch** — not kept in git.

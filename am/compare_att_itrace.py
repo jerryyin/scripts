@@ -47,7 +47,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-# The sibling profiling/ directory of this checkout first, so no environment is needed in
+# The sibling profiling directory of this checkout first, so no environment is needed in
 # the normal case; ATT_ANALYZE overrides it, then SCRIPTS_ROOT, then $HOME.
 def _default_att_analyze() -> Path:
     if os.environ.get("ATT_ANALYZE"):

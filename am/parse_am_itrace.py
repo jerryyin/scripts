@@ -8,7 +8,7 @@ the `// SQ:TYPE_DEP` annotations, and those are non-adjacent to the instruction
 they belong to. Measured over xcc0se1sa0_itrace_emu.mon: 73,824 TYPE_DEP lines,
 only 2,000 of them sitting directly after an instruction line.
 
-(A sibling tool, `../triton/moe/itrace_analyze.py`, documents the format AS a
+(A related tool, `../triton/moe/itrace_analyze.py`, documents the format AS a
 block and is also correct, because it pairs only the timeline and disasm lines
 below -- and those two ARE adjacent, 83,496 times against 8 exceptions in that
 same trace. The two headers are not in conflict; they describe different line
@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 # att_analyze.py supplies the opcode taxonomy (see the module docstring). It normally sits
-# in the sibling profiling/ directory of the same checkout, so that is tried first and works
+# in the sibling profiling directory of the same checkout, so that is tried first and works
 # with no environment set at all. ATT_ANALYZE and SCRIPTS_ROOT override it when this script
 # is run from somewhere else; $HOME is the last resort.
 _SIBLING = Path(__file__).resolve().parent.parent / "profiling" / "att_analyze.py"

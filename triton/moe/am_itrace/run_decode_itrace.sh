@@ -37,7 +37,7 @@ PKG="${PKG:-/am-ffm}"
 AM_ENV="$PKG/am_env.sh"
 # Derive the runner from THIS script's location rather than $HOME: in the
 # container $HOME=/root can hold a stale scripts clone (see b0_bringup/att_collect.sh).
-RUNNER="${RUNNER:-$(cd "$SCRIPT_DIR/../../../tools" && pwd)/run_on_model.sh}"
+RUNNER="${RUNNER:-$(cd "$SCRIPT_DIR/../../../am" && pwd)/run_on_model.sh}"
 ITRACEVIZ="${ITRACEVIZ:-$HOME/ItraceViz}"
 
 # Decode shape. K x N = 2048 x 7168 are the ticket dims (keep them: they set the
