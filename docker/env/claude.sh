@@ -1,7 +1,7 @@
 #!/bin/bash
 # claude.sh - Install Claude Code CLI
 #
-# Credential patching is handled by vault.sh.
+# The rc_files Claude package prepares private settings during credential setup.
 #
 # Model selection is left to Claude Code's built-in defaults (latest at
 # each release). No ANTHROPIC_MODEL or ANTHROPIC_DEFAULT_*_MODEL env
@@ -64,10 +64,9 @@ install_claude_cli() {
     fi
 
     # A prior native (non-npm) install manages ~/.local/bin/claude as a
-    # symlink into ~/.local/share/claude/versions/<ver> (see ~/.claude.json's
-    # "installMethod": "native"). npm's bin-linker refuses to clobber a link
-    # it doesn't own, failing with EEXIST. Since this script manages the CLI
-    # via npm, clear a foreign link so npm can (re)create its own.
+    # symlink into ~/.local/share/claude/versions/<ver>. npm's bin-linker refuses
+    # to clobber a link it doesn't own, failing with EEXIST. Since this script
+    # manages the CLI via npm, clear a foreign link so npm can (re)create its own.
     if [ -L "$HOME/.local/bin/claude" ]; then
         local link_target
         link_target=$(readlink -f "$HOME/.local/bin/claude" 2>/dev/null || echo "")

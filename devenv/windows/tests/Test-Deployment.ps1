@@ -80,7 +80,7 @@ $env:NPM_CONFIG_CACHE = Join-Path $job.userRoot 'cache/npm'
 $env:PATH = ($job.toolPaths -join ';') + ';' + $env:PATH
 Import-Module (Join-Path $job.root 'Devenv.psm1') -Force -DisableNameChecking
 function Snapshot {
-    $paths = @('.vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Local/Microsoft/PowerToys/settings.json', 'AppData/Local/Microsoft/PowerToys/Awake/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
+    $paths = @('.vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
     $files = @($paths | ForEach-Object { Join-Path $job.userRoot $_ })
     $setupData = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     if (Test-Path -LiteralPath $setupData) { $files += @(Get-ChildItem -LiteralPath $setupData -File | Select-Object -ExpandProperty FullName) }

@@ -46,7 +46,9 @@ Packages marked `"scope": "machine"` run in the grouped administrator step. Othe
 - **Native credential tools and private storage** own tokens, SSH keys and registry credentials. These stay outside configuration repositories and general setup backups.
 - **`%LOCALAPPDATA%\PersonalDevenv`** holds setup backups and local acceptance artifacts. It is not a configuration inventory.
 
-Installed settings link directly to their tracked sources. Edits through those links, including Terminal and PowerToys preferences, reach `rc_files`; review and commit them there. New ignored authored files still require explicit `git add -f`. Application runtime directories remain real directories, with individual settings links or per-skill directory links as appropriate.
+Installed settings link directly to their tracked sources. Edits through those links, including Terminal preferences, reach `rc_files`; review and commit them there. New ignored authored files still require explicit `git add -f`. Application runtime directories remain real directories, with individual settings links or per-skill directory links as appropriate. Bootstrap installs PowerToys; PowerToys manages its own settings locally.
+
+Claude's credential-bearing settings are generated privately by its `rc_files` package during credential setup. Its preferences come from a tracked template; the rendered file remains local. The installed Claude command runs normally. Rerun credential setup after replacing its vault key, or use `py -3 "$HOME/rc_files/.setup" --package claude`.
 
 Codex's local configuration is seeded from its tracked template only when missing. Existing local preferences are preserved; changing the template does not update an existing local file. Agent instructions and personal skills are deployed from the shared collection. Application-managed skills and downloaded plugin code retain their application ownership.
 
@@ -81,7 +83,7 @@ Pull the wanted configuration, notes or scripts checkout yourself, review local 
 
 Ordinary reruns retain installed Vim, mux and Obsidian plugins. `-Apply -Update` requests their refresh along with themes and the Codex ACP adapter. CoC checks the latest tracked and existing extension choices on every setup, preserving local additions. Obsidian updates preserve authored plugin settings; no downloaded plugin code or release hashes belong in the defaults file.
 
-Open the registered notes vault in Obsidian and select Codex Auto-detect in Copilot if the adapter has not been selected on that device. Restart PowerToys to load Awake preferences and pair KDE Connect with your devices. Native sign-in and device pairing remain first-use interactions.
+Open the registered notes vault in Obsidian and select Codex Auto-detect in Copilot if the adapter has not been selected on that device. Pair KDE Connect with your devices. Native sign-in and device pairing remain first-use interactions.
 
 ## Verification
 

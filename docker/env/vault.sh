@@ -2,19 +2,18 @@
 # vault.sh - Patch local config files from vault-managed secrets.
 #
 # Usage:
-#   vault.sh claude [--status|--force]
 #   vault.sh docker [--status|--force]
 #   vault.sh atlartifactory [--status]
 #
-# claude/docker share one shape: config.template in rc_files -> config file in
+# docker/gh share one shape: config.template in rc_files -> config file in
 # $HOME -> placeholder replaced by the matching plaintext secret from ~/vault.
 # atlartifactory instead patches a marker-delimited block into ~/.netrc (see
 # patch_netrc), since there's no rc_files template for that file.
 #
 # Re-runnable: a rotated secret is re-applied automatically when the live config
 # is still its template apart from the secret values, so re-seeding cannot lose
-# anything. A config the tool itself writes into (~/.claude.json accumulates
-# projects/machineID/userID) fails that test and is left alone until --force.
+# anything. A config the tool itself writes into (gh changes its active account)
+# fails that test and is left alone until --force.
 
 set -e
 
@@ -45,8 +44,7 @@ cleanup_tmp() {
 trap cleanup_tmp EXIT
 
 usage() {
-    echo "Usage: vault.sh <claude|docker|gh|gist|atlartifactory> [--status|--force]"
-    echo "  claude             Patch ~/.claude.json from ~/.claude.json.template"
+    echo "Usage: vault.sh <docker|gh|gist|atlartifactory> [--status|--force]"
     echo "  docker             Patch ~/.docker/config.json from ~/.docker/config.json.template"
     echo "  gh                 Patch ~/.config/gh/hosts.yml from its template (two account tokens)"
     echo "  gist               Write ~/.gist (reuses the gh jerryyin PAT; needs gist scope)"
@@ -55,24 +53,17 @@ usage() {
     echo "  --force            Re-seed from the template and re-apply the vault secret,"
     echo "                     even when the config holds state of its own. Rotations are"
     echo "                     applied automatically when that is lossless, so this is"
-    echo "                     only needed for a config the tool writes into (e.g."
-    echo "                     ~/.claude.json). Discards local edits -- for gh, that"
+    echo "                     only needed for a config the tool writes into."
+    echo "                     Discards local edits -- for gh, that"
     echo "                     includes the active account set by \`gh auth switch\`."
 }
 
-# claude/docker/gh share the template+placeholder shape and use parallel
+# docker/gh share the template+placeholder shape and use parallel
 # PLACEHOLDERS/SECRET_FILES arrays so one config file can carry more than one
 # secret (gh holds two account tokens). atlartifactory is handled separately by
 # patch_netrc and uses only SECRET_FILES[0].
 configure_profile() {
     case "$PROFILE" in
-        claude)
-            CONFIG_FILE="${CLAUDE_CONFIG:-$HOME/.claude.json}"
-            TEMPLATE_FILE="${CLAUDE_TEMPLATE:-$HOME/.claude.json.template}"
-            SECRET_FILES=("${KEY_FILE:-${CLAUDE_KEY_FILE:-$HOME/vault/claude_key.txt}}")
-            PLACEHOLDERS=("${CLAUDE_PLACEHOLDER:-__CLAUDE_SUB_KEY__}")
-            DESCRIPTION="Claude subscription key"
-            ;;
         docker)
             DOCKER_REGISTRY="${DOCKER_REGISTRY:-mkmhub.amd.com}"
             DOCKER_CONFIG_DIR="${DOCKER_CONFIG:-$HOME/.docker}"
@@ -130,7 +121,7 @@ validate_secret() {
     local decoded username password
 
     case "$PROFILE" in
-        claude|gh|gist|atlartifactory)
+        gh|gist|atlartifactory)
             [ -n "$secret" ]
             ;;
         docker)
@@ -239,9 +230,9 @@ patch_config() {
     # the config holds the *old* secret and no placeholder, so nothing matches.
     # So when the secrets have drifted, re-seed anyway -- but only once the
     # config is shown to carry no state of its own, which makes re-seeding
-    # lossless by construction. A config the tool has written into (e.g.
-    # ~/.claude.json, which accumulates projects/machineID/userID) fails that
-    # test and is left alone until --force says to discard it.
+    # lossless by construction. A config with tool-managed state (e.g. gh's
+    # active account) fails that test and is left alone until --force says to
+    # discard it.
     local seed=0 placeholder secret_file secret rotation_blocked=0
     if [ ! -f "$CONFIG_FILE" ] || [ "$FORCE" = 1 ]; then
         seed=1
@@ -310,7 +301,7 @@ patch_config() {
     fi
 }
 
-# Unlike patch_config's claude/docker profiles, there's no rc_files template
+# Unlike patch_config's docker/gh profiles, there's no rc_files template
 # to seed from -- ~/.netrc is a plain credential file a user may already
 # have entries in for other hosts, so this only ever touches its own
 # marker-delimited block (safe to re-run on secret rotation).

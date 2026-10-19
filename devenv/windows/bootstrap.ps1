@@ -52,7 +52,6 @@ if (!$Apply -and !$Check) {
     Write-Output "PLAN: native Windows Vim sources $RcPath/vim/.vimrc; native psmux reuses tmux keys"
     Write-Output 'PLAN: PowerShell 7, Gruvbox colors, font, prompt and shell shortcuts'
     Write-Output 'PLAN: group Developer Mode, WSL, machine packages and SSH-agent service changes under one administrator approval; link configuration as the current user'
-    Write-Output 'PLAN: PowerToys Awake enabled indefinitely; display may sleep (matching existing preferences)'
     if (!$SkipCredentials) { Write-Output 'PLAN: native GitHub, Docker, SSH and Codex credentials via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with min.sh" }
     Write-Output "PLAN: notes at $NotesPath; install missing Obsidian plugins and theme chosen in the vault"
@@ -182,7 +181,7 @@ if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
-if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource -RequireSshAgent }
+if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $vimExe = Get-NativeVim
 Add-ToolPath (Split-Path $vimExe -Parent) -Persist:($env:USERPROFILE -eq $nativeProfile)
@@ -212,7 +211,7 @@ if ($InstallCodexDesktop) { Invoke-Native codex @('app', $NotesPath) }
 Write-Output "Provisioning complete. Backups: $backupRoot"
 Write-Output 'Restart Terminal. vim/vi use native Vim; tmux uses psmux; dev attaches to a native main session.'
 Write-Output 'Open Obsidian and select Codex Auto-detect if needed. Sign in to Codex/GitHub as needed.'
-Write-Output 'Open/restart PowerToys to load the Awake preferences. Pair KDE Connect with your devices on first use.'
+Write-Output 'Pair KDE Connect with your devices on first use.'
 Write-Output 'Run bootstrap.ps1 -Check to inspect readiness.'
 if ($wslState -in @('RebootRequired', 'PendingInitialization')) {
     Write-Output "WSL setup pending: restart Windows, launch $($manifest.wsl.distribution) to create your Linux user, then rerun -Apply."

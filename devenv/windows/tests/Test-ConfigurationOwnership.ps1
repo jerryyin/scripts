@@ -24,6 +24,8 @@ try {
     Assert ((Read-Json (Join-Path $root 'defaults/environment.json')).packages.id -notcontains 'JanDeDobbeleer.OhMyPosh') 'Fresh setup does not require the unused prompt engine'
     Copy-RcFixture $RcRoot $candidate
     $env:USERPROFILE=$userRoot; $env:HOME=$userRoot; $env:LOCALAPPDATA=$local
+    [void][IO.Directory]::CreateDirectory($local)
+    Assert ((Invoke-Native powershell.exe @('-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)') -Capture).Trim() -ieq $local) 'Redirected PowerShell resolves its cache under the test home'
     Assert (!(Test-Path -LiteralPath (Join-Path $candidate '.windows'))) 'Deployment uses application-owned configuration without a shared Windows directory'
     $profile = Join-Path $userRoot 'Documents/PowerShell/profile.ps1'
     $source = Join-Path $candidate 'powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1'

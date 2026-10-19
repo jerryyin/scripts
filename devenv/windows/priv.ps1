@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Native Windows credentials: GitHub, Docker, SSH and Codex.
+Native Windows credentials: GitHub, Docker, SSH, Codex and Claude settings.
 .EXAMPLE
 .\priv.ps1 -Apply
 .EXAMPLE
@@ -11,6 +11,7 @@ param(
     [switch]$Apply,
     [switch]$Status,
     [string]$VaultPath = (Join-Path $env:USERPROFILE 'vault'),
+    [string]$RcPath = (Join-Path $env:USERPROFILE 'rc_files'),
     [string]$SshSource,
     [switch]$SkipSshAgent,
     [switch]$RequireSshAgent
@@ -93,6 +94,13 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     Set-PrivateAcl $VaultPath
 }
 Set-DockerCredential $VaultPath $dockerConfig
+if (Test-Path -LiteralPath (Join-Path $RcPath 'claude/.setup/__main__.py')) {
+    $previousKey = $env:CLAUDE_KEY_FILE
+    try {
+        $env:CLAUDE_KEY_FILE = Join-Path $VaultPath 'claude_key.txt'
+        Invoke-RcSetup $RcPath @('--package', 'claude', '--home', $env:USERPROFILE)
+    } finally { $env:CLAUDE_KEY_FILE = $previousKey }
+}
 
 $keys = @(Initialize-NativeSsh $sshPath $SshSource)
 if (!$keys.Count) { Write-Output 'SSH: no keys yet. Rerun with -SshSource <trusted .ssh folder>, or create a key with ssh-keygen.' }

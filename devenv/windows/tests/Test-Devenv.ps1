@@ -21,11 +21,10 @@ try {
     $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'bootstrap.ps1') 2>&1
     Assert ($LASTEXITCODE -eq 0 -and ($plan -join "`n") -match 'PLAN: install') 'Documented powershell -File entry point resolves its default manifest'
     $sourceRc = Join-Path $testRoot 'rc_files'
-    foreach ($file in @('terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json','powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json','powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) {
-        $destination=Join-Path $sourceRc $file
-        [void][IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
-        Copy-Item -LiteralPath (Join-Path $RcRoot $file) -Destination $destination
-    }
+    $terminalRelative = 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
+    $terminalSource = Join-Path $sourceRc $terminalRelative
+    [void][IO.Directory]::CreateDirectory((Split-Path $terminalSource -Parent))
+    Copy-Item -LiteralPath (Join-Path $RcRoot $terminalRelative) -Destination $terminalSource
     $arrayPath = Join-Path $testRoot 'plugins.json'
     Save-Text $arrayPath '["calendar", "copilot"]' ''
     $ids = @(Read-Json $arrayPath)
@@ -33,7 +32,6 @@ try {
     Save-Text $arrayPath '["calendar"]' ''
     Assert (@(Read-Json $arrayPath).Count -eq 1) 'Single-plugin JSON arrays remain iterable'
     $terminal = Join-Path $testRoot 'Terminal/settings.json'
-    $terminalSource = Join-Path $sourceRc 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json'
     Invoke-TestLink $terminal $terminalSource ''
     Assert (Test-InstalledLink $terminal $terminalSource) 'Terminal directly links to tracked preferences'
     $hash=(Get-FileHash -LiteralPath $terminal).Hash
@@ -64,14 +62,6 @@ try {
     Assert ($codexPackage.Count -eq 1 -and $codexPackage[0].installedCommand -eq 'codex.exe') 'Codex reuses an existing app-managed CLI'
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
-    $powerToys = Join-Path $testRoot 'PowerToys'
-    foreach ($file in @('settings.json', 'Awake/settings.json')) {
-        Invoke-TestLink (Join-Path $powerToys $file) (Join-Path $sourceRc "powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/$file") ''
-    }
-    Assert (Test-InstalledLink (Join-Path $powerToys 'settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json')) 'PowerToys general settings directly link to rc_files'
-    Assert (Test-InstalledLink (Join-Path $powerToys 'Awake/settings.json') (Join-Path $sourceRc 'powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/Awake/settings.json')) 'PowerToys Awake settings directly link to rc_files'
-    $awake=Read-Json (Join-Path $powerToys 'Awake/settings.json')
-    Assert ($awake.properties.mode -eq 1 -and !$awake.properties.keepDisplayOn) 'Awake keeps the requested preferences'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
     $sharedProfile = Join-Path $testRoot "Someone's computer/profile.ps1"
     Save-Text $sharedProfile '# tracked profile' ''

@@ -11,7 +11,7 @@
 #
 #   2. Runtime patches (every start, idempotent + cheap, no network):
 #        - credentials.sh (symlink OAuth credentials from persistent storage)
-#        - vault.sh claude (vault -> ~/.claude.json)
+#        - rc_files Claude setup (vault -> private settings.json)
 #        - vault.sh docker (vault -> ~/.docker/config.json)
 #        - vault.sh atlartifactory (vault -> ~/.netrc)
 #
@@ -161,7 +161,9 @@ runtime_patches() {
         QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
     fi
     bash "$SCRIPT_DIR/credentials.sh"
-    bash "$SCRIPT_DIR/vault.sh" claude
+    if [ -f "$HOME/rc_files/claude/.setup/__main__.py" ]; then
+        python3 "$HOME/rc_files/.setup" --package claude >/dev/null
+    fi
     bash "$SCRIPT_DIR/vault.sh" docker
     bash "$SCRIPT_DIR/vault.sh" gh
     bash "$SCRIPT_DIR/vault.sh" gist
