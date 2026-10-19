@@ -51,7 +51,7 @@ if (!$Apply -and !$Check) {
     Write-Output "PLAN: install $($manifest.packages.id -join ', ') with WinGet"
     Write-Output "PLAN: native Windows Vim sources $RcPath/vim/.vimrc; native psmux reuses tmux keys"
     Write-Output 'PLAN: PowerShell 7, Gruvbox colors, font, prompt and shell shortcuts'
-    Write-Output 'PLAN: enable Developer Mode (one administrator prompt if disabled) and link authored configuration to rc_files'
+    Write-Output 'PLAN: group Developer Mode, WSL, machine packages and SSH-agent service changes under one administrator approval; link configuration as the current user'
     Write-Output 'PLAN: PowerToys Awake enabled indefinitely; display may sleep (matching existing preferences)'
     if (!$SkipCredentials) { Write-Output 'PLAN: native GitHub, Docker, SSH and Codex credentials via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with min.sh" }
@@ -149,40 +149,40 @@ if ($env:USERPROFILE -eq $nativeProfile -and (Get-Process Obsidian -ErrorAction 
 if (!$SkipPackages -and !(Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install App Installer (WinGet), then rerun.' }
 if ($RequireDeveloperMode) {
     if (!(Test-DeveloperMode)) { throw 'This configuration-only run requires Developer Mode to be enabled beforehand; no machine settings were changed.' }
-} else { Ensure-DeveloperMode }
-$wslState = if (!$SkipWsl) { Ensure-Wsl $manifest.wsl.distribution } else { 'Skipped' }
-if (!$SkipPackages) { foreach ($package in $manifest.packages) {
-    if ($package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
-        Write-Host "SKIP $($package.id) (existing native command)"
-        continue
+}
+Update-ProcessPath
+$packages = if ($SkipPackages) { @() } else { @(Get-MissingPackages $manifest.packages) }
+$upgradeNode = $false
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    $nodeVersion = Invoke-Native node @('--version') -Capture
+    $upgradeNode = [version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0'
+    if ($upgradeNode -and $SkipPackages) { throw 'Node >=22.19 is required; supply it on PATH or rerun without -SkipPackages.' }
+}
+$wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions) -contains $manifest.wsl.distribution) { 'Existing' } else { 'PendingInitialization' }
+$sshKeys = @()
+if (!$SkipCredentials) {
+    foreach ($path in @((Join-Path $env:USERPROFILE '.ssh'), $SshSource) | Where-Object { $_ }) {
+        if ($path -eq $SshSource -and !(Test-Path -LiteralPath $path -PathType Container)) { throw 'SSH source directory does not exist.' }
+        $sshKeys += @(Get-ChildItem -LiteralPath $path -File -Filter 'id_*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.' })
     }
-    if ($package.Contains('installedAppxName') -and (Get-AppxPackage -Name $package.installedAppxName -ErrorAction SilentlyContinue)) {
-        Write-Host "SKIP $($package.id) (Microsoft Store installation)"
-        continue
-    }
-    & winget list --id $package.id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
-    $packageStatus = $LASTEXITCODE
-    if ($packageStatus -eq -1978335212) {
-        $installArguments = @('install', '--id', $package.id, '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-        if ($package.Contains('installerArguments')) { $installArguments += @('--custom', $package.installerArguments) }
-        Invoke-Native winget $installArguments
-    } elseif ($packageStatus -eq 0) { Write-Host "SKIP $($package.id) (installed)" }
-    else { throw "WinGet inventory failed for $($package.id) (exit $packageStatus); refusing to treat a query error as a missing package." }
-} }
+}
+$agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
+if ($sshKeys.Count -and !$agent) { throw 'Install the Windows OpenSSH Client optional feature before importing SSH keys.' }
+$machine = @{
+    DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'machine' })
+    Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
+    UpgradeNode=$upgradeNode; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
+}
+$wslState = Invoke-MachineSetup $machine
+foreach ($package in $packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'user' }) { Install-WinGetPackage $package }
 # New installs don't update this PowerShell process's inherited PATH.
 Update-ProcessPath
 $nodeVersion = Invoke-Native node @('--version') -Capture
-if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') {
-    if ($SkipPackages) { throw 'Node >=22.19 is required; supply it on PATH or rerun without -SkipPackages.' }
-    Invoke-Native winget @('upgrade', '--id', 'OpenJS.NodeJS.LTS', '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-    Update-ProcessPath
-    $nodeVersion = Invoke-Native node @('--version') -Capture
-    if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
-}
+if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
-if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource }
+if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -SshSource $SshSource -RequireSshAgent }
 Ensure-Checkout $NotesPath $manifest.notesRepository
 $vimExe = Get-NativeVim
 Add-ToolPath (Split-Path $vimExe -Parent) -Persist:($env:USERPROFILE -eq $nativeProfile)

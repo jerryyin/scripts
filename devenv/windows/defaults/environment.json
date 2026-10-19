@@ -3,11 +3,11 @@
     "rcRepository":  "https://github.com/jerryyin/rc_files.git",
     "vaultRepository": "https://github.com/jerryyin/vault.git",
     "wsl":  {
-                "distribution":  "Ubuntu-24.04"
+                "distribution":  "Ubuntu"
             },
     "packages":  [
                      {
-                         "id":  "Git.Git"
+                         "id":  "Git.Git", "scope": "machine"
                      },
                      {
                          "id":  "Microsoft.WindowsTerminal"
@@ -26,37 +26,38 @@
                          "id":  "BurntSushi.ripgrep.MSVC"
                      },
                      {
-                         "id":  "Python.Python.3.14"
+                         "id":  "Python.Python.3.14",
+                         "installerArguments": "InstallAllUsers=0 InstallLauncherAllUsers=0 PrependPath=1"
                      },
                      {
                          "id":  "Obsidian.Obsidian"
                      },
                      {
-                         "id":  "OpenJS.NodeJS.LTS"
+                         "id":  "OpenJS.NodeJS.LTS", "scope": "machine"
                      },
                      {
                          "id":  "OpenAI.Codex", "installedCommand": "codex.exe"
                      },
                      {
-                         "id":  "Microsoft.PowerToys"
+                         "id":  "Microsoft.PowerToys", "scope": "machine"
                      },
                      {
-                         "id":  "KDE.KDEConnect", "installedAppxName": "KDEe.V.KDEConnect"
+                         "id":  "KDE.KDEConnect", "scope": "machine", "installedAppxName": "KDEe.V.KDEConnect"
                      },
                      {
                          "id":  "Rufus.Rufus"
                      },
                      {
-                         "id":  "AntibodySoftware.WizTree"
+                         "id":  "AntibodySoftware.WizTree", "scope": "machine"
                      },
                      {
-                         "id":  "VideoLAN.VLC"
+                         "id":  "VideoLAN.VLC", "scope": "machine"
                      },
                      {
-                         "id":  "GitHub.cli"
+                         "id":  "GitHub.cli", "scope": "machine"
                      },
                      {
-                         "id":  "7zip.7zip"
+                         "id":  "7zip.7zip", "scope": "machine"
                      },
                      {
                          "id":  "LLVM.clangd"

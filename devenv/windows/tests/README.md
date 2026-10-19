@@ -6,16 +6,22 @@ Run these commands from `devenv/windows`. Inspect each script's parameters befor
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MachineSetup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ConfigurationOwnership.ps1
 pwsh -NoProfile -File .\tests\Test-VimShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
+pwsh -NoProfile -File .\tests\Test-MuxLifecycle.ps1
 ```
 
 `Test-Devenv.ps1` checks bootstrap behavior and simulated WSL outcomes without installing machine packages. Add `-Network` to exercise current upstream plugin, theme and font downloads. `Test-Credentials.ps1` uses fake credentials and key fixtures; it does not sign into real accounts.
 
+`Test-MachineSetup.ps1` substitutes the OS process-launch boundary to check one grouped elevation, zero elevation for unchanged or already-elevated callers, cancellation, failure propagation, the credential boundary and request cleanup. It also checks that Python's user installation does not request a separate all-users launcher. Real UAC and first-time package installations still require the disposable VM acceptance below.
+
 Terminal and ownership checks exercise source links and reruns. Vim and mux shortcut checks drive real applications in isolated console sessions and require their native tools, plugins and configuration to be installed. Supply `-RcRoot` to scripts exposing that parameter when the checkout is outside the default home location.
+
+`Test-MuxLifecycle.ps1` closes and reopens real console clients with isolated psmux data and configuration. It checks that the same shell survives and that bare `psmux` and `tmux` resume an existing numbered session; explicit new-session commands still create a separate session.
 
 The platform-independent configuration setup tests live with the deployer in `rc_files/.setup/tests`; their command is documented in that repository's setup guide.
 

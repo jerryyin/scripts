@@ -14,6 +14,11 @@ if (!(Test-InstalledLink $path $source)) { throw 'Terminal configuration is not 
 $settings = Read-Json $path
 $visible = @($settings.profiles.list | Where-Object { !$_.Contains('hidden') -or !$_.hidden })
 if (@($visible | Where-Object { $_.name -eq 'PowerShell' }).Count -ne 1) { throw 'Duplicate PowerShell entries remain visible' }
+$wsl = @($visible | Where-Object { $_.name -eq 'Ubuntu' })
+if ($wsl.Count -ne 1 -or $wsl[0].commandline -cne 'wsl.exe --cd ~' -or $wsl[0].Contains('source')) {
+    throw 'One Ubuntu profile must launch the default distro without a machine-specific profile source'
+}
+if ($settings.disabledProfileSources -notcontains 'Windows.Terminal.Wsl' -or $settings.disabledProfileSources -notcontains 'Microsoft.WSL') { throw 'Generated WSL profiles must not duplicate the single Ubuntu entry' }
 $before = (Get-Item $path).CreationTimeUtc.Ticks
 Invoke-TestLink $path $source ''
 if ((Get-Item $path).CreationTimeUtc.Ticks -ne $before) { throw 'Terminal rerun replaced its link' }

@@ -15,7 +15,7 @@ git clone https://github.com/jerryyin/scripts.git "$env:USERPROFILE\scripts"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\devenv\windows\bootstrap.ps1" -Apply
 ```
 
-The execution policy flag applies to this process. Setup enables Developer Mode for symbolic links, requesting administrator approval when needed; ordinary configuration and credential operations run as the current user. Conflicting local settings require review rather than a copy-based fallback.
+The execution policy flag applies to this process. Setup groups Developer Mode, WSL installation, machine-wide packages and SSH-agent service changes into one administrator approval. If none are needed, it requests no elevation. User applications, configuration, fonts and credentials run in the original process. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Conflicting local settings require review rather than a copy-based fallback.
 
 Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, package choices, WSL selection and the font download source are owned by [defaults/environment.json](defaults/environment.json). Existing checkouts are reused without pulling, resetting or discarding local work.
 
@@ -36,6 +36,8 @@ Use `Get-Help .\bootstrap.ps1 -Full` and the script's parameter block for the co
 
 Setup installs missing Windows packages, prepares native credentials, clones missing configuration and notes repositories, deploys settings through `rc_files/.setup`, and prepares fonts, Vim, psmux and Obsidian integration. The native package set includes everyday tools such as PowerToys, KDE Connect, Rufus, WizTree and VLC; maintain the actual choices in the defaults file.
 
+Packages marked `"scope": "machine"` run in the grouped administrator step. Other packages install with `--scope user`; Python's launcher is also explicitly installed for the current user. Existing installations are retained regardless of scope. The machine helper logs to `%LOCALAPPDATA%\PersonalDevenv\logs`; its temporary request and result files contain no credentials and are removed after use. Cancelling UAC or a machine-install failure stops setup without retrying elevation.
+
 ## Configuration ownership
 
 - **`scripts`** owns Windows installation, prerequisite discovery and orchestration. The bootstrap and credential entry points are [bootstrap.ps1](bootstrap.ps1) and [priv.ps1](priv.ps1).
@@ -50,11 +52,11 @@ Codex's local configuration is seeded from its tracked template only when missin
 
 ## Native shell and editor
 
-Windows Terminal opens one visible PowerShell 7 profile using the tracked Gruvbox palette and MonacoLigaturized Nerd Font. The PowerShell profile provides the prompt and familiar command aliases, with native executables found on `PATH`. Commands such as `ls` and `cat` are PowerShell aliases; enter `wsl` to use the separate Linux environment.
+Windows Terminal opens one visible PowerShell 7 profile using the tracked Gruvbox palette and MonacoLigaturized Nerd Font. The PowerShell profile provides the prompt and familiar command aliases, with native executables found on `PATH`. Commands such as `ls` and `cat` are PowerShell aliases. Choose the single **Ubuntu** profile or enter `wsl` to open the default Linux distribution. That profile uses `wsl.exe --cd ~`; generated WSL profile sources are disabled to prevent duplicate entries. Setup selects `Ubuntu` by default and reuses that existing environment instead of requesting a second version-named distribution.
 
 `vim` opens terminal Vim using the shared `~/.vimrc`. The bootstrap installs one terminal Vim shortcut and removes standard extra shortcuts from that installation while preserving custom shortcuts. Native clangd supplies C/C++ language services; project build databases and toolchains must match Windows. See the Vim guide for mappings, plugin ownership and maintenance.
 
-`tmux` invokes native psmux, and `dev` attaches or creates its main session. Shared tmux/psmux preferences load directly from linked native configuration, including the backtick prefix and pane navigation. Linux tmux and Windows psmux are separate applications; their native plugin managers and runtime integrations remain distinct.
+Bare `psmux` or `tmux` resumes the most recently active native session, creating `main` when none exists. `dev` always attaches or creates `main`; explicit commands such as `tmux new-session -s work` keep their normal behavior. Closing the terminal leaves the session running; reopen PowerShell and run `tmux` to return. Backtick then `d` detaches without closing the terminal. Exiting the last shell ends that session. Shared tmux/psmux preferences load directly from linked native configuration, including the backtick prefix and pane navigation. Linux tmux and Windows psmux are separate applications; their native plugin managers and runtime integrations remain distinct.
 
 After changing configuration, reload or restart the owning application. PowerShell reads its profile in a new shell. Reload tmux/psmux configuration directly; no generated translation needs refreshing. Font and color preferences stay in the application's tracked settings.
 

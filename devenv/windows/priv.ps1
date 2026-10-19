@@ -12,7 +12,8 @@ param(
     [switch]$Status,
     [string]$VaultPath = (Join-Path $env:USERPROFILE 'vault'),
     [string]$SshSource,
-    [switch]$SkipSshAgent
+    [switch]$SkipSshAgent,
+    [switch]$RequireSshAgent
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -97,15 +98,7 @@ $keys = @(Initialize-NativeSsh $sshPath $SshSource)
 if (!$keys.Count) { Write-Output 'SSH: no keys yet. Rerun with -SshSource <trusted .ssh folder>, or create a key with ssh-keygen.' }
 elseif (!$SkipSshAgent) {
     $sshBin = Join-Path $env:WINDIR 'System32/OpenSSH'
-    $agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
-    if (!$agent) { throw 'Install the Windows OpenSSH Client optional feature, then rerun priv.ps1.' }
-    if ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic') {
-        # Elevate service management only; all credential access stays in this user.
-        $command = 'Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent; if ((Get-Service ssh-agent).Status -ne "Running") { exit 1 }'
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ErrorActionPreference = 'Stop'; " + $command))
-        $serviceProcess = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
-        if ($serviceProcess.ExitCode -ne 0) { throw 'Could not enable ssh-agent. Rerun, or use -SkipSshAgent.' }
-    }
+    Ensure-SshAgent -ReadyOnly:$RequireSshAgent
     $sshAdd = Join-Path $sshBin 'ssh-add.exe'
     $loaded = (Invoke-CredentialCommand $sshAdd @('-l') '').Output
     foreach ($key in $keys) {

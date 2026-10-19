@@ -93,8 +93,21 @@ function Test-DeveloperMode {
     return $null -ne $key -and $key.PSObject.Properties['AllowDevelopmentWithoutDevLicense'] -and $key.AllowDevelopmentWithoutDevLicense -eq 1
 }
 
+function Test-IsAdministrator {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Ensure-DeveloperMode {
     if (Test-DeveloperMode) { Write-Host 'SKIP Developer Mode (enabled)'; return }
+    if (Test-IsAdministrator) {
+        $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+        [void](New-Item -Path $key -Force)
+        [void](New-ItemProperty -LiteralPath $key -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force)
+        if (!(Test-DeveloperMode)) { throw 'Developer Mode could not be enabled.' }
+        Write-Host 'Developer Mode enabled.'
+        return
+    }
     $command = @'
 $ErrorActionPreference = 'Stop'
 try {
@@ -110,6 +123,85 @@ try {
     $process = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     if ($process.ExitCode -ne 0 -or !(Test-DeveloperMode)) { throw 'Developer Mode could not be enabled. Check administrator approval or device policy before rerunning.' }
     Write-Host 'Developer Mode enabled.'
+}
+
+function Get-MissingPackages([object[]]$Packages) {
+    foreach ($package in $Packages) {
+        if ($package.id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or
+            ($package.Contains('scope') -and $package.scope -notin @('user', 'machine'))) { throw 'Invalid package ID or installation scope.' }
+        if ($package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
+            Write-Host "SKIP $($package.id) (existing native command)"; continue
+        }
+        if ($package.Contains('installedAppxName') -and (Get-AppxPackage -Name $package.installedAppxName -ErrorAction SilentlyContinue)) {
+            Write-Host "SKIP $($package.id) (Microsoft Store installation)"; continue
+        }
+        & winget list --id $package.id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        if ($LASTEXITCODE -eq -1978335212) { $package }
+        elseif ($LASTEXITCODE -eq 0) { Write-Host "SKIP $($package.id) (installed)" }
+        else { throw "WinGet inventory failed for $($package.id) (exit $LASTEXITCODE); refusing to treat a query error as a missing package." }
+    }
+}
+
+function Install-WinGetPackage($Package, [switch]$Upgrade) {
+    $action = if ($Upgrade) { 'upgrade' } else { 'install' }
+    $scope = if ($Package.Contains('scope')) { $Package.scope } else { 'user' }
+    $arguments = @($action, '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    if (!$Upgrade -and $Package.Contains('installerArguments')) { $arguments += @('--custom', $Package.installerArguments) }
+    Invoke-Native winget $arguments
+}
+
+function Ensure-SshAgent([switch]$ReadyOnly) {
+    $agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
+    if (!$agent) { throw 'Install the Windows OpenSSH Client optional feature, then rerun setup.' }
+    if ($agent.Status -eq 'Running' -and $agent.StartType -eq 'Automatic') { return }
+    if ($ReadyOnly) { throw 'SSH agent requires machine setup. Rerun bootstrap to prepare it in the grouped administrator step.' }
+    if (Test-IsAdministrator) {
+        Set-Service ssh-agent -StartupType Automatic
+        Start-Service ssh-agent
+    } else {
+        $command = '$ErrorActionPreference = "Stop"; Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent; if ((Get-Service ssh-agent).Status -ne "Running") { exit 1 }'
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $process = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
+        if ($process.ExitCode -ne 0) { throw 'Could not enable ssh-agent.' }
+    }
+    if ((Get-Service ssh-agent).Status -ne 'Running') { throw 'SSH agent did not start.' }
+}
+
+function Invoke-MachineSetup($Plan) {
+    if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !$Plan.UpgradeNode -and !$Plan.SshAgent) { return $Plan.WslState }
+    $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
+    $identifier = [guid]::NewGuid().ToString('N')
+    $work = Join-Path $stateRoot ('machine-' + $identifier)
+    $log = Join-Path $stateRoot ('logs/machine-' + $identifier + '.log')
+    [void][IO.Directory]::CreateDirectory($work)
+    [void][IO.Directory]::CreateDirectory((Split-Path $log -Parent))
+    try {
+        $requestPath = Join-Path $work 'request.json'
+        $resultPath = Join-Path $work 'result.json'
+        $Plan.UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $Plan.LogPath = $log
+        Save-Json $requestPath $Plan ''
+        $helper = (Join-Path $PSScriptRoot 'machine.ps1').Replace("'", "''")
+        $command = "& '$helper' -RequestPath '$($requestPath.Replace("'", "''"))' -ResultPath '$($resultPath.Replace("'", "''"))'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $launch = @{ FilePath=(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'); ArgumentList=@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded); WindowStyle='Hidden'; Wait=$true; PassThru=$true }
+        if (!(Test-IsAdministrator)) { $launch.Verb='RunAs' }
+        Write-Host 'Preparing machine changes together; Windows will request administrator approval once if needed.'
+        $process = Start-Process @launch
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | Out-Host }
+        $result = Read-Json $resultPath
+        if ($process.ExitCode -ne 0) {
+            $reason = if ($result.Contains('Error')) { $result.Error } else { "helper exit $($process.ExitCode); see $log" }
+            throw "Machine setup failed: $reason"
+        }
+        if (!$result.Contains('WslState') -or $result.WslState -notin @('Existing','Skipped','Installed','RebootRequired','PendingInitialization')) { throw "Machine setup returned no valid result; see $log" }
+        return $result.WslState
+    } finally {
+        $resolved = [IO.Path]::GetFullPath($work)
+        $expected = [IO.Path]::GetFullPath($stateRoot).TrimEnd('\') + '\'
+        if (!$resolved.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -ne ('machine-' + $identifier)) { throw 'Unsafe machine request cleanup path' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
 }
 
 function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture, [switch]$AllowProblems) {
