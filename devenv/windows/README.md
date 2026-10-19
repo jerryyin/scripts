@@ -1,472 +1,86 @@
 # Native Windows development environment
 
-One repeatable bootstrap for **PowerShell on Windows**. It also installs WSL
-and Ubuntu 24.04 when missing. Initialize Ubuntu separately with the existing
-`docker/env/min.sh`. Requires Windows 10 build 19041+ or Windows 11, WinGet,
-and access to GitHub and the package feeds.
+A repeatable setup for native PowerShell, terminal Vim, psmux, Windows Terminal, personal configuration, and notes in Obsidian. Setup also installs WSL and the selected Ubuntu distribution when missing; Linux provisioning remains a separate `docker/env/min.sh` run inside Ubuntu.
 
-## Design
+## First machine setup
 
-PowerShell coordinates Windows installers and settings; WinGet installs Windows
-applications, Git owns personal configuration, and upstream tools supply current
-plugin code. The existing Ubuntu `min.sh` remains the Linux installer. Native
-Windows Vim/PowerShell use small adapters around the shared rc files. They don't
-try to reproduce every Linux shell feature. Native psmux is a separate tmux-like
-implementation and should be evaluated in daily use before assuming full parity.
+Use a Windows account with WinGet, network access to the package feeds and GitHub, and administrator approval for machine changes. Close Obsidian before applying setup because its plugin files may be updated.
 
-This keeps the dependency chain to Windows/WinGet, Git and PowerShell. WinGet
-Configuration is another supported way to express package/system state if this
-grows to multiple machine profiles; it isn't required for this personal bootstrap.
-
-## First Windows machine setup
-
-In PowerShell, install Git if needed and obtain this repository:
+Install Git if needed and clone this repository:
 
 ```powershell
 winget install --id Git.Git --exact --source winget
-# Restart PowerShell once if git isn't on PATH yet.
+# Reopen PowerShell if git is not on PATH yet.
 git clone https://github.com/jerryyin/scripts.git "$env:USERPROFILE\scripts"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\devenv\windows\bootstrap.ps1" -Apply
 ```
 
-Normal setup always ensures Developer Mode is enabled. The isolated deployment test passes `-RequireDeveloperMode`, which checks the prerequisite without enabling it.
+The execution policy flag applies to this process. Setup enables Developer Mode for symbolic links, requesting administrator approval when needed; ordinary configuration and credential operations run as the current user. Conflicting local settings require review rather than a copy-based fallback.
 
-The execution policy flag applies to this process only, including scripts read
-over a UNC path; no machine-wide policy is changed. Package installers can
-request UAC elevation. Close Obsidian before applying changes. With no switches
-the script prints a plan. Fresh WinGet installs use current available packages;
-existing packages are retained. Node older than 22.19 is upgraded because the
-shared CoC runtime requires it. Missing plugins are installed from current
-upstream releases. Ordinary reruns retain installed plugins; `-Apply -Update`
-explicitly refreshes Vim/Obsidian plugins, themes and the Codex ACP adapter. CoC extensions check for latest versions on every setup.
+Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, package choices, WSL selection and the font download source are owned by [defaults/environment.json](defaults/environment.json). Existing checkouts are reused without pulling, resetting or discarding local work.
 
-Bootstrap enables Developer Mode for file symlinks, using the Windows
-`AllowDevelopmentWithoutDevLicense` setting. Windows asks for administrator
-approval once if it is disabled. Reruns skip this step. Only that registry change
-runs elevated; configuration and credentials are installed as the current user.
-Remote Device Portal and Device Discovery are not enabled. If policy prevents
-symlinks, setup reports the failure instead of silently copying configuration.
-See [Microsoft's Developer Mode instructions](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode).
+## Plan, apply and check
 
-The starting point is a clean Windows account: neither WSL nor `rc_files`,
-notes, fonts, native Vim, PowerShell 7 or psmux needs to exist. Git and this
-scripts checkout are obtained by the commands above; the bootstrap installs
-the remaining tools and Git clones `rc_files` and notes into the new account's
-home. All destinations derive from that account, with no dependency on this
-machine's user name, WSL filesystem, or existing repositories. On reruns,
-existing Git checkouts are reused without discarding local changes.
+From this directory:
 
 ```powershell
-.\bootstrap.ps1                              # plan, no changes
-.\bootstrap.ps1 -Check                       # read-only inventory; nonzero if incomplete
-.\bootstrap.ps1 -Apply                       # install/configure or repair
-.\bootstrap.ps1 -Apply -Update               # explicitly refresh installed plugins and ACP
-.\bootstrap.ps1 -Apply -SkipWsl              # explicitly opt out of WSL installation
-.\bootstrap.ps1 -Apply -InstallCodexDesktop  # also run the official desktop installer
+.\bootstrap.ps1                              # show the plan
+.\bootstrap.ps1 -Apply                       # install, configure or repair
+.\bootstrap.ps1 -Check                       # report missing tools and configuration drift
+.\bootstrap.ps1 -Apply -Update               # refresh installed plugins and adapters
+.\bootstrap.ps1 -Apply -SkipWsl              # opt out of WSL installation
 .\bootstrap.ps1 -Apply -NotesPath C:\notes -RcPath C:\dev\rc_files
-.\bootstrap.ps1 -Apply -SkipCredentials      # provision tools/settings without credential setup
 ```
 
-## Native credentials
+Use `Get-Help .\bootstrap.ps1 -Full` and the script's parameter block for the complete interface, including redirected locations and optional setup phases. `-Check` checks installed tools, configuration links, font availability and required plugin files. It does not establish successful GUI interaction, authentication or model instruction loading.
 
-`priv.ps1` is the Windows counterpart to the credential phase in Ubuntu.
-Bootstrap calls it after installing tools and before cloning private notes.
-Its initial scope is GitHub, Docker, SSH and Codex:
+Setup installs missing Windows packages, prepares native credentials, clones missing configuration and notes repositories, deploys settings through `rc_files/.setup`, and prepares fonts, Vim, psmux and Obsidian integration. The native package set includes everyday tools such as PowerToys, KDE Connect, Rufus, WizTree and VLC; maintain the actual choices in the defaults file.
 
-| Tool | First run / rerun |
-|---|---|
-| GitHub | Keeps a working `gh` login; otherwise opens `gh auth login --web`. Sign into the account with access to the private vault and notes. GitHub CLI manages credential storage; Linux token templates are not copied. Additional accounts can be added with `gh auth login` and selected with `gh auth switch`. |
-| Vault | Clones the existing private `jerryyin/vault` repository over HTTPS into `%USERPROFILE%\vault` if absent. Reuses an existing checkout with the expected origin, without pulling or resetting it. |
-| Docker | Restores `docker_mkmhub_auth.txt` for `mkmhub.amd.com`, preserving other registries/settings. Uses an existing Docker credential helper through `docker login --password-stdin`; if no helper is configured, writes Docker's base64 auth entry with restricted Windows permissions. Docker Desktop is not installed by this phase. |
-| SSH | Preserves existing Windows keys/config, restricts their permissions, enables the Windows `ssh-agent`, and loads keys. Optional `-SshSource` imports missing `id_*` private/public key pairs from a trusted folder. Encrypted keys may ask for a passphrase. Linux SSH configuration is not copied. |
-| Codex | Keeps a working native login; otherwise runs `codex login` for browser sign-in. Existing auth/cache directories are not migrated from WSL. |
+## Configuration ownership
+
+- **`scripts`** owns Windows installation, prerequisite discovery and orchestration. The bootstrap and credential entry points are [bootstrap.ps1](bootstrap.ps1) and [priv.ps1](priv.ps1).
+- **`rc_files`** owns application settings, shared agent guidance and its self-contained Python setup. Platform subdirectories select native settings. See its [setup guide](https://github.com/jerryyin/rc_files/blob/master/.setup/README.md), [Vim guide](https://github.com/jerryyin/rc_files/blob/master/.setup/vim.md) and [agent guide](https://github.com/jerryyin/rc_files/blob/master/.setup/agents.md).
+- **The notes repository** owns `.obsidian/community-plugins.json`, appearance choices and authored plugin settings. Downloads follow those choices; plugin code remains application runtime data.
+- **Native credential tools and private storage** own tokens, SSH keys and registry credentials. These stay outside configuration repositories and general setup backups.
+- **`%LOCALAPPDATA%\PersonalDevenv`** holds setup backups and local acceptance artifacts. It is not a configuration inventory.
+
+Installed settings link directly to their tracked sources. Edits through those links, including Terminal and PowerToys preferences, reach `rc_files`; review and commit them there. New ignored authored files still require explicit `git add -f`. Application runtime directories remain real directories, with individual settings links or per-skill directory links as appropriate.
+
+Codex's local configuration is seeded from its tracked template only when missing. Existing local preferences are preserved; changing the template does not update an existing local file. Agent instructions and personal skills are deployed from the shared collection. Application-managed skills and downloaded plugin code retain their application ownership.
+
+## Native shell and editor
+
+Windows Terminal opens one visible PowerShell 7 profile using the tracked Gruvbox palette and MonacoLigaturized Nerd Font. The PowerShell profile provides the prompt and familiar command aliases, with native executables found on `PATH`. Commands such as `ls` and `cat` are PowerShell aliases; enter `wsl` to use the separate Linux environment.
+
+`vim` opens terminal Vim using the shared `~/.vimrc`. The bootstrap installs one terminal Vim shortcut and removes standard extra shortcuts from that installation while preserving custom shortcuts. Native clangd supplies C/C++ language services; project build databases and toolchains must match Windows. See the Vim guide for mappings, plugin ownership and maintenance.
+
+`tmux` invokes native psmux, and `dev` attaches or creates its main session. Shared tmux/psmux preferences load directly from linked native configuration, including the backtick prefix and pane navigation. Linux tmux and Windows psmux are separate applications; their native plugin managers and runtime integrations remain distinct.
+
+After changing configuration, reload or restart the owning application. PowerShell reads its profile in a new shell. Reload tmux/psmux configuration directly; no generated translation needs refreshing. Font and color preferences stay in the application's tracked settings.
+
+## WSL and credentials
+
+WSL setup installs the selected distribution without launching it or rebooting automatically. If Windows needs a restart or distribution initialization, bootstrap completes native setup, reports the remaining step and exits with code `3010`. Restart when required, launch Ubuntu to create the Linux account, then rerun `-Apply`. Run `docker/env/min.sh` separately inside Linux. Existing Linux configuration is left to that installer.
+
+The credential phase runs before cloning private notes. It preserves working GitHub and Codex logins, clones the configured private vault when missing, restores the selected Docker registry credentials, and prepares native SSH permissions and agent use. Docker Desktop is not installed by this phase.
 
 ```powershell
-.\priv.ps1                                  # plan only
-.\priv.ps1 -Status                          # read-only presence/login inventory
-.\priv.ps1 -Apply                           # native login + credential setup
-.\priv.ps1 -Apply -SshSource E:\backup\.ssh   # import missing keys; never overwrite existing ones
-.\priv.ps1 -Apply -SkipSshAgent              # leave agent service/loading to the operator
-.\bootstrap.ps1 -Apply -VaultPath C:\private\vault -SshSource E:\backup\.ssh
+.\priv.ps1                                  # plan
+.\priv.ps1 -Status                          # inspect current credentials
+.\priv.ps1 -Apply                           # perform native sign-in and setup
+.\priv.ps1 -Apply -SshSource E:\backup\.ssh   # import missing keys from a trusted source
 ```
 
-The vault repository comes from `defaults/environment.json`; credentials themselves
-stay outside scripts/rc_files and general configuration backups. Vault and key
-files written by this phase allow only the current Windows user and SYSTEM.
-Native credential destinations cannot be Git checkouts, symlinks or junctions.
-If no SSH key exists, supply a trusted backup or create/register a key with
-`ssh-keygen`; setup never generates or uploads a replacement identity silently.
-Only agent service configuration requests UAC; credential reads/writes run as
-the original user. When unset, Git's `core.sshCommand` is pointed at Windows
-OpenSSH so Git and PowerShell use the same agent. Existing overrides are kept.
-Pull the private vault yourself to obtain rotated Docker credentials, then
-rerun `priv.ps1 -Apply`. GitHub and Codex token refresh stays with their tools.
+Existing SSH keys are preserved. Supply a trusted backup or create and register a key yourself if none exists; setup does not silently replace your identity. Vault updates are explicit Git operations. Browser sign-in, encrypted-key passphrases and service approval may require interaction on the target machine.
 
-## What is reused
+## Maintenance and first-use steps
 
-| Environment | Source / behavior |
-|---|---|
-| WSL | Ensures Ubuntu 24.04 is installed; existing distributions and Linux configuration are preserved |
-| Native Vim | A single `.vimrc` symlink points directly to `rc_files/vim/.vimrc`; Vim discovers Python and Git natively |
-| Vim plugins / CoC | Shared plugin and extension choices in `rc_files/vim/.vim`; installed runtime files stay outside Git |
-| Vim runtime | Native Python for LeaderF, Node >=22 for CoC, native ripgrep for search, native clangd for C/C++ semantic highlighting |
-| Multiplexer | Native `psmux`, exposed as `tmux` in PowerShell; uses Windows ConPTY and native PowerShell panes |
-| tmux keys | Read directly from `rc_files/tmux/.config/tmux/common.conf`: backtick prefix, `v` / `S` / `s` splits, vi modes, `r` reload, `b` command-copy, F10 nested-session toggle, shared status settings |
-| PowerShell | `vim`/`vi`, `tmux`, `dev`, `ll`, `la`, history search and word navigation; a Gruvbox prompt |
-| Terminal | Direct link to the complete tracked settings file; GUI edits change rc_files |
-| Everyday Windows tools | PowerToys, KDE Connect, Rufus, WizTree, VLC, GitHub CLI and 7-Zip, installed through WinGet without release pins |
-| PowerToys Awake | Enabled with indefinite keep-awake and display allowed to sleep, matching the current machine; other settings are preserved |
-| Notes | Reuses a registered `notes` Git checkout; otherwise clones once to `%USERPROFILE%\notes` |
-| Obsidian | Uses the vault's Git-tracked plugin/theme choices, installs their latest code, registers the vault, installs the latest Codex ACP adapter |
-| Git | Shared tracked Git preferences and ignore rules; Windows credential helpers use a machine-local include |
-| Codex | Seeds a missing config from the existing template with a Windows trust path; reuses shared instructions/skills without replacing existing ones |
+Pull the wanted configuration, notes or scripts checkout yourself, review local edits, and rerun setup. Correct links and completed installations are reused. Missing tools and incomplete plugin installations are repaired. Fresh package installs use the available upstream version; existing Windows packages are retained unless a required prerequisite upgrade is needed.
 
-`dev` runs `psmux new-session -A -s main`. Ordinary Terminal startup opens
-PowerShell without forcing automatic attachment, matching the current
-workstation's `.no-auto-tmux` preference. Native psmux is a separate
-implementation: the Unix TPM shell scripts, zsh commands, and work-host-specific
-environment aren't loaded. LLVM/GDB mappings remain in the shared vimrc; their
-toolchains must be installed separately if used locally on Windows.
+Ordinary reruns retain installed Vim, mux and Obsidian plugins. `-Apply -Update` requests their refresh along with themes and the Codex ACP adapter. CoC checks the latest tracked and existing extension choices on every setup, preserving local additions. Obsidian updates preserve authored plugin settings; no downloaded plugin code or release hashes belong in the defaults file.
 
-Pane navigation uses the same sequence as Ubuntu: press and release backtick,
-then an arrow or `h/j/k/l` key. The Vim keys come from your Linux
-`tmux-pain-control` declaration, which the original Windows adapter omitted.
-The Windows adapter now reads those plugin choices and adds native equivalents;
-it does not run Linux shell plugins. Arrow bindings are explicitly repeatable.
-The status bar reuses the shared background and colored time/host
-format; its Linux shell variable for the nested-session indicator is omitted.
-The native PowerShell prompt inside each pane uses the same Gruvbox colors,
-folder, Git branch/change marker and `➜`; psmux draws the pane borders and status
-bar. The prompt is defined in `rc_files/powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1`. No external
-prompt engine is required or installed by the bootstrap.
+Open the registered notes vault in Obsidian and select Codex Auto-detect in Copilot if the adapter has not been selected on that device. Restart PowerToys to load Awake preferences and pair KDE Connect with your devices. Native sign-in and device pairing remain first-use interactions.
 
-The native keyboard audit uses real key input in an isolated Windows home:
+## Verification
 
-| Habit | Audit result with psmux 3.4.0 |
-| --- | --- |
-| Backtick then `h/j/k/l`, Ctrl variants | Pane movement verified |
-| `H/J/K/L` | Resize directions verified; amount differs from Linux |
-| `v`, `S`, `s`, `\|`, `\`, `-`, `_`, `%`, `"` | Pane splitting verified |
-| `<`, `>`, Ctrl-p, Ctrl-n | Window swapping/navigation verified |
-| F10 twice | Disable/restore keys and backtick prefix verified |
-| `[`, then `q` | Enter/exit vi copy mode verified |
-| `y`, `Y` | Command line without prompt / directory copied into buffer |
-| Ctrl-s | Native session save verified |
-| Ctrl-r, plugin install/update/clean, mouse clipboard | Configured; not verified by the keyboard audit |
-
-Full parity is not claimed. In the isolated test, a requested five-column resize
-changed 59 columns to 65, and five rows changed 19 to 21. New panes/windows also
-reported the account home instead of inheriting the test directory despite the
-shared `-c` bindings. Clipboard delivery to desktop applications could not be
-verified from the automation session. Native session restoration is separate
-from Linux tmux-resurrect's Vim session support.
-
-The shared vimrc chooses plugins and commands by platform. LeaderF uses its
-Python implementation on Windows and the existing build hook on Linux. Windows
-uses Vim's built-in syntax plus CoC semantic highlighting; Polyglot remains
-enabled on Linux. There is no plugin-autocommand rewriting and no separate
-`vim-windows.vim` shim. Search and multiplexer keys have one shared definition,
-selecting `rg`/`psmux` on Windows and the existing `ag`/`tmux` on Linux.
-Windows Vim uses `cmd.exe` quoting, matching native async plugins such as
-Grepper. LeaderF runs the shared Python helper `project-files.py` on both
-platforms, preserving the IREE/Triton filters and generated build includes.
-Outside a Git checkout it uses ripgrep, or the existing `ag` when ripgrep is absent.
-
-`Test-VimShortcuts.ps1` executes search mappings against known files in a path
-with spaces, checks Git search/signs, window navigation, quickfix, NERDTree and
-session commands, then drives the actual file/buffer pickers and native clangd
-navigation. It tests multiplexer copy/paste and AI-pane transfer using an
-isolated psmux server and a local input reader; no live AI session receives text.
-Windows AI-pane discovery uses the process tree from CIM instead of Linux
-`/proc`, and searches the current psmux session. Linux keeps its existing
-discovery behavior. The tests disable clipboard integration and automatic
-file saving inside their own Vim instance.
-
-Project build/test/debug mappings still require that project's native toolchain.
-Formatting mappings require a formatter such as `clang-format`; `clangd` alone
-does not provide the external command used by vim-autoformat. GDB, IREE/MLIR
-tools and `clang-format` are not installed by this bootstrap. Those project
-workflows, authenticated Copilot operations and Git commands that write history
-are not covered by the shortcut audit.
-
-CoC reads `rc_files/vim/.vim/coc-settings.json` directly on Windows. Its existing
-generic clangd server and `semanticTokens.enable` settings are reused; no extra
-`coc-clangd` extension is installed. Native clangd is installed with WinGet.
-C/C++ outline/navigation uses CoC on Windows; Ctags is not installed. Project
-compile commands and include/toolchain paths must be valid for Windows; a Linux
-build database cannot generally be reused unchanged. LLVM/GDB builds remain
-project-specific. After pulling rc_files, reopen Vim to use the updated settings.
-
-The existing MonacoLigaturized Nerd Font is retained when installed. Otherwise
-the bootstrap installs that same family (Regular, Bold, Italic, BoldItalic)
-per user from its latest upstream release. The family and archive name are
-preferences; no release versions, revisions or download hashes are stored.
-Font artifacts are downloaded over HTTPS and never committed.
-Terminal uses your GruvboxMaterialHardDark palette; native Vim loads the shared
-gruvbox-material configuration and explicitly enables Windows true color.
-
-WSL installation runs `wsl --install --distribution Ubuntu-24.04 --no-launch`,
-elevating that installer only when needed. It never reboots automatically.
-If Windows requires a restart or distribution initialization, the bootstrap
-finishes native setup, reports the pending step and exits with code 3010.
-Restart Windows, launch Ubuntu once to create the Linux account, and rerun
-`-Apply`. Run `min.sh` yourself inside Ubuntu when ready. Existing distributions
-aren't converted, updated, relaunched, or made the default by this utility.
-
-## Storage and reruns
-
-### Terminal Vim and PowerShell
-
-Vim is used through its terminal executable, `vim.exe`. The official Windows
-package also bundles gVim; its base installer component cannot be deselected.
-Bootstrap disables the installer's desktop/Start menu shortcuts and graphical
-Explorer integration on fresh installs, then creates one terminal Vim Start menu
-entry. On existing installs it backs up and removes the standard extra Vim
-shortcuts that target that same installation. Custom shortcuts are preserved.
-
-`PowerShell` is the single visible Windows Terminal profile launching native
-PowerShell 7 with the chosen colors, font and shell profile. It uses the same
-Windows account and files. The stock Windows PowerShell 5 and automatically
-detected PowerShell 7 entries are hidden, retaining their settings. PowerShell's `ls` and `cat` are aliases for
-`Get-ChildItem` and `Get-Content`; Bash syntax and flags are separate.
-Vim's default command shell is Windows `cmd.exe`. Unix shell scripts such as the
-file-list helper explicitly use Git for Windows Bash at `Git/bin/bash.exe`.
-That Bash runs on Windows; use `wsl` explicitly to enter the separate Ubuntu environment.
-
-The latest three-run measurement on PowerShell 7.6.7 reached the bare interactive
-prompt in 1.59-1.70 seconds and the configured prompt in 1.95-2.00 seconds.
-Earlier runs measured 1.3-1.5 and 1.6-1.9 seconds respectively; this varies with
-machine load. Removing the default Oh My Posh initialization brought the
-configured prompt down from roughly 3.7 seconds. A .NET startup
-trace attributed about 423 ms to importing PSReadLine and 276 ms to the system
-script-policy check. The latter creates temporary policy-test scripts; roughly
-182 ms in that trace was inside file-handle closing. These are sampled wall
-times from one trace, not CPU percentages or measurements of antivirus alone.
-The profile itself measured 180-210 ms and drawing the home prompt 40-50 ms.
-Security settings and PSReadLine remain enabled.
-The profile reads discovered executable paths only when `vim`, `tmux`, or `dev`
-is first called. Moving configuration ownership does not remove PowerShell's
-engine, PSReadLine or security-check costs.
-
-### Configuration ownership
-
-* `defaults/environment.json`: repository URLs, Windows package IDs, WSL choice
-  and font download source. The font face belongs to Terminal preferences in rc_files. No plugin list or artifact version/hash locks.
-* `notes/.obsidian/community-plugins.json`: the authoritative enabled plugin list.
-* `notes/.obsidian/appearance.json` and plugin `data.json` files: the authoritative
-  theme choice and settings. Setup preserves these Git-tracked files.
-* `rc_files/vim/.vimrc`: the shared entry point; `config/plugins.vim` owns plugin
-  and CoC extension choices, and `config/windows.vim` holds native OS settings.
-* `rc_files/powershell/.windows/@DOCUMENTS/PowerShell/profile.ps1`: authored PowerShell
-  configuration, loaded directly from the checkout without an AppData copy.
-* `rc_files/terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json`: the actual Terminal settings file, linked from AppData. The default font face is selected here.
-* `rc_files/powertoys/.windows/@LOCALAPPDATA/Microsoft/PowerToys/settings.json` and `Awake/settings.json`: the actual
-  PowerToys settings files, linked individually from AppData. PowerToys may
-  update its schema/version fields when it saves these files.
-* `rc_files/vim/.vimrc`: the single startup file linked as `~/.vimrc` on both
-  platforms. Native Windows Vim discovers it automatically.
-* `rc_files/tmux/.config/tmux/common.conf`: shared tmux/psmux shortcuts and style.
-  `.linux/.tmux.conf` and `.windows/.psmux.conf` source it directly and declare
-  native plugins. `.windows/.tmux/mux.ps1` is the native clipboard runtime helper.
-* PowerShell's `vim`, `tmux` and `dev` commands use native executables on `PATH`.
-  The installer adds Vim's directory to the user `PATH`; the profile needs no
-  generated machine-path file or installation scripts.
-* `%LOCALAPPDATA%\PersonalDevenv`: setup backups and acceptance artifacts.
-* Vim discovers Python and Git natively; setup generates no Vim path file or
-  tmux translation. `.vim`, `_viminfo` and swap files are editor runtime state.
-* Both PowerShell 5 and PowerShell 7 all-host profiles link to the tracked
-  PowerShell profile. Conflicting local content stops setup so it can be moved into the tracked source before linking.
-* Agent instructions and skills come from tracked `rc_files/agents/.agents`
-  files. `.agents/AGENTS.md`, `.codex/AGENTS.md` and `.claude/CLAUDE.md` link to the same source; each managed `.agents/skills/<name>` and `.claude/skills/<name>`
-  directory is a directory link to the corresponding tracked skill directory.
-  Editing installed instructions or skills changes the Git source immediately,
-  including new files and atomic editor saves within skill directories.
-  Existing identical copies are backed up before conversion; differing copies
-  stop setup so their edits can be merged into rc_files. Other installed skills,
-  existing Codex preferences and credentials are preserved.
-* Vim and tmux/psmux setup live in `rc_files/.setup`. Both platforms use
-  the same Python Vim installer and Vimscript driver. Extension choices come
-  from `rc_files/vim/.vim/coc-extensions.json`; plugin/npm installations remain
-  runtime data outside Git.
-
-`scripts` installs system prerequisites. `rc_files` owns authored settings,
-placement conventions and the shared Python deployer. Both Linux and Windows
-use `python3 ~/rc_files/.setup` (`py -3 ~/rc_files/.setup` on Windows) for setup;
-a scripts checkout is not needed. Link operations such as `check` and app
-operations such as `vim` are actions of that same command. Platform directories
-select Linux or Windows without a per-file installer list.
-See [the deployer conventions](../../../rc_files/.setup/README.md) for standalone use.
-No ignore rules are widened, and no runtime app directory is linked into Git.
-Terminal and PowerToys GUI edits write directly into rc_files. Restart an app if it does not observe a change through the link. PowerShell reads its source in the next shell. Rerun setup after changing tmux preferences to refresh the generated native translation.
-The local Codex `config.toml` is initialized from its tracked template only when
-absent; reusable defaults belong in that template. Credentials, trust paths,
-generated translations, plugin code and caches stay outside Git.
-
-Review local edits with `git -C ~/rc_files status --short`. Existing tracked
-files show modifications; new files in the skills subtree show as untracked.
-The repository's existing ignore rules remain intact. New authored files in
-other ignored configuration directories still need an explicit `git add -f`.
-Linking does not stage, commit or push anything.
-
-### Linking and shared Git settings
-
-Both platforms call the repository-local Python deployer. It discovers tracked
-package files by placement, creates direct native links, keeps correct links
-untouched and stops before deployment when a conflicting file needs review.
-There is no saved installation database, duplicate mapping list, Perl or Stow
-dependency. Explicit source migration uses a backup before replacing a destination.
-
-Both platforms link `~/.gitconfig` to `rc_files/git/.gitconfig` and use
-`git/.gitignore` directly. The shared file includes `~/.config/git/platform.conf`,
-which links to the tracked platform-specific settings in `git/.linux` or
-`git/.windows`. Identity, aliases, ignore rules and helper choices are tracked;
-authentication tokens and private keys remain outside Git. Authentication no
-longer generates a second, untracked Git configuration.
-
-`-Check` refreshes process PATH and validates all managed file/skill link targets,
-required executable-path data, the rendered native tmux configuration and ACP
-adapter. It reports detached copies as drift even if their bytes match the source.
-
-#### Alternatives Considered
-
-* A single Windows configuration directory avoided Linux deployment, but put
-  unrelated applications together. Application directories keep ownership clear;
-  the native tmux files belong with the existing tmux configuration.
-* Linking whole application directories would send runtime files into the Git
-  checkout. Only authored settings files are linked; app runtime directories remain real directories.
-* Copies would let edits drift outside Git. Developer Mode and file symlinks
-  keep installed configuration attached to its source. Per-skill directory links also
-  survive editors replacing files, without linking application runtime folders.
-
-The installer does not pull/reset existing checkouts, replace a separate WSL
-notes checkout, or terminate existing sessions. Native sign-in and the limited
-vault/key restoration above are handled by `priv.ps1`. In Copilot, choose Codex's Auto-detect
-once if the fresh device hasn't selected the standard npm adapter path yet.
-Open/restart PowerToys after setup to load Awake preferences. Pair KDE Connect
-with your phone/devices on first use. PowerToys' startup preference lives in its tracked settings file; the bootstrap does not add a separate startup task or background service.
-
-Adding/removing an enabled plugin through Obsidian changes the vault's tracked
-configuration. A fresh clone uses those choices directly, looks up repositories
-in Obsidian's current community registry, and downloads their latest published
-release. Ordinary reruns skip complete installations without querying upstream;
-missing plugins/files are repaired. `-Apply -Update` checks for newer code while
-preserving `data.json`. Themes use current upstream files, including CSS changes
-that did not bump a version. Plugin identity is checked before activating code;
-downloads finish in staging before replacing existing files. No plugin code is
-tracked by this utility. Obsidian's own updater continues to work normally.
-
-The current plugin version is discovered from the publisher's root manifest,
-as used for Obsidian releases. A repository's GitHub "latest" release can belong
-to a different plugin/channel, so it is not used to silently switch identities.
-
-Vim downloads vim-plug only when absent, then uses `PlugInstall --sync` for
-missing plugins. `-Update` refreshes vim-plug and runs `PlugUpdate --sync`, respecting
-any branch or version choice explicitly declared in the shared vimrc. CoC
-extensions retain all installed choices, use latest, and check npm on every setup with --no-save --no-package-lock. npm installs only missing/newer packages; no extensions are pruned. The Codex ACP adapter skips installation when present unless -Update is used. To get newer tracked
-configuration on an existing machine, pull the appropriate Git checkout and
-rerun setup; the bootstrap never resets local work.
-
-## Tests
-
-The configuration suite runs on Windows PowerShell 5.1 with Git, without Pester.
-It uses disposable directories and checks actual Git cloning into absent home
-and repository directories, plus first-run/rerun
-behavior, JSONC, direct settings links, conflict preservation, vault
-registration, latest-release discovery and updates, settings preservation,
-font archives, and manifest identity validation.
-WSL orchestration is tested with simulated command results (existing install,
-fresh install, restart, deferred registration and failures); these tests don't
-install WSL on the current machine. `-Network` also installs current real plugin
-and theme releases in isolation and validates the latest font archive and its
-family name in memory.
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1 -Network
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
-py -3 -B -m unittest discover -s "$HOME/rc_files/.setup/tests"
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
-pwsh -NoProfile -File .\tests\Test-VimShortcuts.ps1
-pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
-```
-
-The credential suite uses fake vault entries and SSH key fixtures. It checks
-Windows ACLs, idempotence, preservation of existing credentials/settings,
-rejection of Git/junction destinations, native stdin/argument handling, and
-the Docker helper path. It never logs in or changes real credentials. Browser
-login, UAC/service changes and real registry authentication require an
-interactive run on the target machine.
-
-The native integration suite uses real Windows Vim and psmux binaries. It edits
-a Windows file, starts interactive Vim in an unnamed buffer, loads the shared
-vimrc, verifies the actual Gruvbox theme, true color, clipboard support and shell
-integration, and exercises prefix/keybindings, panes, windows and a detached
-session. `-InstallPlugins` runs a real install through ConPTY in an isolated
-Windows home, including CoC extensions. Use installed tools or portable builds:
-
-```powershell
-.\tests\Test-NativeTools.ps1 -VimExe C:\tools\vim\vim.exe `
-  -PsmuxExe C:\tools\psmux\psmux.exe -RcRoot C:\dev\rc_files
-
-.\tests\Test-NativeTools.ps1 -VimExe C:\tools\vim\vim.exe `
-  -PsmuxExe C:\tools\psmux\psmux.exe -RcRoot C:\dev\rc_files `
-  -NodeDirectory C:\tools\node -InstallPlugins
-```
-
-Add `-ClangdExe C:\tools\clangd\bin\clangd.exe` to validate native clangd
-availability and request semantic tokens from a real Windows clangd process.
-
-The test's psmux server uses a unique `-L` namespace. It kills only that server.
-Full-plugin fixtures are kept for diagnosis; ordinary fixtures are removed
-after validating the cleanup path. A clean Windows VM is still needed to test
-the complete WinGet/UAC/installer path, reboot behavior, and visual rendering. Developer Mode must already be enabled before the folder test runs.
-
-### Empty-folder deployment and rerun
-
-`Test-Deployment.ps1` runs the actual bootstrap twice under native ConPTY with a
-new, absent Windows home, then runs `-Check`, the native integration suite,
-PowerShell profile/prompt checks and a real ACP initialization handshake. It
-Git-clones a candidate rc_files snapshot and a notes fixture containing your
-actual plugin/theme choices with fake plugin settings. Every installed plugin
-comes from its current upstream publisher. With unchanged upstream extension versions, it compares hashes and write times
-of managed files, plugin code/settings and plugin Git heads across both runs,
-checks plugin skip messages and latest CoC checks, and rejects extra backups on the second run.
-Successful runs leave `verification.json`, first/second transcripts and file
-snapshots beside the isolated home. Runtime checks use their own ConPTY sessions;
-the Vim driver acknowledges a first-start Enter prompt and still rejects startup
-errors recorded in the runtime log. The default test root is deliberately short
-to stay within Windows' executable-path limit for nested npm dependencies.
-
-Supply real portable builds in a tools folder: `vim/**/vim.exe`,
-`psmux/psmux.exe`, `node/**/node.exe`, `python/python3.dll`,
-`clangd/**/clangd.exe`, `gh/**/gh.exe` and `pwsh/pwsh.exe`.
-Existing host Git/WinGet/Terminal/Codex are used for
-inventory. All writable app, Git and npm locations are redirected to the fixture.
-
-```powershell
-.\tests\Test-Deployment.ps1 -ToolsRoot C:\test-tools `
-  -RcCandidate C:\dev\rc_files -NotesConfiguration C:\notes
-```
-
-This is a real application/configuration deployment test. Host WinGet package
-installation, WSL, font registration and credentials are explicitly skipped;
-an empty folder does not isolate Windows installers, the registry or services.
-`-SkipPackages`, `-DocumentsPath` and `-EnvironmentPath` are also
-available on bootstrap for this purpose. Authentication/SSH permission tests
-run separately with fake credentials. A disposable clean Windows VM remains
-necessary to validate first-time machine installers, UAC, reboot, actual sign-in,
-registry authentication and device pairing. No clean-VM result is implied by
-the folder test.
-
-## References
-
-* [psmux native Windows tutorial](https://github.com/psmux/psmux/blob/master/docs/tutorials/getting-started-windows.md)
-* [Vim Windows documentation](https://vimhelp.org/os_win32.txt.html)
-* [WinGet](https://learn.microsoft.com/windows/package-manager/winget/)
-* [WSL installation](https://learn.microsoft.com/windows/wsl/install)
-* [MonacoLigaturized Nerd Font latest release](https://github.com/thep0y/monaco-nerd-font/releases/latest)
-* [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
-* [Codex authentication](https://learn.chatgpt.com/docs/auth)
-* [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login)
-* [Docker registry login](https://docs.docker.com/reference/cli/docker/login/)
-* [Windows SSH key management](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_keymanagement)
+See [tests/README.md](tests/README.md) for focused configuration, credentials, keyboard and application checks, plus deployment into an empty redirected home. These checks have different prerequisites and scopes. A disposable clean Windows VM is required to accept first-time installers, UAC, WSL, reboot behavior and real account sign-in.
