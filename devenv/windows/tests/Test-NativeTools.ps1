@@ -58,7 +58,8 @@ $ErrorActionPreference = 'Stop'
 $job = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-job.json') -Raw | ConvertFrom-Json
 try {
     Import-Module $job.module -Force -DisableNameChecking
-    Invoke-RcSetup $job.rcRoot @('vim', '--home', $job.userRoot, '--vim-exe', $job.vim, '--backup', (Join-Path $job.userRoot 'backups'))
+    $env:PATH = (Split-Path $job.vim -Parent) + ';' + $env:PATH
+    Invoke-RcSetup $job.rcRoot @('--package', 'vim', '--home', $job.userRoot, '--backup', (Join-Path $job.userRoot 'backups'))
     $result = @{ ok=$true }
 } catch { $result = @{ ok=$false; error=$_.Exception.Message } }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'install-result.json'), ($result | ConvertTo-Json))

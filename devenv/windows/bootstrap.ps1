@@ -191,7 +191,7 @@ Invoke-RcSetup $RcPath $deployment
 $fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
 if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
 if (!$SkipVimPlugins) {
-    $vimArguments = @('vim', '--home', $env:USERPROFILE, '--vim-exe', $vimExe)
+    $vimArguments = @('--package', 'vim', '--home', $env:USERPROFILE, '--backup', $backupRoot)
     if ($Update) { $vimArguments += '--update' }
     Invoke-RcSetup $RcPath $vimArguments
 }
@@ -199,7 +199,7 @@ $desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPa
 Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
 Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipAddons) {
-    $muxArguments = @('mux', '--home', $env:USERPROFILE)
+    $muxArguments = @('--package', 'tmux', '--home', $env:USERPROFILE, '--backup', $backupRoot)
     if ($Update) { $muxArguments += '--update' }
     Invoke-RcSetup $RcPath $muxArguments
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update

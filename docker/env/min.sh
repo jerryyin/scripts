@@ -83,7 +83,7 @@ fi
 # before python3 ~/rc_files/.setup below: CoC extension setup requires npm.
 bash "$SCRIPT_DIR/node.sh"
 
-# Python setup uses the system CA bundle for npm. CLI installers source
+# Vim's package setup uses the system CA bundle for npm. CLI installers source
 # ~/.config/node/ca-cert.sh themselves when they need it.
 python3 "$HOME/rc_files/.setup"
 . "$SCRIPT_DIR/../lib/login_shell.sh"
