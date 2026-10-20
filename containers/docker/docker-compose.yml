@@ -1,0 +1,182 @@
+volumes:
+  tools_volume:
+    external: false
+
+x-base-service: &base-service
+  container_name: ${COMPOSE_PROJECT_NAME:-dev}
+  hostname: ${COMPOSE_PROJECT_NAME:-zyin}
+  command:
+    - bash
+    - -c
+    - |
+      DEVENV_PERSISTENT_ROOT=/zyin bash scripts/setup/linux/credentials/activate.sh && exec /bin/zsh
+  tty: true
+  stdin_open: true
+  network_mode: host
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - video
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp=unconfined
+  tmpfs:
+    - "${HOME}/.vscode-server:exec"
+  volumes:
+    - /data:/data
+    - $HOME:/zyin
+    # tools_volume:/usr/local intentionally omitted — testing whether
+    # any service actually relies on tools-setup's /usr/local overlay.
+    # If you need ctags or other packelf'd tools, re-add the mount AND
+    # re-add `depends_on: [tools-setup]` to the consuming service.
+
+# SERVICE_NAME remains the build argument so existing CLI overrides keep working.
+# base.dockerfile maps it to the setup profile; SETUP_PROFILE is an optional override.
+services:
+  tools-setup:
+    command: ["/bin/sh", "-c", "cp -r /usr/local/* /tools || true"]
+    tty: true
+    stdin_open: true
+    build:
+      context: .
+      dockerfile: tools.dockerfile  # Build tools image as usual
+      args:
+        BASE_IMAGE: ubuntu:24.04
+        SERVICE_NAME: tools-setup
+    image: jeryin/dev:tools
+    container_name: zyin-tools-setup
+    volumes:
+      - tools_volume:/tools  # Mount volume to receive tools
+    restart: "no"
+
+  base:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: rocm/dev-ubuntu-24.04:latest
+        SERVICE_NAME: base
+    image: "jeryin/dev:base"
+    profiles: ["base"]
+
+  rocmlir:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: rocm/mlir:latest
+        SERVICE_NAME: base
+    image: "jeryin/dev:rocmlir"
+    profiles: ["rocmlir"]
+
+  ck:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: rocm/composable_kernel:ck_ub24.04_rocm7.0.1_amd-staging
+        SERVICE_NAME: base
+    image: "jeryin/dev:ck"
+    profiles: ["ck"]
+
+  triton:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: rocm/pytorch:latest
+        SERVICE_NAME: triton
+    image: "jeryin/dev:triton"
+    profiles: ["triton"]
+
+  triton-mi450:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: ${TRITON_MI450_BASE_IMAGE:-mkmhub.amd.com/sw-aiggfx1250-dev/ci/gfx1250-pytorch-env:1.4}
+        SERVICE_NAME: triton
+    image: "jeryin/dev:triton-mi450"
+    profiles: ["triton-mi450"]
+    # Mirrors AMD-Triton/triton-mi450 CI: prebuilt gfx1250 PyTorch env plus the
+    # r6.06 AM+FFM package. Keep /am-ffm for local run_on_model.sh compatibility.
+    #
+    # Override the default version with AM_FFM_DIR, e.g.
+    #   AM_FFM_DIR=~/rocdtif-7.13-am+ffmlite-mi400-rNEW drun triton-mi450
+    #
+    # Note: Must duplicate base volumes since YAML merge replaces arrays entirely
+    volumes:
+      - /data:/data
+      - $HOME:/zyin
+      - ${AM_FFM_DIR:-$HOME/rocdtif-7.13-am+ffmlite-mi400-r6.06}:/am-ffm
+
+  # Real gfx1250 hardware (B0 / MI450 beta machine), NOT the simulator.
+  # Uses a prebuilt therock-npi image (ROCm 7.13 + PyTorch 2.10 for gfx1250).
+  #
+  # After launching, build triton from the AMD fork:
+  #   cd ~/triton
+  #   git remote add amd git@github.com:AMD-Triton/triton-mi450.git
+  #   git fetch amd shared/gfx1250 && git checkout amd/shared/gfx1250
+  #   pip uninstall -y triton
+  #   TRITON_BUILD_WITH_CLANG_LLD=true pip install -e ".[build,tests]" --no-build-isolation
+  triton-b0:
+    <<: *base-service
+    shm_size: "16g"
+    environment:
+      - HSA_ENABLE_SDMA=1
+      - HSA_USE_SVM=1
+      - HSA_XNACK=1
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        # ROCm 7.14 / PyTorch 2.11 / gfx1250 — pinned by tag.
+        # NOTE: an earlier 7.14 build (pytorch-2.11.0-rocm7.14.0a20260529-...-gfx1250)
+        # crashed all mxfp_gemm schedules at address (nil) — confirmed regression,
+        # not an env issue. Re-testing with the 20260623 build to see if it's fixed;
+        # revert to the 7.13/PyTorch-2.10 digest pin
+        # (sha256:cd92fa0917ea582581412936367815b17d2004059c131052e000704862dd9857)
+        # if the crash persists.
+        #
+        # --- 2026-08-11: moved to the newest gfx1250 nightly that exists ----------
+        # ROCm 7.15.0a20260728 / PyTorch 2.11.0 / gfx1250
+        # digest sha256:a1ed16e05d6e4b5be697a93c21fae6ab041c68ad945de92bdc12257cac8af0d8
+        # pushed 2026-07-28.
+        #
+        # THIS IS THE CEILING, NOT A FREE CHOICE. 20260728 is the LAST gfx1250 build
+        # in therock-npi. Nightlies after it exist only for gfx90a and gfx1260 and
+        # have moved to a 10.1.0a version line; gfx1250 is absent from that matrix.
+        # Checked on 2026-08-11: no gfx1250 tag exists in compute-rocm-npi-mi450
+        # (empty), therock-main (511 tags) or therock-release (259 tags) either.
+        # So do not go looking for an August gfx1250 image; there is not one yet.
+        #
+        # The image this replaces is preserved on the host as
+        #   jeryin/dev:triton-b0-rocm7.14.0a20260623
+        # because container zhuoryin-triton-b0-0731-1724 was still running the
+        # a8w4-decode-performance campaign on it when this was swapped, and
+        # rebuilding moves the jeryin/dev:triton-b0 tag off that image.
+        #
+        # Previous pin, kept verbatim for revert:
+        # BASE_IMAGE: registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.11.0-rocm7.14.0a20260623-7.14.0a20260623-nightly-ubuntu24.04-gfx1250
+        BASE_IMAGE: registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.11.0-rocm7.15.0a20260728-7.15.0a20260728-nightly-ubuntu24.04-gfx1250
+        SERVICE_NAME: triton
+    image: "jeryin/dev:triton-b0"
+    profiles: ["triton-b0"]
+
+  iree:
+    <<: *base-service
+    build:
+      context: .
+      dockerfile: base.dockerfile
+      args:
+        BASE_IMAGE: rocm/dev-ubuntu-24.04:latest
+        SERVICE_NAME: iree
+    image: "jeryin/dev:iree"
+    profiles: ["iree"]

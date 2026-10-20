@@ -60,7 +60,7 @@ def main():
     args = parser.parse_args()
     args.logs.mkdir(parents=True, exist_ok=True)
     docker = shlex.split(args.docker_command)
-    configuration = args.rc_files.resolve() / 'docker/.docker'
+    configuration = ROOT / 'containers/docker'
     project = f'scripts-validation-{os.getpid()}'
     tags = []
     checks = []

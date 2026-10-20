@@ -18,7 +18,13 @@ try {
         if ($package.scope -ne 'machine') { throw 'Only machine-scoped packages belong in the administrator step.' }
         Install-WinGetPackage $package
     }
-    if ($request.UpgradeNode) { Install-WinGetPackage @{id='OpenJS.NodeJS.LTS'; scope='machine'} -Upgrade }
+    Update-ProcessPath
+    if ($request.Contains('RcMachine') -and $request.RcMachine) {
+        $newCheckout = !(Test-Path -LiteralPath (Join-Path $request.RcPath '.git'))
+        Ensure-Checkout $request.RcPath $request.RcRepository
+        if ($newCheckout) { Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q') }
+        Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine')
+    }
     if ($request.SshAgent) { Ensure-SshAgent }
     Save-Json $ResultPath @{ WslState=$wslState } ''
 } catch {

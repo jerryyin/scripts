@@ -44,10 +44,7 @@ try {
     $savedPath = $env:PATH
     $savedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     try {
-        Add-ToolPath (Split-Path $vim -Parent)
-        $once = $env:PATH
-        Add-ToolPath (Split-Path $vim -Parent)
-        Assert ($env:PATH -ceq $once) 'Adding a native tool directory is unchanged on rerun'
+        $env:PATH = (Split-Path $vim -Parent) + ';' + $env:PATH
         Assert ([Environment]::GetEnvironmentVariable('Path', 'User') -ceq $savedUserPath) 'Redirected setup tests never change the account PATH'
         Assert ((vim --version | Select-Object -First 1) -like 'VIM*') 'The tracked profile runs native Vim without generated machine state'
         Assert ((tmux -V) -match 'psmux') 'The tracked profile runs native psmux without installation scripts'
@@ -97,13 +94,11 @@ try {
     $instructions = Join-Path $candidate 'agents/.agents/AGENTS.md'
     Save-Text $instructions 'tracked instructions v1' ''
     Invoke-TestLink (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
-    Set-NativeCodex $userRoot $candidate ''
     $agents = Join-Path $userRoot '.codex/AGENTS.md'
     Assert ((Get-Item -LiteralPath $agents).LinkType -eq 'SymbolicLink') 'Agent instructions link directly to their tracked source'
     [IO.File]::WriteAllText($agents, 'local instructions')
     Assert ([IO.File]::ReadAllText($instructions) -ceq 'local instructions') 'Local instruction edits immediately reach rc_files'
     Invoke-TestLink (Join-Path $userRoot '.codex/AGENTS.md') $instructions ''
-    Set-NativeCodex $userRoot $candidate ''
     Assert ([IO.File]::ReadAllText($agents) -ceq 'local instructions') 'Local instruction edits are preserved'
     $skillSource = Join-Path $fixture 'tracked-skills/example'
     $skillTarget = Join-Path $userRoot '.agents/skills/example'
@@ -144,7 +139,6 @@ try {
     $healthDocuments = Join-Path $healthHome 'Documents'
     $healthTerminal = Join-Path $healthHome 'Terminal/settings.json'
     Invoke-RcSetup $RcRoot @(Get-DeploymentArguments 'apply' $healthHome $RcRoot $healthDocuments $healthTerminal)
-    Set-NativeCodex $healthHome $RcRoot ''
     Assert (@(Get-ConfigurationProblems $healthHome $RcRoot $healthDocuments $healthTerminal).Count -eq 0) 'Readiness validates actual links and skills without a generated state file'
     Save-Text $healthTerminal ([IO.File]::ReadAllText($healthTerminal)) ''
     # Save-Text skips identical content, so replace only this disposable link.

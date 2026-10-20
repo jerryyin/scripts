@@ -41,7 +41,7 @@ use a temporary base image containing a Git snapshot at `/root/rc_files`.
 Then run the real runtime check with network disabled:
 
 ```sh
-sudo docker compose -f ~/rc_files/docker/.docker/docker-compose.yml \
+sudo docker compose -f ~/scripts/containers/docker/docker-compose.yml \
     --profile '*' config --no-consistency --format json > /tmp/validation-compose.json
 python3 - <<'PY'
 import json

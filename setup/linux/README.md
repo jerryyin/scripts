@@ -13,7 +13,7 @@ bash ~/scripts/setup/linux/setup.sh --list
 
 | Location | Responsibility |
 | --- | --- |
-| `bootstrap.sh` | Base packages, Node, CLI tools, shell, `rc_files` deployment |
+| `bootstrap.sh` | Machine prerequisites and certificate trust, then complete `rc_files` setup |
 | `packages/` | Standalone install/build scripts, including one-off and historical recipes |
 | `credentials/` | Activation, persistent credential sync, vault rendering |
 | `profiles/triton/`, `profiles/iree/` | Each environment's plan, dependencies, and workspace preparation |
@@ -21,11 +21,10 @@ bash ~/scripts/setup/linux/setup.sh --list
 | `lib/` | Internal helpers for package management, shells, storage, workspaces |
 | `tests/` | Local installer and integration regression checks |
 
-`packages/` holds individual scripts such as `node.sh`, `aiter.sh`, `llvm.sh`,
+`packages/` holds individual scripts such as `aiter.sh`, `llvm.sh`,
 and `tokenspeed.sh`. A workflow directory under `profiles/` keeps its
 `profile.sh` plan together with `deps.sh` and `workspace.sh`.
-`bootstrap.sh` establishes the shared baseline and invokes its standard package
-installers. `setup.sh` coordinates that baseline, credentials, and the selected
+`bootstrap.sh` establishes the machine baseline and delegates configured applications, their dependencies, plugins and shell setup to the independent `rc_files` installer. `setup.sh` coordinates that baseline, credentials, and the selected
 workflow. Its built-in `base` default needs no separate profile file.
 
 ```text
@@ -33,7 +32,6 @@ linux/
   bootstrap.sh
   setup.sh
   packages/
-    node.sh
     aiter.sh
     tokenspeed.sh
     ...
@@ -119,7 +117,7 @@ after preparing the host.
 
 ## Docker build and startup
 
-`rc_files/docker/.docker/base.dockerfile` clones scripts and runs:
+`scripts/containers/docker/base.dockerfile` clones scripts and runs:
 
 ```sh
 bash /root/scripts/setup/linux/setup.sh "${SETUP_PROFILE:-${SERVICE_NAME:-base}}" --phase build

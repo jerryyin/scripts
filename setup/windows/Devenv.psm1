@@ -142,11 +142,10 @@ function Get-MissingPackages([object[]]$Packages) {
     }
 }
 
-function Install-WinGetPackage($Package, [switch]$Upgrade) {
-    $action = if ($Upgrade) { 'upgrade' } else { 'install' }
+function Install-WinGetPackage($Package) {
     $scope = if ($Package.Contains('scope')) { $Package.scope } else { 'user' }
-    $arguments = @($action, '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-    if (!$Upgrade -and $Package.Contains('installerArguments')) { $arguments += @('--custom', $Package.installerArguments) }
+    $arguments = @('install', '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    if ($Package.Contains('installerArguments')) { $arguments += @('--custom', $Package.installerArguments) }
     Invoke-Native winget $arguments
 }
 
@@ -168,7 +167,7 @@ function Ensure-SshAgent([switch]$ReadyOnly) {
 }
 
 function Invoke-MachineSetup($Plan) {
-    if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !$Plan.UpgradeNode -and !$Plan.SshAgent) { return $Plan.WslState }
+    if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !$Plan.SshAgent) { return $Plan.WslState }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     $identifier = [guid]::NewGuid().ToString('N')
     $work = Join-Path $stateRoot ('machine-' + $identifier)
@@ -225,6 +224,13 @@ function Invoke-RcSetup([string]$RcRoot, [string[]]$Arguments, [switch]$Capture,
 function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
     if ((Test-Path -LiteralPath $Path) -and (Test-JsonEquivalent (Read-Json $Path) (ConvertTo-Map $Value))) { return }
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
+}
+
+function Get-RcMissingPackages([string]$RcRoot, [string]$Scope = '') {
+    $arguments = @('prerequisites', '--json')
+    if ($Scope) { $arguments += @('--scope', $Scope) }
+    $requirements = ConvertFrom-Json (Invoke-RcSetup $RcRoot $arguments -Capture)
+    foreach ($requirement in $requirements) { $requirement }
 }
 
 function Get-DeploymentArguments([string]$Action, [string]$UserRoot, [string]$RcRoot, [string]$DocumentsPath, [string]$TerminalPath) {
@@ -462,19 +468,6 @@ function Update-ProcessPath {
     $env:PATH = ((($paths -join ';') -split ';' | Where-Object { $_ } | Select-Object -Unique) -join ';')
 }
 
-function Add-ToolPath([string]$Directory, [switch]$Persist) {
-    $directory = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
-    if (!(Test-Path -LiteralPath $directory -PathType Container)) { throw "Tool directory is missing: $directory" }
-    if ($Persist) {
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $entries = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') })
-        if ($entries -notcontains $directory) {
-            [Environment]::SetEnvironmentVariable('Path', (@($directory, $userPath) | Where-Object { $_ }) -join ';', 'User')
-        }
-    }
-    $env:PATH = (@($directory) + @($env:PATH -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $directory })) -join ';'
-}
-
 function Get-NativeVim {
     $command = Get-Command vim.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command -and $command.Source -notlike '*\Git\*') { return $command.Source }
@@ -488,124 +481,6 @@ function Get-NativeVim {
         if ($executable) { return $executable.FullName }
     }
     throw 'Native Vim could not be located. Install vim.vim or put native vim.exe on PATH.'
-}
-
-function Set-VimShortcuts([string]$VimExe, [string]$DesktopPath, [string]$ProgramsPath, [string]$BackupRoot) {
-    $shell = New-Object -ComObject WScript.Shell
-    $vimRoot = Split-Path ([IO.Path]::GetFullPath($VimExe)) -Parent
-    $launcher = Join-Path $ProgramsPath 'Vim.lnk'
-    if (Test-Path -LiteralPath $launcher) {
-        $existing = $shell.CreateShortcut($launcher)
-        if ($existing.TargetPath -ine $VimExe -or $existing.Arguments) { throw "Preserve existing custom Vim shortcut: $launcher" }
-    }
-    $candidates = @()
-    if (Test-Path -LiteralPath $DesktopPath) {
-        $candidates += @(Get-ChildItem -LiteralPath $DesktopPath -File -Filter '*.lnk' |
-            Where-Object Name -match '^gVim( Easy| Read-only)? [0-9]+\.[0-9]+\.lnk$')
-    }
-    $folders = @(Get-ChildItem -LiteralPath $ProgramsPath -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^Vim [0-9]+\.[0-9]+$' -and !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
-    $names = @('gVim.lnk', 'gVim Easy.lnk', 'gVim Read-only.lnk', 'gVim Diff.lnk', 'Vim.lnk', 'Vim Read-only.lnk', 'Vim Diff.lnk', 'Help.lnk', 'Vim tutor.lnk', 'Uninstall.lnk')
-    foreach ($folder in $folders) {
-        $candidates += @(Get-ChildItem -LiteralPath $folder.FullName -File | Where-Object { $names -contains $_.Name -or $_.Name -eq 'Vim Online.url' })
-    }
-    $removed = 0
-    foreach ($file in $candidates) {
-        if ($file.Extension -eq '.url') {
-            if ([IO.File]::ReadAllText($file.FullName) -notmatch '(?m)^URL=https://www\.vim\.org/?\r?$') { continue }
-        } else {
-            $shortcut = $shell.CreateShortcut($file.FullName)
-            if ((Split-Path $shortcut.TargetPath -Parent) -ine $vimRoot) { continue }
-        }
-        $relative = if ($file.DirectoryName -ieq $DesktopPath) { 'Desktop/' + $file.Name } else { 'StartMenu/' + $file.Directory.Name + '/' + $file.Name }
-        $backup = Join-Path $BackupRoot ('vim-shortcuts/' + $relative)
-        [void][IO.Directory]::CreateDirectory((Split-Path $backup -Parent))
-        Copy-Item -LiteralPath $file.FullName -Destination $backup
-        Remove-Item -LiteralPath $file.FullName
-        $removed++
-    }
-    foreach ($folder in $folders) {
-        if (!@(Get-ChildItem -LiteralPath $folder.FullName -Force).Count) { Remove-Item -LiteralPath $folder.FullName }
-    }
-    if (!(Test-Path -LiteralPath $launcher)) {
-        [void][IO.Directory]::CreateDirectory($ProgramsPath)
-        $shortcut = $shell.CreateShortcut($launcher)
-        $shortcut.TargetPath = $VimExe
-        $shortcut.WorkingDirectory = $env:USERPROFILE
-        $shortcut.Save()
-    }
-    Write-Host "Vim shortcuts: one terminal launcher; $removed extra shortcut(s) backed up and removed."
-}
-
-function Set-NativeCodex([string]$UserRoot, [string]$RcRoot, [string]$BackupRoot) {
-    $target = Join-Path $UserRoot '.codex/config.toml'
-    $template = Join-Path $RcRoot 'codex/.codex.config.toml.template'
-    if (!(Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $template)) {
-        $text = [IO.File]::ReadAllText($template).Replace('/home/zhuoryin', $UserRoot.Replace('\', '\\'))
-        Save-Text $target $text $BackupRoot
-    }
-
-}
-
-function Get-FontFiles($Font, [string]$Directory) {
-    [void][IO.Directory]::CreateDirectory($Directory)
-    $release = Get-LatestRelease $Font.repository
-    $asset = @($release.assets | Where-Object { $_.name -ceq $Font.asset })
-    if ($asset.Count -ne 1) { throw "Latest font release is missing $($Font.asset)" }
-    $archivePath = Join-Path $Directory 'font.zip'
-    Get-Download $asset[0].browser_download_url $archivePath
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
-    try {
-        foreach ($entry in $archive.Entries) {
-            if ($entry.FullName -match '(^|[/\\])\.\.([/\\]|$)|^[/\\]|:') { throw 'Unsafe font archive entry' }
-            if ($entry.Name -notmatch '\.ttf$') { continue }
-            if ($entry.Name -notmatch '^[A-Za-z0-9._-]+\.ttf$') { throw 'Invalid font filename' }
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $Directory $entry.Name), $true)
-        }
-    } finally { $archive.Dispose() }
-    if (!@(Get-ChildItem -LiteralPath $Directory -Filter '*.ttf').Count) { throw 'Latest font archive contains no TrueType fonts' }
-}
-
-function Install-Fonts($Font, [string]$BackupRoot, [string]$PreferredFace) {
-    Add-Type -AssemblyName System.Drawing
-    $installed = @(New-Object Drawing.Text.InstalledFontCollection).Families.Name
-    if ($installed -contains $PreferredFace) { return $PreferredFace }
-    $target = Join-Path $env:LOCALAPPDATA 'Microsoft/Windows/Fonts'
-    [void][IO.Directory]::CreateDirectory($target)
-    $key = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
-    [void](New-Item -Path $key -Force)
-    if (!('DevenvFonts' -as [type])) { Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class DevenvFonts {
- [DllImport("gdi32.dll", CharSet=CharSet.Unicode)] public static extern int AddFontResourceEx(string path, uint flags, IntPtr reserved);
- [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
-}
-'@ }
-    $staging = Join-Path ([IO.Path]::GetTempPath()) ('devenv-font-' + [guid]::NewGuid().ToString('N'))
-    try {
-        Get-FontFiles $Font $staging
-        $collection = New-Object Drawing.Text.PrivateFontCollection
-        try {
-            foreach ($fontFile in Get-ChildItem -LiteralPath $staging -Filter '*.ttf') { $collection.AddFontFile($fontFile.FullName) }
-            if ($collection.Families.Name -notcontains $PreferredFace) { throw 'Downloaded font does not contain the requested family' }
-        } finally { $collection.Dispose() }
-        foreach ($fontFile in Get-ChildItem -LiteralPath $staging -Filter '*.ttf') {
-            $file = Join-Path $target $fontFile.Name
-            Copy-Item -LiteralPath $fontFile.FullName -Destination $file -Force
-            if ([DevenvFonts]::AddFontResourceEx($file, 0, [IntPtr]::Zero) -eq 0) { throw "Font registration failed: $file" }
-            [void](New-ItemProperty -Path $key -Name ($fontFile.BaseName + ' (TrueType)') -Value $file -PropertyType String -Force)
-        }
-    } finally {
-        $resolved = [IO.Path]::GetFullPath($staging)
-        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-        if (!$resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -notlike 'devenv-font-*') { throw 'Unsafe font cleanup path' }
-        if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
-    }
-    $result = [IntPtr]::Zero
-    [void][DevenvFonts]::SendMessageTimeout([IntPtr]0xffff, 0x001D, [IntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$result)
-    return $PreferredFace
 }
 
 Export-ModuleMember -Function *

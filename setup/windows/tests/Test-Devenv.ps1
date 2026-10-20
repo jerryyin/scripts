@@ -58,8 +58,6 @@ try {
     $environment = Read-Json (Join-Path $root 'defaults/environment.json')
     $everyday = @('Microsoft.PowerToys', 'KDE.KDEConnect', 'Rufus.Rufus', 'AntibodySoftware.WizTree', 'VideoLAN.VLC')
     Assert (@($everyday | Where-Object { $environment.packages.id -notcontains $_ }).Count -eq 0) 'All requested everyday Windows tools are included in WinGet setup'
-    $codexPackage = @($environment.packages | Where-Object id -eq 'OpenAI.Codex')
-    Assert ($codexPackage.Count -eq 1 -and $codexPackage[0].installedCommand -eq 'codex.exe') 'Codex reuses an existing app-managed CLI'
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
     Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
@@ -86,19 +84,6 @@ try {
     $result = Read-Json $registry
     Assert ($result.vaults.Count -eq 2 -and $result.custom -eq 'retained') 'Vault registration preserves other vaults and settings'
     Assert ((Get-FileHash -LiteralPath $registry).Hash -eq $hash) 'Vault registration is idempotent'
-
-    $rc = Join-Path $testRoot 'rc'
-    Save-Text (Join-Path $rc 'codex/.codex.config.toml.template') "[projects.`"/home/zhuoryin`"]`ntrust_level = `"trusted`"`n" ''
-    Save-Text (Join-Path $rc 'agents/.agents/AGENTS.md') 'shared instructions' ''
-    $fakeUser = Join-Path $testRoot 'WindowsUser'
-    Invoke-TestLink (Join-Path $fakeUser '.codex/AGENTS.md') (Join-Path $rc 'agents/.agents/AGENTS.md') ''
-    Set-NativeCodex $fakeUser $rc ''
-    $codexPath = Join-Path $fakeUser '.codex/config.toml'
-    Assert (![IO.File]::ReadAllText($codexPath).Contains('/home/zhuoryin')) 'New Codex config renders a native Windows trust path'
-    Assert ((Get-Content -LiteralPath (Join-Path $fakeUser '.codex/AGENTS.md') -Raw) -eq 'shared instructions') 'Codex reuses shared agent instructions'
-    Save-Text $codexPath 'existing preferences' ''
-    Set-NativeCodex $fakeUser $rc ''
-    Assert ([IO.File]::ReadAllText($codexPath) -eq 'existing preferences') 'Existing Codex config preserved on rerun'
 
     # A clean account has neither repository nor parent directories. Exercise
     # actual Git cloning from a disposable local source without network/auth.
@@ -135,7 +120,7 @@ try {
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '_vimrc'))) 'Fresh Windows setup does not create a second vimrc entry'
     Assert (!(Test-Path -LiteralPath (Join-Path $vimUser '.vim/machine-paths.json'))) 'Vim configuration requires no generated executable-path file'
     Assert (Test-InstalledLink (Join-Path $vimUser '.vim/config/plugins.vim') (Join-Path $RcRoot 'vim/.vim/config/plugins.vim')) 'Vim plugin declarations link to their shared source'
-    Assert ($environment.packages.id -contains 'LLVM.clangd' -and $environment.packages.id -contains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap installs clangd, GitHub CLI and 7-Zip without Ctags'
+    Assert ($environment.packages.id -notcontains 'LLVM.clangd' -and $environment.packages.id -notcontains 'GitHub.cli' -and $environment.packages.id -contains '7zip.7zip' -and $environment.packages.id -notcontains 'UniversalCtags.Ctags') 'Bootstrap keeps utilities and delegates configured development tools to rc_files'
 
     $module = Get-Module Devenv
     & $module {
@@ -194,31 +179,6 @@ try {
     function Set-FixtureJson([string]$Url, $Value) { & $module { param($u, $v) $script:FixtureJson[$u] = $v } $Url $Value }
     function Set-FixtureFile([string]$Url, $Value) { & $module { param($u, $v) $script:FixtureFiles[$u] = $v } $Url $Value }
 
-    # Exercise release discovery and archive handling without OS registration.
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $fontSource = Join-Path $testRoot 'font-source'
-    [void][IO.Directory]::CreateDirectory($fontSource)
-    Save-Text (Join-Path $fontSource 'fixture.ttf') 'test font bytes' ''
-    $fontZip = Join-Path $testRoot 'fixture.zip'
-    [IO.Compression.ZipFile]::CreateFromDirectory($fontSource, $fontZip)
-    $fixtureFont = [ordered]@{ repository='fixture/fonts'; asset='fonts.zip' }
-    Set-FixtureJson 'https://api.github.com/repos/fixture/fonts/releases/latest' @{ assets=@(@{ name='fonts.zip'; browser_download_url='https://fixture.invalid/font.zip' }) }
-    Set-FixtureFile 'https://fixture.invalid/font.zip' ([IO.File]::ReadAllBytes($fontZip))
-    $fontOutput = Join-Path $testRoot 'font-output'
-    Get-FontFiles $fixtureFont $fontOutput
-    Assert ([IO.File]::ReadAllText((Join-Path $fontOutput 'fixture.ttf')) -ceq 'test font bytes') 'Font archive is selected from the latest upstream release'
-    $fixtureFont.asset = 'absent.zip'
-    $threw = $false
-    try { Get-FontFiles $fixtureFont (Join-Path $testRoot 'bad-font') } catch { $threw = $true }
-    Assert $threw 'Missing font family archive is reported instead of substituting another font'
-    $fixtureFont.asset = 'fonts.zip'
-    $unsafeZip = Join-Path $testRoot 'unsafe.zip'
-    $zip = [IO.Compression.ZipFile]::Open($unsafeZip, [IO.Compression.ZipArchiveMode]::Create)
-    try { [void]$zip.CreateEntry('../escape.ttf') } finally { $zip.Dispose() }
-    Set-FixtureFile 'https://fixture.invalid/font.zip' ([IO.File]::ReadAllBytes($unsafeZip))
-    $threw = $false
-    try { Get-FontFiles $fixtureFont (Join-Path $testRoot 'unsafe-font') } catch { $threw = $true }
-    Assert $threw 'Font archive entries cannot escape the staging directory'
     $vault = Join-Path $testRoot 'vault'
     Save-Json (Join-Path $vault '.obsidian/community-plugins.json') @('fixture') ''
     Save-Json (Join-Path $vault '.obsidian/appearance.json') @{ cssTheme='Fixture Theme' } ''
@@ -302,7 +262,10 @@ try {
     try { Get-Download 'http://fixture.invalid/file' (Join-Path $testRoot 'http') } catch { $threw = $true }
     Assert $threw 'Downloads require HTTPS'
     $preferences = Read-Json (Join-Path $root 'defaults/environment.json')
-    Assert (!$preferences.Contains('addons') -and !$preferences.Contains('codexAcpVersion') -and !$preferences.Contains('vimPlug') -and !$preferences.font.Contains('archive')) 'Preferences contain no duplicate plugin list or artifact version/hash locks'
+    Assert (!$preferences.Contains('addons') -and !$preferences.Contains('codexAcpVersion') -and !$preferences.Contains('vimPlug') -and !$preferences.Contains('font')) 'Preferences contain no duplicate plugin list or artifact version/hash locks'
+    $inventory = "import json,sys; from pathlib import Path; repo=Path(sys.argv[1]); sys.path.insert(0,str(repo/'.setup')); import links,packages; print(json.dumps([p.winget for p in packages.discover(repo,links.tracked_files(repo),[],'windows').requirements if p.winget]))"
+    $applicationIds = ConvertFrom-Json (Invoke-Native py.exe @('-3', '-B', '-c', $inventory, $RcRoot) -Capture)
+    Assert (@($preferences.packages | Where-Object { $applicationIds -contains $_.id }).Count -eq 0) 'Machine utilities do not duplicate the application packages owned by rc_files'
     if ($Network) {
         $manifest = Read-Json (Join-Path $root 'defaults/environment.json')
         $liveVault = Join-Path $testRoot 'live-vault'
@@ -314,15 +277,6 @@ try {
             Install-LatestAddon $live $destination ''
             Assert ((Read-Json (Join-Path $destination 'manifest.json')).version -ceq $live.version) "Current upstream $($live.id) downloads and installs in isolation"
         }
-        $realFonts = Join-Path $testRoot 'real-fonts'
-        Get-FontFiles $manifest.font $realFonts
-        Assert (@(Get-ChildItem -LiteralPath $realFonts -Filter '*.ttf').Count -eq 4) 'Latest upstream font archive downloads all four requested styles'
-        Add-Type -AssemblyName System.Drawing
-        $collection = New-Object Drawing.Text.PrivateFontCollection
-        try {
-            $collection.AddFontFile((Join-Path $realFonts 'MonacoLigaturizedNerdFont-Regular.ttf'))
-            Assert ($collection.Families[0].Name -ceq 'MonacoLigaturized Nerd Font') 'Downloaded font has the requested family, without the Mono variant'
-        } finally { $collection.Dispose() }
     }
     Write-Output "$script:passed assertions passed. Fixtures: $testRoot"
 } finally {

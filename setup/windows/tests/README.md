@@ -15,7 +15,7 @@ pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxLifecycle.ps1
 ```
 
-`Test-Devenv.ps1` checks bootstrap behavior and simulated WSL outcomes without installing machine packages. Add `-Network` to exercise current upstream plugin, theme and font downloads. `Test-Credentials.ps1` uses fake credentials and key fixtures; it does not sign into real accounts.
+`Test-Devenv.ps1` checks bootstrap behavior and simulated WSL outcomes without installing machine packages. Add `-Network` to exercise current upstream plugin and theme downloads. `Test-Credentials.ps1` uses fake credentials and key fixtures; it does not sign into real accounts.
 
 `Test-MachineSetup.ps1` substitutes the OS process-launch boundary to check one grouped elevation, zero elevation for unchanged or already-elevated callers, cancellation, failure propagation, the credential boundary and request cleanup. It also checks that Python's user installation does not request a separate all-users launcher. Real UAC and first-time package installations still require the disposable VM acceptance below.
 
@@ -46,3 +46,5 @@ This runs the real bootstrap twice with redirected application homes, then check
 The tools root must contain real portable builds at `vim/**/vim.exe`, `psmux/psmux.exe`, `node/**/node.exe`, `python/python3.dll`, `clangd/**/clangd.exe`, `gh/**/gh.exe` and `pwsh/pwsh.exe`. Host Git, WinGet, Terminal and Codex are also used for inventory. Read [Test-Deployment.ps1](Test-Deployment.ps1) for the current fixture inputs and [Test-NativeTools.ps1](Test-NativeTools.ps1) for native check options.
 
 An empty home isolates configuration and application data. Machine package installers, font registration, WSL installation, UAC, reboot, real authentication and device pairing require separate acceptance on a disposable clean Windows VM. A folder-based result does not establish those machine-level outcomes.
+
+Native application installer checks live with `rc_files`: `.setup/tests/Test-WindowsPackages.ps1` checks package scopes and grouped elevation, and `terminal/.setup/tests/Test-Font.ps1` checks current-release selection and archive handling. Font registration and actual WinGet installation remain clean-VM checks.

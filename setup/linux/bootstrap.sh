@@ -40,40 +40,11 @@ sudo apt-get -y install sudo software-properties-common apt-utils curl
 
 fix_hostname
 
-shopt -s expand_aliases
-add_ppa_if_available() {
-    local ppa="$1"
-    local codename
-    codename=$(lsb_release -cs 2>/dev/null || { . /etc/os-release && echo "$VERSION_CODENAME"; })
-    local ppa_path=${ppa#ppa:}
-    local url="https://ppa.launchpadcontent.net/${ppa_path}/ubuntu/dists/${codename}/Release"
-    if timeout 15 wget -q --spider "$url" 2>/dev/null; then
-        wait_for_dpkg_lock
-        sudo add-apt-repository -y "$ppa"
-    else
-        echo "Warning: $ppa not available for ${codename}, skipping..." >&2
-    fi
-}
-
-wait_for_dpkg_lock
-sudo apt-get update --allow-insecure-repositories
-
-add_ppa_if_available ppa:jonathonf/vim
-add_ppa_if_available ppa:neovim-ppa/stable
-
-# Repository probes above are best-effort. From here onward every installer is
-# required: a failed dotfile/CLI setup must fail the enclosing Docker build too.
+# Machine and project prerequisites. Configured applications belong to rc_files.
 set -e
-
 wait_for_dpkg_lock
-# Install misc pkgs (For macos: the_silver_searcher)
-# gcc + Python headers/setuptools: LeaderF's vim-plug `do` hook (run by
-# python3 ~/rc_files/.setup) compiles its fuzzyMatch C extension. Fresh Ubuntu
-# also needs pip for the project installers; ROCm/PyTorch images can mask this
-# missing prerequisite by providing it already.
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y  \
-     git zsh fonts-powerline tmux silversearcher-ag less neovim vim wget \
-     python-is-python3 gdb gist openssh-client gcc python3-dev python3-pip python3-setuptools
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+     git python3 python-is-python3 less wget gist python3-pip
 
 # Clone once, then rerun the repository's self-contained installer to repair
 # incomplete deployment. Correct links are left intact; local conflicts stop setup.
@@ -81,18 +52,6 @@ if [ ! -d "$HOME/rc_files" ]; then
     git clone https://github.com/jerryyin/rc_files.git "$HOME/rc_files"
     git -C "$HOME/rc_files" remote set-url origin git@github.com:jerryyin/rc_files.git
 fi
-
-# Everything Node-related (NodeSource repo setup, version guard, the
-# apt-fetch-error shielding workaround, and the final version verification)
-# lives in node.sh so it can be reasoned about/tested on its own. Must run
-# before python3 ~/rc_files/.setup below: CoC extension setup requires npm.
-bash "$SCRIPT_DIR/packages/node.sh"
-
-# Vim's package setup uses the system CA bundle for npm. CLI installers source
-# ~/.config/node/ca-cert.sh themselves when they need it.
-python3 "$HOME/rc_files/.setup"
-. "$SCRIPT_DIR/lib/login_shell.sh"
-configure_login_shell
 
 # Clone scripts
 if [ ! -d "$HOME/scripts" ]; then
@@ -113,8 +72,5 @@ fi
 wait_for_dpkg_lock
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
-# Install CLIs and best-effort config. credentials/activate.sh handles sync
-# once host storage is mounted.
-bash "$SCRIPT_DIR/packages/claude.sh"
-bash "$SCRIPT_DIR/packages/codex.sh"
-bash "$SCRIPT_DIR/packages/gh.sh"
+# rc_files owns application dependencies, configuration and plugins.
+python3 "$HOME/rc_files/.setup"

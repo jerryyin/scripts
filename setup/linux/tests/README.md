@@ -22,7 +22,7 @@ For opt-in checks using a real Docker Engine and installed images, see
 To validate Compose without starting services:
 
 ```sh
-docker compose -f ~/rc_files/docker/.docker/docker-compose.yml \
+docker compose -f ~/scripts/containers/docker/docker-compose.yml \
     --profile '*' config --no-consistency --quiet
 ```
 

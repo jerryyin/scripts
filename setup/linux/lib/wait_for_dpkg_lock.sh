@@ -9,10 +9,6 @@
 # for fresh containers), and also when fuser itself is missing, since a non-zero
 # exit reads as "not held" and so fails open rather than stalling.
 #
-# Shared by bootstrap.sh and packages/node.sh so the two can't drift apart as separate
-# copies. Sourcing keeps both independently runnable: each resolves this path
-# from its own location, the same way credentials/sync.sh picks up
-# lib/find_persistent_root.sh while still working standalone.
 wait_for_dpkg_lock() {
     local waited=0
     local max_wait=600

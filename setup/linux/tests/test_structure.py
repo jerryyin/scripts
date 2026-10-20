@@ -45,6 +45,11 @@ class StructureTests(unittest.TestCase):
             with self.subTest(agent=name):
                 self.assertTrue((ROOT / 'agent' / name).is_dir())
 
+    def test_ssh_pod_bootstrap_does_not_install_an_editor(self):
+        source = (ROOT / 'containers/kubernetes/interactive/pod-ssh-ephemeral.yml').read_text()
+        install = next(line for line in source.splitlines() if 'apt-get install' in line)
+        self.assertNotIn('vim', install.split())
+
 
 if __name__ == '__main__':
     unittest.main()

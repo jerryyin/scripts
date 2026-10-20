@@ -17,7 +17,7 @@ sudo apt-get update --allow-insecure-repositories -qq && sudo apt-get install -f
 # m4: macro processor used by the AM simulator to preprocess model.conf. Without
 # it, AM fails preprocessing fatally but its SystemC threads never tear down, so
 # the hang masquerades as a futex/GIL deadlock. See triton/moe/AM_ITRACE_NOTES.md.
-sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build clangd clang lld m4
+sudo apt-get update && sudo apt-get install -f -y cmake ccache ninja-build clang lld m4
 
 python -m pip config set global.break-system-packages true
 

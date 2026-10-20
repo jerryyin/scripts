@@ -69,6 +69,7 @@ $env:USERPROFILE = $job.userRoot
 $env:HOME = $job.userRoot
 $env:APPDATA = Join-Path $job.userRoot 'AppData/Roaming'
 $env:LOCALAPPDATA = Join-Path $job.userRoot 'AppData/Local'
+[void][IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
 $env:XDG_CONFIG_HOME = Join-Path $job.userRoot '.config'
 $env:CODEX_HOME = Join-Path $job.userRoot '.codex'
 $env:GH_CONFIG_DIR = Join-Path $env:APPDATA 'GitHub CLI'
@@ -77,10 +78,12 @@ $env:GIT_CONFIG_GLOBAL = Join-Path $job.userRoot '.gitconfig'
 $env:GIT_CONFIG_NOSYSTEM = '1'
 $env:NPM_CONFIG_PREFIX = Join-Path $env:APPDATA 'npm'
 $env:NPM_CONFIG_CACHE = Join-Path $job.userRoot 'cache/npm'
+$env:CLAUDE_KEY_FILE = $null
+$env:CLAUDE_CONFIG_DIR = $null
 $env:PATH = ($job.toolPaths -join ';') + ';' + $env:PATH
 Import-Module (Join-Path $job.root 'Devenv.psm1') -Force -DisableNameChecking
 function Snapshot {
-    $paths = @('.vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
+    $paths = @('.claude/settings.json', '.vimrc', '.psmux.conf', '.config/tmux/common.conf', '.gitconfig', '.vim/autoload/plug.vim', '.vim/coc-extensions.json', '.config/coc/extensions/package.json', '.codex/config.toml', '.codex/AGENTS.md', 'Documents/PowerShell/profile.ps1', 'Documents/WindowsPowerShell/profile.ps1', 'Terminal/settings.json', 'AppData/Roaming/obsidian/obsidian.json', 'AppData/Roaming/npm/node_modules/@agentclientprotocol/codex-acp/package.json')
     $files = @($paths | ForEach-Object { Join-Path $job.userRoot $_ })
     $setupData = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     if (Test-Path -LiteralPath $setupData) { $files += @(Get-ChildItem -LiteralPath $setupData -File | Select-Object -ExpandProperty FullName) }

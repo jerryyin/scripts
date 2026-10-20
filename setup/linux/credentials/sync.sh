@@ -48,16 +48,15 @@ CREDENTIAL_PATHS=(
     # host's prefix onto the container, so codex/claude self-updates land in the
     # host's ~/.local while the on-PATH binary lives in the container's
     # /root/.local -- the update "succeeds" but never takes effect, prompting
-    # to update on every launch. codex.sh already runs `npm config set prefix
-    # "$HOME/.local"` per environment, which is correct as long as nothing
-    # symlinks the file away afterwards. If real npm registry auth is ever
+    # to update on every launch. rc_files installs each npm CLI with an explicit
+    # per-user prefix without changing .npmrc. If real npm registry auth is ever
     # needed, source it via vault (like gh/gist) or set NPM_CONFIG_PREFIX in the
     # shell rc (env overrides user npmrc) -- do NOT raw-sync the whole file.
     ".config/github-copilot"     # GitHub Copilot (vim/neovim)
     ".git-credentials"           # Git credential store
     ".netrc"                     # HTTP basic auth
     ".codex"                     # OpenAI Codex CLI state (OAuth tokens, auto-refreshed;
-                                 # config.toml is copied by codex.sh during setup)
+                                 # rc_files seeds config.toml only when missing)
 )
 
 # Find the persistent storage root (mounted host home or PVC)

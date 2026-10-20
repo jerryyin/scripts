@@ -16,11 +16,11 @@ except ImportError:
     yaml = None
 
 RC_ROOT = Path(os.environ.get('RC_FILES_ROOT', ROOT.parent / 'rc_files'))
-DOCKER_CONFIG = RC_ROOT / 'docker/.docker'
+DOCKER_CONFIG = ROOT / 'containers/docker'
 
 
 @unittest.skipUnless(yaml and (DOCKER_CONFIG / 'docker-compose.yml').exists(),
-                     'Sibling rc_files checkout and PyYAML required')
+                     'PyYAML required')
 class DockerEntrypointTests(Fixture, unittest.TestCase):
     def setUp(self):
         super().setUp()

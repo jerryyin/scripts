@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\se
 
 The execution policy flag applies to this process. Setup groups Developer Mode, WSL installation, machine-wide packages and SSH-agent service changes into one administrator approval. If none are needed, it requests no elevation. User applications, configuration, fonts and credentials run in the original process. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Conflicting local settings require review rather than a copy-based fallback.
 
-Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, package choices, WSL selection and the font download source are owned by [defaults/environment.json](defaults/environment.json). Existing checkouts are reused without pulling, resetting or discarding local work.
+Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, machine utilities and first-time WSL selection are owned by [defaults/environment.json](defaults/environment.json). Configured application requirements and the terminal font belong to their packages in `rc_files`. Existing checkouts are reused without pulling, resetting or discarding local work.
 
 ## Plan, apply and check
 
@@ -54,9 +54,9 @@ Codex's local configuration is seeded from its tracked template only when missin
 
 ## Native shell and editor
 
-Windows Terminal opens one visible PowerShell 7 profile using the tracked Gruvbox palette and MonacoLigaturized Nerd Font. The PowerShell profile provides the prompt and familiar command aliases, with native executables found on `PATH`. Commands such as `ls` and `cat` are PowerShell aliases. Choose the single **Ubuntu** profile or enter `wsl` to open the default Linux distribution. That profile uses `wsl.exe --cd ~`; generated WSL profile sources are disabled to prevent duplicate entries. Setup selects `Ubuntu` by default and reuses that existing environment instead of requesting a second version-named distribution.
+Windows Terminal opens one visible PowerShell 7 profile using the tracked Gruvbox palette and MonacoLigaturized Nerd Font. The PowerShell profile provides the prompt and familiar command aliases, with native executables found on `PATH`. Commands such as `ls` and `cat` are PowerShell aliases. Choose the single **Ubuntu** profile or enter `wsl` to open the default Linux distribution. That profile uses `wsl.exe --cd ~`; generated WSL profile sources are disabled to prevent duplicate entries. Setup reuses any registered distribution and installs the manifest's selection only when none exists.
 
-`vim` opens terminal Vim using the shared `~/.vimrc`. The bootstrap installs one terminal Vim shortcut and removes standard extra shortcuts from that installation while preserving custom shortcuts. Native clangd supplies C/C++ language services; project build databases and toolchains must match Windows. See the Vim guide for mappings, plugin ownership and maintenance.
+`vim` opens terminal Vim using the shared `~/.vimrc`. The `rc_files` Vim package installs one terminal Vim shortcut and removes standard extra shortcuts from that installation while preserving custom shortcuts. Native clangd supplies C/C++ language services; project build databases and toolchains must match Windows. See the Vim guide for mappings, plugin ownership and maintenance.
 
 Bare `psmux` or `tmux` resumes the most recently active native session, creating `main` when none exists. `dev` always attaches or creates `main`; explicit commands such as `tmux new-session -s work` keep their normal behavior. Closing the terminal leaves the session running; reopen PowerShell and run `tmux` to return. Backtick then `d` detaches without closing the terminal. Exiting the last shell ends that session. Shared tmux/psmux preferences load directly from linked native configuration, including the backtick prefix and pane navigation. Linux tmux and Windows psmux are separate applications; their native plugin managers and runtime integrations remain distinct.
 
@@ -90,3 +90,7 @@ Open the registered notes vault in Obsidian and select Codex Auto-detect in Copi
 ## Verification
 
 See [tests/README.md](tests/README.md) for focused configuration, credentials, keyboard and application checks, plus deployment into an empty redirected home. These checks have different prerequisites and scopes. A disposable clean Windows VM is required to accept first-time installers, UAC, WSL, reboot behavior and real account sign-in.
+
+## Application ownership
+
+`rc_files` owns the native requirements and setup of Vim, Node, clangd, tmux/psmux, shells, GitHub CLI, Codex and Claude, plus the terminal font. This bootstrap prepares Git/Python, Developer Mode, WSL, credentials, notes/Obsidian and everyday utilities. It asks rc_files for missing machine requirements and includes their installation in its grouped administrator step. It then invokes full rc_files setup as the current user. `-SkipPackages` requires tools supplied on PATH and passes `--no-install`; redirected acceptance runs do not change host package installation, fonts or account settings.

@@ -9,6 +9,14 @@ $savedLocal = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $fixture "Someone's Windows account"
 try {
     & $module {
+        function script:Invoke-RcSetup { param($RcRoot, $Arguments, [switch]$Capture) return $script:RequirementsJson }
+    }
+    foreach ($json in @('[]', '[{"command":"one"}]', '[{"command":"one"},{"command":"two"}]')) {
+        & $module { param($value) $script:RequirementsJson=$value } $json
+        $expected = if ($json -eq '[]') { 0 } elseif ($json.Contains('two')) { 2 } else { 1 }
+        if (@(Get-RcMissingPackages 'fixture' 'machine').Count -ne $expected) { throw 'The prerequisite inventory must preserve empty, single and multiple requirements on PowerShell 5.1.' }
+    }
+    & $module {
         $script:Launches = @()
         $script:ExitCode = 0
         $script:Administrator = $false
@@ -30,16 +38,16 @@ try {
             return @{ ExitCode=$script:ExitCode }
         }
     }
-    $plan = @{ DeveloperMode=$false; Distribution=''; Packages=@(); UpgradeNode=$false; SshAgent=$false; WslState='Existing' }
+    $plan = @{ DeveloperMode=$false; Distribution=''; Packages=@(); RcMachine=$false; SshAgent=$false; WslState='Existing' }
     $state = Invoke-MachineSetup $plan
     if ($state -ne 'Existing' -or (& $module { $script:Launches.Count }) -ne 0) { throw 'An unchanged machine must need zero UAC launches' }
-    $plan.DeveloperMode=$true; $plan.Distribution='Ubuntu-24.04'; $plan.UpgradeNode=$true; $plan.SshAgent=$true
+    $plan.DeveloperMode=$true; $plan.Distribution='Ubuntu-24.04'; $plan.RcMachine=$true; $plan.SshAgent=$true
     $plan.Packages=@(@{id='GitHub.cli'; scope='machine'}, @{id='7zip.7zip'; scope='machine'})
     $state = Invoke-MachineSetup $plan
     $launches = & $module { ,$script:Launches }
     $request = & $module { $script:Request }
     if ($state -ne 'Installed' -or $launches.Count -ne 1 -or $launches[0].Verb -ne 'RunAs' -or !$launches[0].Hidden -or !$launches[0].Wait) { throw 'All machine changes must share one hidden, awaited UAC launch' }
-    if (!$request.DeveloperMode -or !$request.SshAgent -or !$request.UpgradeNode -or $request.Distribution -ne 'Ubuntu-24.04' -or $request.Packages.Count -ne 2) { throw 'The elevated request lost machine work' }
+    if (!$request.DeveloperMode -or !$request.SshAgent -or !$request.RcMachine -or $request.Distribution -ne 'Ubuntu-24.04' -or $request.Packages.Count -ne 2) { throw 'The elevated request lost machine work' }
     if ($request.UserSid -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'The machine phase must retain the initiating account identity' }
     & $module { $script:ExitCode = 7; $script:Launches = @() }
     $failed = $false
@@ -74,6 +82,33 @@ try {
     if ((Ensure-Wsl $manifest.wsl.distribution) -ne 'Existing' -or (& $module { $script:WslInventoryCalls }) -ne 1) { throw 'Existing default Ubuntu was not reused' }
     $python = @($manifest.packages | Where-Object id -eq 'Python.Python.3.14')[0]
     if (!$python.Contains('installerArguments') -or $python.installerArguments -notmatch 'InstallLauncherAllUsers=0') { throw 'The user Python installer must not request a separate UAC for its launcher' }
+    $fresh = Join-Path $fixture 'fresh machine'
+    [void][IO.Directory]::CreateDirectory($fresh)
+    Copy-Item -LiteralPath (Join-Path $root 'machine.ps1') -Destination (Join-Path $fresh 'machine.ps1')
+    Save-Text (Join-Path $fresh 'Devenv.psm1') @'
+$script:PathReady = $false
+function Read-Json($Path) {
+    return @{
+        UserSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        LogPath=(Join-Path $PSScriptRoot 'machine.log'); DeveloperMode=$false
+        WslState='Existing'; Distribution=''; Packages=@(@{id='Git.Git'; scope='machine'})
+        RcMachine=$true; RcPath=(Join-Path $PSScriptRoot 'rc_files'); RcRepository='fixture'; SshAgent=$false
+    }
+}
+function Test-IsAdministrator { return $true }
+function Install-WinGetPackage($Package) { $script:PathReady = $false }
+function Update-ProcessPath { $script:PathReady = $true }
+function Ensure-Checkout($Path, $Repository) {
+    if (!$script:PathReady) { throw 'Newly installed Git is not yet visible on PATH.' }
+    [void][IO.Directory]::CreateDirectory((Join-Path $Path '.git'))
+}
+function Invoke-RcSetup($Path, $Arguments) { }
+function Invoke-Native($Command, $Arguments) { }
+function Save-Json($Path, $Value, $Backup) { [IO.File]::WriteAllText($Path, (ConvertTo-Json $Value)) }
+'@ ''
+    $freshResult = Join-Path $fresh 'result.json'
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $fresh 'machine.ps1') -RequestPath (Join-Path $fresh 'request.json') -ResultPath $freshResult | Out-Null
+    if ($LASTEXITCODE -ne 0 -or (Read-Json $freshResult).WslState -ne 'Existing') { throw 'The machine phase must refresh PATH after installing Git and before cloning rc_files.' }
     Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, user Python launcher, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal

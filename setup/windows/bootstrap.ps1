@@ -69,9 +69,13 @@ if ($Check) {
         if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and @(Get-WslDistributions).Count -gt 0) { Write-Output 'OK WSL (existing distributions; WSL selects its configured default)' }
         else { [void]$missing.Add('WSL'); Write-Output 'MISSING WSL distribution (install or complete first launch)' }
     }
-    foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'psmux', 'codex', 'node', 'rg')) {
+    foreach ($command in @('winget', 'git', 'claude', 'npm')) {
         if (Get-Command $command -ErrorAction SilentlyContinue) { Write-Output "OK $command" }
         else { [void]$missing.Add($command); Write-Output "MISSING $command" }
+    }
+    foreach ($package in @(Get-RcMissingPackages $RcPath)) {
+        $name = if ($package.command) { $package.command } else { $package.winget }
+        [void]$missing.Add($name); Write-Output "MISSING rc_files requirement: $name"
     }
     try {
         $nativeVim = Get-NativeVim
@@ -79,10 +83,6 @@ if ($Check) {
         if ($vimOnPath.Source -ine $nativeVim) { throw 'Native Vim is not the PATH command' }
         Write-Output "OK vim $nativeVim"
     } catch { [void]$missing.Add('vim'); Write-Output 'MISSING native Vim on PATH (rerun -Apply)' }
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        $version = Invoke-Native node @('--version') -Capture
-        if ([version]$version.TrimStart('v') -lt [version]'22.19.0') { [void]$missing.Add('Node >=22.19'); Write-Output "OUTDATED Node $version (requires >=22.19)" }
-    }
     foreach ($path in @($TerminalPath, $managedProfile, (Join-Path $NotesPath '.git'), (Join-Path $RcPath 'vim/.vimrc'), (Join-Path $env:USERPROFILE '.vimrc'), (Join-Path $env:USERPROFILE '.psmux.conf'))) {
         if (Test-Path -LiteralPath $path) { Write-Output "OK $path" }
         else { [void]$missing.Add($path); Write-Output "MISSING $path" }
@@ -151,11 +151,13 @@ if ($RequireDeveloperMode) {
 }
 Update-ProcessPath
 $packages = if ($SkipPackages) { @() } else { @(Get-MissingPackages $manifest.packages) }
-$upgradeNode = $false
-if (Get-Command node -ErrorAction SilentlyContinue) {
-    $nodeVersion = Invoke-Native node @('--version') -Capture
-    $upgradeNode = [version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0'
-    if ($upgradeNode -and $SkipPackages) { throw 'Node >=22.19 is required; supply it on PATH or rerun without -SkipPackages.' }
+# Python is a per-user bootstrap prerequisite; Git is installed in the grouped machine step.
+foreach ($package in $packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'user' }) { Install-WinGetPackage $package }
+Update-ProcessPath
+if (Get-Command git -ErrorAction SilentlyContinue) { Ensure-Checkout $RcPath $manifest.rcRepository }
+$rcMachine = !$SkipPackages -and !(Test-Path -LiteralPath (Join-Path $RcPath '.git'))
+if (!$SkipPackages -and !$rcMachine) {
+    $rcMachine = @(Get-RcMissingPackages $RcPath 'machine').Count -gt 0
 }
 $wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions).Count -gt 0) { 'Existing' } else { 'PendingInitialization' }
 $sshKeys = @()
@@ -170,37 +172,27 @@ if ($sshKeys.Count -and !$agent) { throw 'Install the Windows OpenSSH Client opt
 $machine = @{
     DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'machine' })
     Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
-    UpgradeNode=$upgradeNode; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
+    RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
 }
 $wslState = Invoke-MachineSetup $machine
-foreach ($package in $packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'user' }) { Install-WinGetPackage $package }
-# New installs don't update this PowerShell process's inherited PATH.
 Update-ProcessPath
-$nodeVersion = Invoke-Native node @('--version') -Capture
-if ([version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0') { throw 'Node >=22.19 is required by this native configuration. Restart PowerShell and rerun.' }
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
+if (!$SkipPackages) {
+    Invoke-RcSetup $RcPath @('prerequisites')
+    Update-ProcessPath
+}
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
 Ensure-Checkout $NotesPath $manifest.notesRepository
-$vimExe = Get-NativeVim
-Add-ToolPath (Split-Path $vimExe -Parent) -Persist:($env:USERPROFILE -eq $nativeProfile)
-$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot)
+$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--backup', $backupRoot)
+if ($SkipPackages) { $deployment += '--no-install' }
+if ($SkipFonts) { $deployment += @('--skip-setup', 'terminal') }
+if ($SkipVimPlugins) { $deployment += @('--skip-setup', 'vim') }
+if ($SkipAddons) { $deployment += @('--skip-setup', 'tmux') }
+if ($Update) { $deployment += '--update' }
 Invoke-RcSetup $RcPath $deployment
-$fontFace = (Read-Json (Join-Path $RcPath 'terminal/.windows/@LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json')).profiles.defaults.font.face
-if (!$SkipFonts) { $fontFace = Install-Fonts $manifest.font $backupRoot $fontFace }
-if (!$SkipVimPlugins) {
-    $vimArguments = @('--package', 'vim', '--home', $env:USERPROFILE, '--backup', $backupRoot)
-    if ($Update) { $vimArguments += '--update' }
-    Invoke-RcSetup $RcPath $vimArguments
-}
-$desktop = if ($env:USERPROFILE -eq $nativeProfile) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $env:USERPROFILE 'Desktop' }
-Set-VimShortcuts $vimExe $desktop (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs') $backupRoot
-Set-NativeCodex $env:USERPROFILE $RcPath $backupRoot
 if (!$SkipAddons) {
-    $muxArguments = @('--package', 'tmux', '--home', $env:USERPROFILE, '--backup', $backupRoot)
-    if ($Update) { $muxArguments += '--update' }
-    Invoke-RcSetup $RcPath $muxArguments
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
     Install-CodexAdapter -Update:$Update
     # Copilot's device ID lives in Obsidian localStorage. Use its Auto-detect

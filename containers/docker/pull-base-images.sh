@@ -7,7 +7,7 @@ echo "🐳 Pulling base images ($BASE_PULL_SERVICES)..."
 # (jeryin/dev:triton), a local-only tag never pushed anywhere -- not the
 # Dockerfile's `FROM $BASE_IMAGE`. No compose subcommand fetches just the
 # base image, so read the resolved BASE_IMAGE out of compose's own JSON.
-COMPOSE_FILE="${COMPOSE_FILE:-$HOME/rc_files/docker/.docker/docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$HOME/scripts/containers/docker/docker-compose.yml}"
 if [ ! -f "$COMPOSE_FILE" ]; then
     echo "⚠️  $COMPOSE_FILE not found — skipping base-image pulls"
 elif ! docker compose version >/dev/null 2>&1; then

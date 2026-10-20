@@ -22,7 +22,6 @@ echo "install llvm ${LLVM_VERSION}" && \
     sudo apt-get update && \
     sudo apt-get install -y clang-${LLVM_VERSION} clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} lld-${LLVM_VERSION} && \
     sudo ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang && \
-    sudo ln -sf /usr/bin/clangd-${LLVM_VERSION} /usr/bin/clangd && \
     sudo ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ && \
     sudo ln -sf /usr/bin/clang-tidy-${LLVM_VERSION} /usr/bin/clang-tidy && \
     sudo ln -sf /usr/bin/clang-tidy-diff-${LLVM_VERSION}.py /usr/bin/clang-tidy-diff && \

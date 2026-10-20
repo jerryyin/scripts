@@ -26,7 +26,7 @@ spec:
         - |
           set -eux
           # Install required packages
-          apt-get update -qq && apt-get install -y sudo openssh-server curl vim git
+          apt-get update -qq && apt-get install -y sudo openssh-server curl git
           
           # Create ossci user with uid 1001 (matching fsGroup) with bash as default shell
           useradd -u 1001 -m -s /bin/bash ossci || true

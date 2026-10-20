@@ -162,7 +162,7 @@ runtime_patches() {
     fi
     bash "$SCRIPT_DIR/sync.sh"
     if [ -f "$HOME/rc_files/claude/.setup/__main__.py" ]; then
-        python3 "$HOME/rc_files/.setup" --package claude >/dev/null
+        python3 "$HOME/rc_files/.setup" --package claude --no-install >/dev/null
     fi
     bash "$SCRIPT_DIR/vault.sh" docker
     bash "$SCRIPT_DIR/vault.sh" gh
