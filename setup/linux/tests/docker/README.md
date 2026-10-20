@@ -21,8 +21,8 @@ Use `--rc-files /path/to/rc_files` for a non-sibling checkout. Omit
 The suite takes a snapshot of the local working tree, substitutes external
 installers with recorders, includes the Git snapshot in a temporary base image,
 and builds the actual
-`rc_files` Dockerfile through every development Compose service. Checks include
-the actual `dbuild` command for every service, build-phase isolation, startup/restart, argument precedence,
+`scripts` Dockerfile through every development Compose service. Checks include
+the installed scripts-owned `dbuild` command for every service, build-phase isolation, startup/restart, argument precedence,
 and failed builds. The inherited entry point is deliberately invalid to verify
 that the Dockerfile clears it. Temporary services have no devices, host mounts,
 or network access at runtime. Only the builds need network access.

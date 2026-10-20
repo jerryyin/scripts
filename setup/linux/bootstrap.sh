@@ -74,3 +74,9 @@ sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
 # rc_files owns application dependencies, configuration and plugins.
 python3 "$HOME/rc_files/.setup"
+
+# Expose this checkout's Docker commands through the existing link installer.
+for command_file in "$SCRIPT_DIR/../../containers/docker/bin/"*; do
+    python3 "$HOME/rc_files/.setup" link --source "$command_file" \
+        --target "$HOME/.local/bin/$(basename "$command_file")"
+done

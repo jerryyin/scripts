@@ -1,12 +1,35 @@
 """Required bootstrap steps must not hide failures behind a later installer."""
 
 import os
+from pathlib import Path
 import unittest
 
 from support import Fixture, ROOT, executable, recorder
 
 
 class BootstrapTests(Fixture, unittest.TestCase):
+    def test_docker_command_installation_links_sources_and_is_repeatable(self):
+        rc_root = Path(os.environ.get('RC_FILES_ROOT', ROOT.parent / 'rc_files'))
+        if not (rc_root / '.setup/__main__.py').exists():
+            self.skipTest('rc_files setup is required for the command installation check')
+        (self.home / 'rc_files').symlink_to(rc_root, target_is_directory=True)
+        source = (ROOT / 'setup/linux/bootstrap.sh').read_text()
+        installer = self.temp / 'install-commands.sh'
+        installer.write_text('set -e\nSCRIPT_DIR="$COMMAND_SETUP_DIR"\n' +
+                             source[source.index('# Expose this checkout'):])
+        environment = dict(self.env, COMMAND_SETUP_DIR=str(ROOT / 'setup/linux'))
+        self.run_shell(installer, env=environment)
+        commands = list((ROOT / 'containers/docker/bin').iterdir())
+        self.assertEqual({path.name for path in commands}, {'drun', 'dbuild', 'dcompose'})
+        stamps = {}
+        for command in commands:
+            target = self.home / '.local/bin' / command.name
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(target.resolve(), command)
+            stamps[command.name] = target.lstat().st_mtime_ns
+        self.run_shell(installer, env=environment)
+        self.assertEqual({name: (self.home / '.local/bin' / name).lstat().st_mtime_ns for name in stamps}, stamps)
+
     def test_credential_refresh_cannot_install_applications_and_propagates_failure(self):
         entry = self.repo / 'setup/linux/credentials/activate.sh'
         entry.write_text((ROOT / 'setup/linux/credentials/activate.sh').read_text())

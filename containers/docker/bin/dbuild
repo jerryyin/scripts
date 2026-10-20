@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# == 0 )); then
+    echo 'Usage: dbuild [build options...] <service>' >&2
+    exit 2
+fi
+
+command_dir=$(dirname "$(readlink -f "$0")")
+exec "$command_dir/dcompose" build "$@"

@@ -1,4 +1,4 @@
-"""Exercise rc_files' actual Dockerfile RUN and Compose startup shell commands."""
+"""Exercise the actual Dockerfile RUN and Compose startup shell commands."""
 import json
 import os
 from pathlib import Path
@@ -15,7 +15,6 @@ try:
 except ImportError:
     yaml = None
 
-RC_ROOT = Path(os.environ.get('RC_FILES_ROOT', ROOT.parent / 'rc_files'))
 DOCKER_CONFIG = ROOT / 'containers/docker'
 
 

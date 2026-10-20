@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# == 0 )); then
+    echo 'Usage: drun <service>' >&2
+    exit 2
+fi
+
+containers=$(docker ps -a --format '{{.Names}}')
+if grep -Fxq zyin-tools-setup <<< "$containers"; then
+    echo 'Removing existing container: zyin-tools-setup'
+    docker rm -f zyin-tools-setup
+fi
+
+command_dir=$(dirname "$(readlink -f "$0")")
+exec "$command_dir/dcompose" up -d --no-build "$@"

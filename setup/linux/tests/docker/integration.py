@@ -129,28 +129,23 @@ ENTRYPOINT ["/bin/false"]
                 return run([*compose, 'exec', '-T', service, 'cat', '/validation-calls'],
                            f'{service}-calls').splitlines()
 
-            # Exercise the actual rc_files shell functions through a per-file
-            # symlink, as deployed by rc_files/.setup. The merged model points
-            # only at our disposable image tags and service settings.
+            # Exercise the installed scripts-owned command against disposable images.
             merged = run([*compose, '--profile', '*', 'config', '--format', 'json'], 'dbuild-model')
             merged_path = work / 'entrypoint-compose.json'
             merged_path.write_text(merged)
             shell_home = work / 'shell-home'
-            (shell_home / '.docker').mkdir(parents=True)
-            (shell_home / '.docker/docker-compose.yml').symlink_to(merged_path)
-            binaries = work / 'bin'
-            binaries.mkdir()
+            binaries = shell_home / '.local/bin'
+            binaries.mkdir(parents=True)
             wrapper = binaries / 'docker'
             wrapper.write_text('#!/bin/sh\nexec ' + shlex.join(docker) + ' "$@"\n')
             wrapper.chmod(0o755)
-            shell = (args.rc_files / 'zsh/.linux/.zshrc').read_text()
-            definitions = shell[shell.index('function set_compose_project_name()'):shell.index('export CLICOLOR_FORCE=1')]
-            invocation = work / 'dbuild.zsh'
+            for command in (ROOT / 'containers/docker/bin').iterdir():
+                run(['python3', args.rc_files / '.setup', 'link', '--source', command,
+                     '--target', binaries / command.name], f'link-{command.name}')
 
             def dbuild(arguments, name):
-                invocation.write_text(definitions + '\ndbuild ' + shlex.join(arguments) + '\n')
                 run(['env', f'HOME={shell_home}', f'PATH={binaries}:{os.environ["PATH"]}',
-                     'zsh', '-f', invocation], name)
+                     f'COMPOSE_FILE={merged_path}', binaries / 'dbuild', *arguments], name)
 
             for name, service in services.items():
                 dbuild([name], f'{name}-dbuild')
