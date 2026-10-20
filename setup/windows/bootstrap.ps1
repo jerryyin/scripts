@@ -66,8 +66,8 @@ if ($Check) {
     if (Test-DeveloperMode) { Write-Output 'OK Developer Mode' }
     else { [void]$missing.Add('Developer Mode'); Write-Output 'MISSING Developer Mode (required for configuration symlinks)' }
     if (!$SkipWsl) {
-        if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and (@(Get-WslDistributions) -contains $manifest.wsl.distribution)) { Write-Output "OK WSL $($manifest.wsl.distribution)" }
-        else { [void]$missing.Add('WSL'); Write-Output "MISSING WSL $($manifest.wsl.distribution) (install or complete first launch)" }
+        if ((Get-Command wsl.exe -ErrorAction SilentlyContinue) -and @(Get-WslDistributions).Count -gt 0) { Write-Output 'OK WSL (existing distributions; WSL selects its configured default)' }
+        else { [void]$missing.Add('WSL'); Write-Output 'MISSING WSL distribution (install or complete first launch)' }
     }
     foreach ($command in @('winget', 'git', 'gh', 'clangd', 'wt', 'pwsh', 'psmux', 'codex', 'node', 'rg')) {
         if (Get-Command $command -ErrorAction SilentlyContinue) { Write-Output "OK $command" }
@@ -157,7 +157,7 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
     $upgradeNode = [version]$nodeVersion.TrimStart('v') -lt [version]'22.19.0'
     if ($upgradeNode -and $SkipPackages) { throw 'Node >=22.19 is required; supply it on PATH or rerun without -SkipPackages.' }
 }
-$wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions) -contains $manifest.wsl.distribution) { 'Existing' } else { 'PendingInitialization' }
+$wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions).Count -gt 0) { 'Existing' } else { 'PendingInitialization' }
 $sshKeys = @()
 if (!$SkipCredentials) {
     foreach ($path in @((Join-Path $env:USERPROFILE '.ssh'), $SshSource) | Where-Object { $_ }) {

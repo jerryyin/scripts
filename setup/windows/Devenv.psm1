@@ -434,12 +434,12 @@ function Get-WslDistributions {
 }
 
 function Ensure-Wsl([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$Distribution) {
-    if (@(Get-WslDistributions) -contains $Distribution) { return 'Existing' }
+    if (@(Get-WslDistributions).Count -gt 0) { return 'Existing' }
     Write-Host "Installing WSL and $Distribution. Windows may request elevation and a restart."
     $result = Invoke-WslCommand @('--install', '--distribution', $Distribution, '--no-launch') -Elevate
     if ($result.ExitCode -in @(3010, 1641)) { return 'RebootRequired' }
     if ($result.ExitCode -ne 0) { throw "WSL installation failed ($($result.ExitCode)): $($result.Output)" }
-    if (@(Get-WslDistributions) -contains $Distribution) { return 'Installed' }
+    if (@(Get-WslDistributions).Count -gt 0) { return 'Installed' }
     # Some Windows versions finish registration only after restart/first launch.
     # Do not claim readiness, launch Linux, or automatically reboot the machine.
     return 'PendingInitialization'

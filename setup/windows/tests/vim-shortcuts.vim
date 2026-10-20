@@ -31,7 +31,7 @@ catch
 endtry
 try
   cclose
-  execute 'edit ' . fnameescape($VIM_AUDIT_SCRIPTS . '/setup/windows/bootstrap.ps1')
+  execute 'edit ' . fnameescape($VIM_AUDIT_SCRIPTS . '/setup/windows/Devenv.psm1')
   call search('Ensure-Wsl')
   call setqflist([])
   call s:Keys('\sg')

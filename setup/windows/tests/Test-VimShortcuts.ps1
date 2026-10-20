@@ -12,11 +12,29 @@ Save-Text (Join-Path $project 'second file.txt') "audit_search_token`nvalue with
 Save-Text (Join-Path $project 'build/generated.txt') "audit_search_token`nvalue with spaces`n" ''
 Save-Text (Join-Path $project 'audit.cpp') "int audit_add(int v) { return v + 1; }`nint main() { return audit_add(2); }`nint bad() { return missing_audit_identifier; }`n// end`n" ''
 Save-Text (Join-Path $project 'compile_flags.txt') '-xc++' ''
+$reviewProject = Join-Path $fixture 'review with spaces'
+[void][IO.Directory]::CreateDirectory($reviewProject)
+Invoke-Native git @('-C', $reviewProject, 'init', '--quiet')
+Invoke-Native git @('-C', $reviewProject, 'config', 'core.autocrlf', 'false')
+foreach ($version in @('original', 'committed')) {
+    Save-Text (Join-Path $reviewProject 'review.py') ('value = "' + $version + (' ' * 180) + '"') ''
+    Invoke-Native git @('-C', $reviewProject, 'add', '-f', '--', 'review.py')
+    Invoke-Native git @('-C', $reviewProject, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=NUL', 'commit', '--quiet', '-m', $version)
+}
+Save-Text (Join-Path $reviewProject 'review.py') ('value = "staged' + (' ' * 180) + '"') ''
+Invoke-Native git @('-C', $reviewProject, 'add', '--', 'review.py')
+Save-Text (Join-Path $reviewProject 'review.py') ('value = "working' + (' ' * 180) + '"') ''
 $prior = @{VIM_AUDIT_RESULT=$env:VIM_AUDIT_RESULT; VIM_AUDIT_ROOT=$env:VIM_AUDIT_ROOT; VIM_AUDIT_SCRIPTS=$env:VIM_AUDIT_SCRIPTS; VIM_AUDIT_RC=$env:VIM_AUDIT_RC; PSMUX_TARGET_SESSION=$env:PSMUX_TARGET_SESSION; PSMUX_SESSION=$env:PSMUX_SESSION; TMUX=$env:TMUX}
 $console = $null
+$prior.RC_REVIEW_PROJECT = $env:RC_REVIEW_PROJECT
+$prior.RC_REVIEW_REPORT = $env:RC_REVIEW_REPORT
+$prior.RC_REVIEW_FUGITIVE = $env:RC_REVIEW_FUGITIVE
 $socket = 'vim-ai-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $mux = (Get-Command psmux.exe).Source
 try {
+    $env:RC_REVIEW_PROJECT = $reviewProject
+    $env:RC_REVIEW_REPORT = Join-Path $fixture 'reviews.json'
+    $env:RC_REVIEW_FUGITIVE = Join-Path $env:USERPROFILE '.vim/plugged/vim-fugitive'
     $env:VIM_AUDIT_ROOT = $fixture
     $env:VIM_AUDIT_RESULT = Join-Path $fixture 'verification.json'
     $env:VIM_AUDIT_SCRIPTS = Split-Path (Split-Path $root -Parent) -Parent
@@ -147,6 +165,19 @@ try {
     if (!(Wait-Editor {param($s) $s.bridgePresent -and $s.line -eq 1})) { throw 'Native paste shortcut did not finish in normal mode' }
     Write-Output 'PASS: \tp pastes the native buffer and leaves normal keys usable'
     $report.checks += [ordered]@{passed=$true;name='\tp pastes the native buffer and leaves normal keys usable'}
+    $reviewProbe = (Join-Path $RcRoot 'vim/.setup/tests/review.vim').Replace('\','/').Replace("'","''")
+    $console.Send(":execute 'source ' . fnameescape('$reviewProbe')" + [char]13)
+    $end = (Get-Date).AddSeconds(60)
+    while (!(Test-Path -LiteralPath $env:RC_REVIEW_REPORT) -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 100 }
+    if (!(Test-Path -LiteralPath $env:RC_REVIEW_REPORT)) { throw "Diff review checks timed out: $fixture" }
+    $reviews = Read-Json $env:RC_REVIEW_REPORT
+    if ($reviews.error -or $reviews.cases.Count -ne 4) { throw "Diff review checks failed: $($reviews.error)" }
+    foreach ($review in $reviews.cases) {
+        if ($review.windows.Count -ne 2 -or @($review.windows | Where-Object { !$_.wrap }).Count -or !$review.after) { throw "Diff wrapping failed for $($review.case): $fixture" }
+        $message = "$($review.case) review wraps both diff panes and preserves wrapping afterward"
+        Write-Output "PASS: $message"
+        $report.checks += [ordered]@{passed=$true;name=$message}
+    }
     Save-Json $env:VIM_AUDIT_RESULT $report ''
     $console.Send(':qall!' + [char]13)
     Write-Output "$($report.checks.Count) Vim shortcut checks passed. Artifacts: $fixture"

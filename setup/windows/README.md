@@ -64,6 +64,8 @@ After changing configuration, reload or restart the owning application. PowerShe
 
 ## WSL and credentials
 
+Any registered WSL distribution satisfies the Windows setup requirement, regardless of its name or Linux flavor. Terminal uses WSL's configured default. The manifest's distribution choice controls first-time installation when no distribution is registered; setup preserves existing distributions and the selected default.
+
 WSL setup installs the selected distribution without launching it or rebooting automatically. If Windows needs a restart or distribution initialization, bootstrap completes native setup, reports the remaining step and exits with code `3010`. Restart when required, launch Ubuntu to create the Linux account, then rerun `-Apply`. Run `setup/linux/bootstrap.sh` separately inside Linux. Existing Linux configuration is left to that installer.
 
 The credential phase runs before cloning private notes. It preserves working GitHub and Codex logins, clones the configured private vault when missing, restores the selected Docker registry credentials, and prepares native SSH permissions and agent use. Docker Desktop is not installed by this phase.

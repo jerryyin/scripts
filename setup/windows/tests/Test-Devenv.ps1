@@ -153,10 +153,12 @@ try {
             $script:WslCalls = New-Object Collections.ArrayList
         } $Results
     }
-    Set-WslResults @(@{ ExitCode=0; Output=" Ubuntu-24.04 `r`nDebian" })
-    Assert ((Ensure-Wsl 'Ubuntu-24.04') -ceq 'Existing') 'Existing preferred WSL distribution is retained'
-    Assert ((& $module { $script:WslCalls.Count }) -eq 1) 'Existing WSL uses only read-only inventory'
-    Set-WslResults @(@{ ExitCode=0; Output='Debian' }, @{ ExitCode=0; Output='' }, @{ ExitCode=0; Output="Debian`nUbuntu-24.04" })
+    foreach ($installed in @('My imported Linux', "Ubuntu-22.04`nUbuntu-24.04", 'Debian')) {
+        Set-WslResults @(@{ ExitCode=0; Output=$installed })
+        Assert ((Ensure-Wsl 'Ubuntu') -ceq 'Existing') 'Existing WSL is reused regardless of distribution names or count'
+        Assert ((& $module { $script:WslCalls.Count }) -eq 1) 'Existing WSL uses only read-only inventory'
+    }
+    Set-WslResults @(@{ ExitCode=0; Output='' }, @{ ExitCode=0; Output='' }, @{ ExitCode=0; Output='Imported Ubuntu' })
     Assert ((Ensure-Wsl 'Ubuntu-24.04') -ceq 'Installed') 'Missing Ubuntu is installed and registration is checked'
     $calls = & $module { ,$script:WslCalls.ToArray() }
     Assert ($calls[1].Elevate -and ($calls[1].Arguments -join ' ') -ceq '--install --distribution Ubuntu-24.04 --no-launch') 'Only WSL installation requests elevation and it never launches Linux'
