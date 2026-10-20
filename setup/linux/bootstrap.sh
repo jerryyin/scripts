@@ -44,7 +44,7 @@ fix_hostname
 set -e
 wait_for_dpkg_lock
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
-     git python3 python-is-python3 less wget gist python3-pip
+     git python3 python-is-python3 less wget python3-pip
 
 # Clone once, then rerun the repository's self-contained installer to repair
 # incomplete deployment. Correct links are left intact; local conflicts stop setup.

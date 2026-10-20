@@ -87,47 +87,6 @@ function Invoke-CredentialCommand([string]$Program, [string[]]$Arguments, [strin
     } finally { $process.Dispose() }
 }
 
-function Set-DockerCredential([string]$VaultPath, [string]$ConfigPath) {
-    $secretPath = Join-Path $VaultPath 'docker_mkmhub_auth.txt'
-    if (!(Test-Path -LiteralPath $secretPath)) { Write-Output 'SKIP Docker: docker_mkmhub_auth.txt is absent from vault.'; return }
-    Assert-PrivatePath $ConfigPath
-    Assert-PrivatePath $secretPath -AllowGit
-    Set-PrivateAcl $secretPath
-    $auth = [IO.File]::ReadAllText($secretPath).Trim()
-    try {
-        $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($auth))
-        $parts = $decoded.Split(@([char]':'), 2)
-        if ($parts.Count -ne 2 -or !$parts[0] -or !$parts[1] -or $decoded -match '[\r\n]') { throw 'Invalid' }
-    } catch { throw 'Docker vault entry must be base64 username:password.' }
-    try { $config = Read-Json $ConfigPath } catch { throw 'Cannot parse Docker config.json; the existing file was preserved.' }
-    $registry = 'mkmhub.amd.com'
-    if (($config.Contains('credsStore') -and $config.credsStore) -or
-        ($config.Contains('credHelpers') -and $config.credHelpers.Contains($registry) -and $config.credHelpers[$registry])) {
-        if (!(Get-Command docker.exe -ErrorAction SilentlyContinue)) {
-            Write-Output 'SKIP Docker: install/start Docker, then rerun priv.ps1 to use its credential helper.'
-            return
-        }
-        $helper = if ($config.Contains('credHelpers') -and $config.credHelpers.Contains($registry)) { $config.credHelpers[$registry] } else { $config.credsStore }
-        $helperExe = 'docker-credential-' + $helper + '.exe'
-        if (Get-Command $helperExe -ErrorAction SilentlyContinue) {
-            $stored = Invoke-CredentialCommand $helperExe @('get') $registry
-            try { $credential = ConvertTo-Map (ConvertFrom-Json $stored.Output) } catch { $credential = $null }
-            if ($stored.ExitCode -eq 0 -and $credential -is [Collections.IDictionary] -and $credential.Contains('Username') -and $credential.Contains('Secret') -and $credential.Username -ceq $parts[0] -and $credential.Secret -ceq $parts[1]) {
-                Write-Output 'SKIP Docker: credential helper already has the vault credential.'
-                return
-            }
-        }
-        $result = Invoke-CredentialCommand 'docker.exe' @('login', $registry, '--username', $parts[0], '--password-stdin') $parts[1] @{ DOCKER_CONFIG = (Split-Path $ConfigPath -Parent) }
-        if ($result.ExitCode -ne 0) { throw 'Docker login failed; check that its credential helper is available.' }
-    } else {
-        if (!$config.Contains('auths')) { $config.auths = [ordered]@{} }
-        if (!$config.auths.Contains($registry)) { $config.auths[$registry] = [ordered]@{} }
-        $config.auths[$registry].auth = $auth
-        Save-PrivateText $ConfigPath ((ConvertTo-Json -InputObject $config -Depth 100) + "`n")
-    }
-    Write-Output 'OK Docker: mkmhub.amd.com credential restored; other registries preserved.'
-}
-
 function Initialize-NativeSsh([string]$SshPath, [string]$SourcePath) {
     Assert-PrivatePath $SshPath
     [void][IO.Directory]::CreateDirectory($SshPath)
@@ -155,4 +114,4 @@ function Initialize-NativeSsh([string]$SshPath, [string]$SourcePath) {
     return @(Get-ChildItem -LiteralPath $SshPath -File -Filter 'id_*' | Where-Object { $_.Name -notmatch '\.' })
 }
 
-Export-ModuleMember -Function Assert-PrivatePath, Set-PrivateAcl, Save-PrivateText, Invoke-CredentialCommand, Set-DockerCredential, Initialize-NativeSsh
+Export-ModuleMember -Function Assert-PrivatePath, Set-PrivateAcl, Save-PrivateText, Invoke-CredentialCommand, Initialize-NativeSsh

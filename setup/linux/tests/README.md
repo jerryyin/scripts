@@ -29,12 +29,10 @@ docker compose -f ~/scripts/containers/docker/docker-compose.yml \
 The shared container name is deliberate (only one development service runs at a
 time), so rendering every profile requires `--no-consistency`.
 
-Vault checks cover Docker/GitHub credentials and ensure the retired Claude vault
-profile cannot overwrite application state. Claude settings generation checks
-live in `rc_files/claude/.setup/tests`.
+Session credential checks verify phase separation, vault and storage arguments, repeated activation and failure propagation. App rendering and persistence checks live in `rc_files/.setup/tests/test_credentials.py`; Claude settings checks live in `rc_files/claude/.setup/tests`.
 
-Enable the cross-repository credential check explicitly:
+Enable the cross-repository check against real package hooks with fake credentials:
 
 ```sh
-SCRIPTS_ROOT="$PWD" python3 -B -m unittest discover -s ../rc_files/claude/.setup/tests -v
+RC_FILES_TEST_ROOT="$HOME/rc_files" python3 -B -m unittest discover -s setup/linux/tests -p test_credentials.py -v
 ```

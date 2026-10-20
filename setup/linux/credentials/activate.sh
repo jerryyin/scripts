@@ -9,11 +9,8 @@
 #        - Hostname resolution fix
 #        - sync_vault (link mounted vault, or clone the private vault repo)
 #
-#   2. Runtime patches (every start, idempotent + cheap, no network):
-#        - sync.sh (symlink OAuth credentials from persistent storage)
-#        - rc_files Claude setup (vault -> private settings.json)
-#        - vault.sh docker (vault -> ~/.docker/config.json)
-#        - vault.sh atlartifactory (vault -> ~/.netrc)
+#   2. Delegate application credentials to rc_files after vault setup.
+#      This phase never runs application or package installation.
 #
 # Works with:
 #   - Docker: host home mounted at /zyin
@@ -34,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   1. SSH private key (id_rsa or id_ed25519) — the heavy one-time setup marker.
 #   2. The vault (~/vault). SSH keys can be present (e.g. restored from
 #      persistent storage on a prior start) while the vault was never synced,
-#      which would otherwise leave vault.sh patches permanently warning
+#      which would otherwise leave credential hooks permanently warning
 #      "vault not synced yet". Missing either one re-runs the (idempotent)
 #      bootstrap.
 needs_first_time_bootstrap() {
@@ -81,8 +78,12 @@ setup_ssh() {
     fi
 
     echo "🔑 Setting up SSH keys from $persistent_root..."
-    rm -rf ~/.ssh
-    cp -r "$persistent_root/.ssh" ~/.ssh
+    mkdir -p ~/.ssh
+    local key
+    for key in "$persistent_root/.ssh"/id_*; do
+        [ -f "$key" ] || continue
+        [ -e "$HOME/.ssh/$(basename "$key")" ] || cp "$key" ~/.ssh/
+    done
     chmod 700 ~/.ssh 2>/dev/null || true
     # Lock down private keys; public pairs (*.pub) stay world-readable.
     chmod 600 ~/.ssh/id_* 2>/dev/null || true
@@ -118,7 +119,7 @@ sync_vault() {
         echo "✓ vault cloned to $VAULT_DIR"
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
-        echo "   (vault.sh patches will be skipped until the vault is present)"
+        echo "   (application credential hooks skip missing vault entries)"
     fi
 }
 
@@ -151,7 +152,8 @@ first_time_bootstrap() {
 }
 
 # Phase 2: cheap, idempotent, runs at every container start.
-# Strict rule: NO network calls, NO package/dep installs, NO apt/pip/npm here.
+# No package/dep installs, apt/pip/npm or normal application setup here.
+# Docker may authenticate through its configured credential helper.
 # Each step must early-return quickly when there is nothing to do, and stay
 # silent on the no-op path so repeat container starts don't spam.
 runtime_patches() {
@@ -160,14 +162,16 @@ runtime_patches() {
     if [ -n "$persistent_root" ] && [ -d "$persistent_root/vault" ]; then
         QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
     fi
-    bash "$SCRIPT_DIR/sync.sh"
-    if [ -f "$HOME/rc_files/claude/.setup/__main__.py" ]; then
-        python3 "$HOME/rc_files/.setup" --package claude --no-install >/dev/null
+    local rc_path="${RC_FILES_DIR:-$HOME/rc_files}"
+    [ -f "$rc_path/.setup/__main__.py" ] || {
+        echo "Missing rc_files setup: $rc_path/.setup" >&2
+        return 1
+    }
+    local arguments=(credentials --vault "$VAULT_DIR")
+    if [ -n "$persistent_root" ]; then
+        arguments+=(--persistent-root "$persistent_root")
     fi
-    bash "$SCRIPT_DIR/vault.sh" docker
-    bash "$SCRIPT_DIR/vault.sh" gh
-    bash "$SCRIPT_DIR/vault.sh" gist
-    bash "$SCRIPT_DIR/vault.sh" atlartifactory
+    python3 "$rc_path/.setup" "${arguments[@]}"
 }
 
 main() {

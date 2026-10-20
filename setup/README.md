@@ -9,7 +9,7 @@ Installation, credentials, and workspace preparation for development machines.
   [agent](../agent/README.md). Other scripts live with their subjects, such as
   [profiling](../profiling/README.md) and [containers](../containers/README.md).
 
-`scripts` owns machine provisioning, credentials, everyday utilities and project workflows. The separate [rc_files repository](https://github.com/jerryyin/rc_files) installs configured applications, their dependencies, settings and plugins through its independent Python setup. Notes and Obsidian preferences belong to the notes repository; credentials and application runtime data keep their own storage.
+`scripts` owns machine provisioning, vault availability and interactive sign-in, everyday utilities and project workflows. The separate [rc_files repository](https://github.com/jerryyin/rc_files) installs configured applications, their dependencies, settings and plugins, and applies application credentials in an explicit session phase through its independent Python setup. Notes and Obsidian preferences belong to the notes repository; credentials and application runtime data keep their own storage.
 
 ## Entry points
 

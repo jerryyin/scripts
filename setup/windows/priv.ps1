@@ -93,14 +93,7 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match vaultRepository in defaults/environment.json.' }
     Set-PrivateAcl $VaultPath
 }
-Set-DockerCredential $VaultPath $dockerConfig
-if (Test-Path -LiteralPath (Join-Path $RcPath 'claude/.setup/__main__.py')) {
-    $previousKey = $env:CLAUDE_KEY_FILE
-    try {
-        $env:CLAUDE_KEY_FILE = Join-Path $VaultPath 'claude_key.txt'
-        Invoke-RcSetup $RcPath @('--package', 'claude', '--home', $env:USERPROFILE)
-    } finally { $env:CLAUDE_KEY_FILE = $previousKey }
-}
+Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--home', $env:USERPROFILE)
 
 $keys = @(Initialize-NativeSsh $sshPath $SshSource)
 if (!$keys.Count) { Write-Output 'SSH: no keys yet. Rerun with -SshSource <trusted .ssh folder>, or create a key with ssh-keygen.' }

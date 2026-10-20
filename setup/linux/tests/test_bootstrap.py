@@ -14,9 +14,9 @@ class BootstrapTests(Fixture, unittest.TestCase):
         (self.home / '.ssh/id_ed25519').touch()
         (self.home / 'vault').mkdir()
         (self.home / 'vault/fixture').touch()
-        claude = self.home / 'rc_files/claude/.setup/__main__.py'
-        claude.parent.mkdir(parents=True)
-        claude.touch()
+        setup = self.home / 'rc_files/.setup/__main__.py'
+        setup.parent.mkdir(parents=True)
+        setup.touch()
         binaries = self.temp / 'bin'
         recorder(binaries / 'python3', 'rc_files')
         for fail in ('rc_files', ''):
@@ -26,9 +26,9 @@ class BootstrapTests(Fixture, unittest.TestCase):
                     self.env, FAIL_STEP=fail, PATH=str(binaries) + os.pathsep + self.env['PATH']))
                 self.assertEqual(result.returncode, 23 if fail else 0, result.stderr)
                 calls = self.calls()
-                self.assertEqual(calls[1][2], str(self.home / 'rc_files/.setup') +
-                                 ' --package claude --no-install')
-                self.assertEqual(len(calls), 2 if fail else 6)
+                self.assertEqual(calls[0][2], str(self.home / 'rc_files/.setup') +
+                                 ' credentials --vault ' + str(self.home / 'vault'))
+                self.assertEqual(len(calls), 1)
 
     def test_project_profiles_leave_the_shared_editor_language_server_to_rc_files(self):
         for profile in ('triton', 'iree'):

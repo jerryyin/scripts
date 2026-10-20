@@ -32,7 +32,7 @@ Development setup, execution infrastructure, and GPU engineering tools.
 - Keep helpers and tests with their owner. `setup/linux/lib` is internal to Linux setup.
 - Keep utilities with their subject: `profiling/` owns hardware trace capture,
   `am/` owns simulator execution, and `agent/claude/` owns Claude session inspection.
-- `rc_files` owns configured applications, their dependencies, settings and plugins. This repository owns machine provisioning, credentials, everyday utilities and project workflows. Credential values and runtime data stay outside both repositories.
+- `rc_files` owns configured applications, their dependencies, settings, plugins and application credential hooks. This repository owns machine provisioning, vault availability and interactive sign-in, everyday utilities and project workflows. Credential values and runtime data stay outside both repositories.
 
 See [Linux setup](setup/linux/README.md) for profiles, lifecycle phases, and the
 `rc_files` build and startup contract. [Docker helpers](containers/docker/README.md)

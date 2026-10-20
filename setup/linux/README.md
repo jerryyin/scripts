@@ -15,7 +15,7 @@ bash ~/scripts/setup/linux/setup.sh --list
 | --- | --- |
 | `bootstrap.sh` | Machine prerequisites and certificate trust, then complete `rc_files` setup |
 | `packages/` | Standalone install/build scripts, including one-off and historical recipes |
-| `credentials/` | Activation, persistent credential sync, vault rendering |
+| `credentials/` | SSH/vault availability, delegation to rc_files credential hooks |
 | `profiles/triton/`, `profiles/iree/` | Each environment's plan, dependencies, and workspace preparation |
 | `remote/` | Provision remote hosts over SSH |
 | `lib/` | Internal helpers for package management, shells, storage, workspaces |
@@ -127,6 +127,10 @@ bash /root/scripts/setup/linux/setup.sh "${SETUP_PROFILE:-${SERVICE_NAME:-base}}
 and `dbuild` commands stay the same. Compose startup runs
 `scripts/setup/linux/credentials/activate.sh` with `DEVENV_PERSISTENT_ROOT=/zyin`
 before starting Zsh.
+
+Image builds do not clone or read the vault. Activation restores missing SSH keys without replacing SSH configuration, links a mounted vault or clones it when needed, then invokes `python3 "$HOME/rc_files/.setup" credentials --vault "$VAULT_DIR"`. It passes `--persistent-root` when storage is available. Application token formats, private writes and login persistence belong to rc_files package hooks; the credential phase runs no installers. `VAULT_DIR` and `RC_FILES_DIR` override the default locations.
+
+To save new or refreshed container logins, run `python3 ~/rc_files/.setup credentials --persistent-root /zyin --save`. Codex shares only `auth.json`; its preferences, instructions, plugins and sessions remain local. Native OS credential stores are not copied.
 
 Update `scripts` and `rc_files` together and rebuild development images so the
 Dockerfile, installed scripts, and startup command use the same paths. Default

@@ -2,7 +2,7 @@
 # find_persistent_root.sh - Locate mounted persistent storage (host home or PVC)
 #
 # Source this, then call find_persistent_root; echoes the root path, or
-# nothing if none is found. Shared by credentials/activate.sh, credentials/sync.sh, and
+# nothing if none is found. Shared by credentials/activate.sh and
 # lib/git_workspace.sh so all three agree on where persistent storage lives
 # instead of drifting out of sync as separate copies.
 find_persistent_root() {

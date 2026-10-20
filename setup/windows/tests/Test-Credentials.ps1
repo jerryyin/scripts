@@ -1,4 +1,4 @@
-param([switch]$HelpersOnly)
+param([switch]$HelpersOnly, [string]$RcPath = (Join-Path $env:USERPROFILE 'rc_files'))
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 $root = Split-Path $PSScriptRoot -Parent
@@ -51,29 +51,7 @@ try {
     $run = Invoke-CredentialCommand $node @('-e', 'process.stderr.write("test secret must not escape");process.exit(7)') ''
     Assert ($run.ExitCode -eq 7 -and !$run.Output) 'Native errors preserve exit status without printing stderr'
 
-    $vault = Join-Path $fixture 'vault'
-    [void][IO.Directory]::CreateDirectory($vault)
     $auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('fixture-user:fixture:password'))
-    $secret = Join-Path $vault 'docker_mkmhub_auth.txt'
-    [IO.File]::WriteAllText($secret, $auth)
-    $dockerConfig = Join-Path $fixture 'docker/config.json'
-    Save-Json $dockerConfig ([ordered]@{ auths = [ordered]@{ 'other.example' = [ordered]@{ auth = 'keep' }; 'mkmhub.amd.com' = [ordered]@{ custom = 'keep' } }; currentContext = 'keep' }) ''
-    $output = Set-DockerCredential $vault $dockerConfig
-    $config = Read-Json $dockerConfig
-    Assert ($config.auths['mkmhub.amd.com'].auth -ceq $auth -and $config.auths['mkmhub.amd.com'].custom -ceq 'keep') 'Docker restores only its managed registry credential'
-    Assert ($config.auths['other.example'].auth -ceq 'keep' -and $config.currentContext -ceq 'keep') 'Docker preserves other registries and settings'
-    Assert (!(($output -join '').Contains($auth))) 'Docker output does not include the credential'
-    $stamp = (Get-Item -LiteralPath $dockerConfig).LastWriteTimeUtc
-    Set-DockerCredential $vault $dockerConfig | Out-Null
-    Assert ((Get-Item -LiteralPath $dockerConfig).LastWriteTimeUtc -eq $stamp) 'Docker reruns are unchanged'
-    [IO.File]::WriteAllText($secret, 'invalid base64')
-    Assert-Throws { Set-DockerCredential $vault $dockerConfig } 'Malformed Docker vault input is refused'
-    [IO.File]::WriteAllText($secret, $auth)
-    $before = [IO.File]::ReadAllText($dockerConfig)
-    [IO.File]::WriteAllText($dockerConfig, '{invalid')
-    Assert-Throws { Set-DockerCredential $vault $dockerConfig } 'Malformed existing Docker config is preserved'
-    Assert ([IO.File]::ReadAllText($dockerConfig) -ceq '{invalid') 'Docker parse failure leaves the file untouched'
-    [IO.File]::WriteAllText($dockerConfig, $before)
 
     $ssh = Join-Path $fixture 'ssh'
     $source = Join-Path $fixture 'backup'
@@ -112,11 +90,11 @@ try {
     $childEnvironment = @{ USERPROFILE = $homePath; DOCKER_CONFIG = (Join-Path $homePath '.docker'); PATH = $bin + ';' + $env:PATH }
     $runner = Join-Path $fixture 'run-fixture.ps1'
     [IO.File]::WriteAllText($runner, @'
-param($Script, $Vault)
-try { & $Script -Apply -SkipSshAgent -VaultPath $Vault }
+param($Script, $Vault, $Rc)
+try { & $Script -Apply -SkipSshAgent -VaultPath $Vault -RcPath $Rc }
 catch { Write-Output ('Fixture error: ' + $_.Exception.Message); exit 1 }
 '@)
-    $applyArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Script', (Join-Path $utility 'priv.ps1'), '-Vault', $targetVault)
+    $applyArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Script', (Join-Path $utility 'priv.ps1'), '-Vault', $targetVault, '-Rc', $RcPath)
     $applyResult = Invoke-CredentialCommand powershell.exe $applyArguments '' $childEnvironment
     if ($applyResult.ExitCode -ne 0) { throw ('Fake-account Apply failed: ' + $applyResult.Output) }
     Assert ($applyResult.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $targetVault '.git')) -and (Read-Json (Join-Path $homePath '.docker/config.json')).auths['mkmhub.amd.com'].auth -ceq $auth) 'Full credential phase clones a vault and restores Docker into an empty Windows home'
@@ -124,33 +102,6 @@ catch { Write-Output ('Fixture error: ' + $_.Exception.Message); exit 1 }
     $applyResult = Invoke-CredentialCommand powershell.exe $applyArguments '' $childEnvironment
     Assert ($applyResult.ExitCode -eq 0 -and $applyResult.Output.Contains('OK Codex')) 'Full credential phase reuses an existing vault and authenticated native logins'
     }
-
-    # Mock only the Docker helper invocation; no Docker daemon or login needed.
-    $module = Get-Module Credentials
-    & $module {
-        function script:Get-Command([string]$Name) { if ($Name -eq 'docker.exe') { return @{ Source = 'fixture' } }; Microsoft.PowerShell.Core\Get-Command $Name -ErrorAction SilentlyContinue }
-        function script:Invoke-CredentialCommand($Program, $Arguments, $InputText, $Environment) {
-            $script:dockerCall = @{ Program = $Program; Arguments = $Arguments; InputText = $InputText; Environment = $Environment }
-            return @{ ExitCode = 0; Output = '' }
-        }
-    }
-    Save-Json $dockerConfig ([ordered]@{ credsStore = 'desktop'; auths = [ordered]@{} }) ''
-    $before = [IO.File]::ReadAllText($dockerConfig)
-    Set-DockerCredential $vault $dockerConfig | Out-Null
-    $call = & $module { $script:dockerCall }
-    Assert ($call.Arguments -contains '--password-stdin' -and $call.InputText -ceq 'fixture:password' -and $call.Arguments -notcontains $call.InputText) 'Docker helper receives a password via stdin, including embedded colons'
-    Assert ($call.Environment.DOCKER_CONFIG -ceq (Split-Path $dockerConfig -Parent) -and [IO.File]::ReadAllText($dockerConfig) -ceq $before) 'Docker keeps an existing credential helper and its configuration'
-    & $module {
-        $script:dockerLogins = 0
-        function script:Get-Command([string]$Name) { return @{ Source='fixture' } }
-        function script:Invoke-CredentialCommand($Program, $Arguments, $InputText, $Environment) {
-            if ($Arguments[0] -eq 'get') { return @{ ExitCode=0; Output='{"Username":"fixture-user","Secret":"fixture:password"}' } }
-            $script:dockerLogins++
-            return @{ ExitCode=0; Output='' }
-        }
-    }
-    $output = Set-DockerCredential $vault $dockerConfig
-    Assert ((& $module { $script:dockerLogins }) -eq 0 -and $output -like 'SKIP Docker*') 'Docker does not repeat login when the credential helper already matches the vault'
 
     $bootstrap = [IO.File]::ReadAllText((Join-Path $root 'bootstrap.ps1'))
     Assert ($bootstrap.IndexOf('Ensure-Checkout $RcPath') -lt $bootstrap.IndexOf("'priv.ps1') -Apply") -and $bootstrap.IndexOf("'priv.ps1') -Apply") -lt $bootstrap.IndexOf('Ensure-Checkout $NotesPath')) 'Bootstrap configures credentials before cloning private notes'

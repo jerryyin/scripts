@@ -67,7 +67,7 @@ gateway, run the opt-in `rc_files` tests inside the same disposable image:
 
 ```sh
 sudo docker run --rm --network none YOUR_TEST_IMAGE bash -c '
-  PATH="$HOME/.local/bin:$PATH" RC_CLAUDE_CLI_TEST=1 SCRIPTS_ROOT="$HOME/scripts" \
+  PATH="$HOME/.local/bin:$PATH" RC_CLAUDE_CLI_TEST=1 \
     python3 -B -m unittest discover -s "$HOME/rc_files/claude/.setup/tests" -v
 '
 ```

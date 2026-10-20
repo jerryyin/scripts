@@ -58,7 +58,8 @@ sha256sum "$HOME/.claude.json" > /tmp/claude-state-checksum
 export DEVENV_PERSISTENT_ROOT=/zyin
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
 test "$(readlink "$HOME/vault")" = /zyin/vault
-test "$(readlink "$HOME/.codex")" = /zyin/.codex
+test ! -L "$HOME/.codex"
+test "$(readlink "$HOME/.codex/auth.json")" = /zyin/.codex/auth.json
 cmp "$HOME/.ssh/id_ed25519" /zyin/.ssh/id_ed25519
 test "$(stat -c %a "$HOME/.ssh/id_ed25519")" = 600
 test "$(stat -c %a "$HOME/.ssh/id_ed25519.pub")" = 644
@@ -82,8 +83,7 @@ sha256sum "$HOME/.claude.json" "$HOME/.claude/settings.json" "$HOME/.config/gh/h
     "$HOME/.gist" "$HOME/.docker/config.json" > /tmp/credential-checksums
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
 sha256sum --check /tmp/credential-checksums
-bash "$HOME/scripts/setup/linux/credentials/sync.sh" --status
-echo 'PASS repeated canonical activation and credential status preserve configuration'
+echo 'PASS repeated canonical activation preserves configuration'
 
 # Rotation and explicit opt-out must also work through the relocated helpers.
 printf 'dummy-github-rotated\n' > /zyin/vault/gh_token_jerryyin.txt
@@ -93,7 +93,7 @@ grep -q dummy-github-rotated "$HOME/.config/gh/hosts.yml"
 grep -q dummy-claude-rotated "$HOME/.claude/settings.json"
 sha256sum --check /tmp/claude-state-checksum
 cmp "$HOME/.gist" /zyin/vault/gh_token_jerryyin.txt
-DEVENV_PERSISTENT_ROOT='' bash "$HOME/scripts/setup/linux/credentials/sync.sh"
+python3 "$HOME/rc_files/.setup" credentials --package codex
 echo 'PASS credential rotation and persistence opt-out'
 
 # Execute the real Compose startup command, then feed Zsh a command over stdin.
