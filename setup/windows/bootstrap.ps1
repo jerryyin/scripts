@@ -20,6 +20,7 @@ param(
     [switch]$Update,
     [switch]$SkipPackages,
     [switch]$SkipWsl,
+    [switch]$SkipSsh,
     [switch]$SkipFonts,
     [switch]$SkipAddons,
     [switch]$SkipVimPlugins,
@@ -31,6 +32,8 @@ if (!$EnvironmentPath) { $EnvironmentPath = Join-Path $PSScriptRoot 'defaults/en
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Devenv.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'Obsidian.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
 if ($Apply -and $Check) { throw 'Choose either -Apply or -Check' }
 $manifest = Read-Json $EnvironmentPath
 $registryPath = Join-Path $env:APPDATA 'obsidian/obsidian.json'
@@ -51,7 +54,8 @@ if (!$Apply -and !$Check) {
     Write-Output "PLAN: install $($manifest.packages.id -join ', ') with WinGet"
     Write-Output "PLAN: native Windows Vim sources $RcPath/vim/.vimrc; native psmux reuses tmux keys"
     Write-Output 'PLAN: PowerShell 7, Gruvbox colors, font, prompt and shell shortcuts'
-    Write-Output 'PLAN: group Developer Mode, WSL, machine packages and SSH-agent service changes under one administrator approval; link configuration as the current user'
+    Write-Output 'PLAN: group machine changes under one administrator approval; keep credentials and application setup in the caller'
+    if (!$SkipSsh) { Write-Output 'PLAN: prepare tools and trusted configuration links for an existing SSH server in the same administrator step; verify SSH readability after deployment' }
     if (!$SkipCredentials) { Write-Output 'PLAN: native GitHub, Docker, SSH and Codex credentials via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with scripts/setup/linux/bootstrap.sh" }
     Write-Output "PLAN: notes at $NotesPath; install missing Obsidian plugins and theme chosen in the vault"
@@ -108,6 +112,12 @@ if ($Check) {
     }
     foreach ($problem in @(Get-ConfigurationProblems $env:USERPROFILE $RcPath $documents $TerminalPath)) {
         [void]$missing.Add($problem); Write-Output "DRIFT $problem"
+    }
+    if (!$SkipSsh) {
+        $sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
+        foreach ($problem in @(Get-SshSessionProblems $RcPath $sshPlan)) {
+            [void]$missing.Add($problem); Write-Output "DRIFT $problem"
+        }
     }
     if (!$SkipAddons) {
         $prefix = Invoke-Native npm.cmd @('prefix','--global') -Capture
@@ -169,10 +179,20 @@ if (!$SkipCredentials) {
 }
 $agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
 if ($sshKeys.Count -and !$agent) { throw 'Install the Windows OpenSSH Client optional feature before importing SSH keys.' }
+$sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
+$sshState = if ($SkipSsh) { @{Installed=$false; NeedsSetup=$false} } else { Get-SshShellState }
+$sshLinks = $false
+if ($sshState.Installed) {
+    $sshLinks = $rcMachine -or !(Test-Path -LiteralPath (Join-Path $RcPath '.git')) -or @(Get-SshSessionProblems $RcPath $sshPlan).Count -gt 0
+    if (!$sshLinks -and !$SkipPackages) { $sshLinks = @(Get-RcMissingPackages $RcPath 'user').Count -gt 0 }
+}
 $machine = @{
     DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'machine' })
     Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
     RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
+    SshShell=$sshState.NeedsSetup; InstallPrerequisites=(!$SkipPackages); SshLinks=$sshLinks
+    LinkPlanArguments=$sshPlan
+    LinkArguments=(@(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot))
 }
 $wslState = Invoke-MachineSetup $machine
 Update-ProcessPath
@@ -192,6 +212,11 @@ if ($SkipVimPlugins) { $deployment += @('--skip-setup', 'vim') }
 if ($SkipAddons) { $deployment += @('--skip-setup', 'tmux') }
 if ($Update) { $deployment += '--update' }
 Invoke-RcSetup $RcPath $deployment
+if (!$SkipSsh) {
+    $sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
+    $sshProblems = @(Get-SshSessionProblems $RcPath $sshPlan)
+    if ($sshProblems.Count) { throw ($sshProblems -join [Environment]::NewLine) }
+}
 if (!$SkipAddons) {
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
     Install-CodexAdapter -Update:$Update

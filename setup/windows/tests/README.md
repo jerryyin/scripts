@@ -8,20 +8,29 @@ Run these commands from `setup/windows`. Inspect each script's parameters before
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Devenv.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MachineSetup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Credentials.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SshSetup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Obsidian.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TerminalProfile.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ConfigurationOwnership.ps1
 pwsh -NoProfile -File .\tests\Test-VimShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxShortcuts.ps1
 pwsh -NoProfile -File .\tests\Test-MuxLifecycle.ps1
+pwsh -NoProfile -File .\tests\Test-SshSession.ps1
 ```
 
 `Test-Devenv.ps1` checks bootstrap behavior and simulated WSL outcomes without installing machine packages. Add `-Network` to exercise current upstream plugin and theme downloads. `Test-Credentials.ps1` uses fake credentials and key fixtures; it does not sign into real accounts.
 
 `Test-MachineSetup.ps1` substitutes the OS process-launch boundary to check one grouped elevation, zero elevation for unchanged or already-elevated callers, cancellation, failure propagation, the credential boundary and request cleanup. It also checks that Python's user installation does not request a separate all-users launcher. Real UAC and first-time package installations still require the disposable VM acceptance below.
 
+`Test-SshSetup.ps1` substitutes service and registry access to check shell selection, missing shells and reruns, then exercises link inspection and recovery against disposable files. The real isolated traversal probe covers Unicode paths and file errors. When already elevated, the test also runs the actual administrator worker and rc_files deployer against a disposable PowerShell profile, checking trusted-link creation and an unchanged rerun. `Test-MachineSetup.ps1` also verifies that SSH-only and combined machine work use the same administrator worker. `Test-Credentials.ps1` exercises repeated credential setup with fake keys and deliberately excessive permissions.
+
+`Test-Obsidian.ps1` checks plugin/theme discovery, updates, failed downloads and preservation of preferences with local fixtures. Add `-Network` for current publisher downloads. `Test-Devenv.ps1` includes these checks as well.
+
 Terminal and ownership checks exercise source links and reruns. Vim and mux shortcut checks drive real applications in isolated console sessions and require their native tools, plugins and configuration to be installed. Supply `-RcRoot` to scripts exposing that parameter when the checkout is outside the default home location.
 
 `Test-MuxLifecycle.ps1` closes and reopens real console clients with isolated psmux data and configuration. It checks that the same shell survives and that bare `psmux` and `tmux` resume an existing numbered session; explicit new-session commands still create a separate session.
+
+`Test-SshSession.ps1` checks automatic attachment to `main`, persistence across terminal closure, and exclusion of command-only and redirected shells using isolated psmux sessions.
 
 The platform-independent configuration setup tests live with the deployer in `rc_files/.setup/tests`; their command is documented in that repository's setup guide.
 

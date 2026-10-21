@@ -68,6 +68,17 @@ try {
     Initialize-NativeSsh $ssh $source | Out-Null
     Assert ([IO.File]::ReadAllText((Join-Path $ssh 'id_test')) -ceq $fakeKey -and [IO.File]::ReadAllText((Join-Path $ssh 'config')) -ceq 'existing Windows hosts') 'SSH reruns preserve existing keys and host configuration'
 
+    $keyPath = Join-Path $ssh 'id_test'
+    $acl = Get-Acl -LiteralPath $keyPath
+    $everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
+    Set-Acl -LiteralPath $keyPath -AclObject $acl
+    Initialize-NativeSsh $ssh '' | Out-Null
+    $acl = Get-Acl -LiteralPath $keyPath
+    $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
+    Assert ($acl.AreAccessRulesProtected -and $identities.Count -eq 2 -and $identities -contains $sid -and $identities -contains 'S-1-5-18') 'Repeated setup removes explicit extra access and uses the credential permission policy'
+    Assert ([IO.File]::ReadAllText($keyPath) -ceq $fakeKey) 'Repeated setup preserves private key contents'
+
     # Full Apply orchestration: real local Git vault, fake gh/codex executables,
     # and a separate Windows home. No browser, real key or service is touched.
     if (!$HelpersOnly) {

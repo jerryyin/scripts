@@ -1,4 +1,4 @@
-# Invoked once by bootstrap; user configuration and credentials stay in its caller.
+# Invoked once by bootstrap; credentials and application setup stay in its caller.
 param([Parameter(Mandatory)][string]$RequestPath, [Parameter(Mandatory)][string]$ResultPath)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -19,13 +19,29 @@ try {
         Install-WinGetPackage $package
     }
     Update-ProcessPath
-    if ($request.Contains('RcMachine') -and $request.RcMachine) {
+    $sshLinks = $request.Contains('SshLinks') -and $request.SshLinks
+    if (($request.Contains('RcMachine') -and $request.RcMachine) -or $sshLinks) {
         $newCheckout = !(Test-Path -LiteralPath (Join-Path $request.RcPath '.git'))
         Ensure-Checkout $request.RcPath $request.RcRepository
         if ($newCheckout) { Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q') }
-        Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine')
+        if (!$sshLinks) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine') }
+    }
+    if ($sshLinks) {
+        Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
+        # Restore existing links before tools use them, then cover aliases made by installers.
+        Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
+        if ($request.InstallPrerequisites) {
+            Invoke-RcSetup $request.RcPath @('prerequisites')
+            Update-ProcessPath
+            Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
+        }
+        Invoke-RcSetup $request.RcPath $request.LinkArguments
     }
     if ($request.SshAgent) { Ensure-SshAgent }
+    if ($request.Contains('SshShell') -and $request.SshShell) {
+        Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
+        Set-SshShell
+    }
     Save-Json $ResultPath @{ WslState=$wslState } ''
 } catch {
     Save-Json $ResultPath @{ Error=$_.Exception.Message } ''

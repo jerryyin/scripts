@@ -41,13 +41,21 @@ try {
     $plan = @{ DeveloperMode=$false; Distribution=''; Packages=@(); RcMachine=$false; SshAgent=$false; WslState='Existing' }
     $state = Invoke-MachineSetup $plan
     if ($state -ne 'Existing' -or (& $module { $script:Launches.Count }) -ne 0) { throw 'An unchanged machine must need zero UAC launches' }
-    $plan.DeveloperMode=$true; $plan.Distribution='Ubuntu-24.04'; $plan.RcMachine=$true; $plan.SshAgent=$true
+    $plan.SshLinks=$true
+    Invoke-MachineSetup $plan | Out-Null
+    if ((& $module { $script:Launches.Count }) -ne 1 -or !(& $module { $script:Request.SshLinks })) { throw 'Configuration link work alone must enter the grouped machine phase' }
+    & $module { $script:Launches = @() }
+    $plan.SshLinks=$false; $plan.SshShell=$true; $plan.InstallPrerequisites=$true
+    Invoke-MachineSetup $plan | Out-Null
+    if ((& $module { $script:Launches.Count }) -ne 1 -or !(& $module { $script:Request.SshShell })) { throw 'SSH shell configuration alone must enter the grouped machine phase' }
+    & $module { $script:Launches = @() }
+    $plan.SshLinks=$true; $plan.DeveloperMode=$true; $plan.Distribution='Ubuntu-24.04'; $plan.RcMachine=$true; $plan.SshAgent=$true
     $plan.Packages=@(@{id='GitHub.cli'; scope='machine'}, @{id='7zip.7zip'; scope='machine'})
     $state = Invoke-MachineSetup $plan
     $launches = & $module { ,$script:Launches }
     $request = & $module { $script:Request }
     if ($state -ne 'Installed' -or $launches.Count -ne 1 -or $launches[0].Verb -ne 'RunAs' -or !$launches[0].Hidden -or !$launches[0].Wait) { throw 'All machine changes must share one hidden, awaited UAC launch' }
-    if (!$request.DeveloperMode -or !$request.SshAgent -or !$request.RcMachine -or $request.Distribution -ne 'Ubuntu-24.04' -or $request.Packages.Count -ne 2) { throw 'The elevated request lost machine work' }
+    if (!$request.DeveloperMode -or !$request.SshAgent -or !$request.SshShell -or !$request.SshLinks -or !$request.RcMachine -or $request.Distribution -ne 'Ubuntu-24.04' -or $request.Packages.Count -ne 2) { throw 'The elevated request lost machine work' }
     if ($request.UserSid -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'The machine phase must retain the initiating account identity' }
     & $module { $script:ExitCode = 7; $script:Launches = @() }
     $failed = $false
@@ -93,6 +101,8 @@ function Read-Json($Path) {
         LogPath=(Join-Path $PSScriptRoot 'machine.log'); DeveloperMode=$false
         WslState='Existing'; Distribution=''; Packages=@(@{id='Git.Git'; scope='machine'})
         RcMachine=$true; RcPath=(Join-Path $PSScriptRoot 'rc_files'); RcRepository='fixture'; SshAgent=$false
+        SshShell=$true; InstallPrerequisites=$true
+        SshLinks=$true; LinkPlanArguments=@('plan', '--json'); LinkArguments=@('--config-only', '--backup', 'fixture')
     }
 }
 function Test-IsAdministrator { return $true }
@@ -102,13 +112,27 @@ function Ensure-Checkout($Path, $Repository) {
     if (!$script:PathReady) { throw 'Newly installed Git is not yet visible on PATH.' }
     [void][IO.Directory]::CreateDirectory((Join-Path $Path '.git'))
 }
-function Invoke-RcSetup($Path, $Arguments) { }
+function Invoke-RcSetup($Path, $Arguments) { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'steps') -Value ($Arguments -join ' ') }
 function Invoke-Native($Command, $Arguments) { }
 function Save-Json($Path, $Value, $Backup) { [IO.File]::WriteAllText($Path, (ConvertTo-Json $Value)) }
+'@ ''
+    Save-Text (Join-Path $fresh 'SshSession.psm1') @'
+function Set-SshShell {
+    $RcRoot = Join-Path $PSScriptRoot 'rc_files'
+    if (!(Test-Path -LiteralPath (Join-Path $RcRoot '.git'))) { throw 'SSH shell setup ran before its prerequisites were prepared.' }
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'ssh-shell-called'), $RcRoot)
+}
+function Repair-SshLinks($RcRoot, $Arguments, [switch]$ExistingOnly) {
+    if (!$ExistingOnly -or ($Arguments -join ' ') -ne 'plan --json') { throw 'Only declared links may be repaired before deployment.' }
+    Add-Content -LiteralPath (Join-Path $PSScriptRoot 'steps') -Value 'repair-links'
+}
 '@ ''
     $freshResult = Join-Path $fresh 'result.json'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $fresh 'machine.ps1') -RequestPath (Join-Path $fresh 'request.json') -ResultPath $freshResult | Out-Null
     if ($LASTEXITCODE -ne 0 -or (Read-Json $freshResult).WslState -ne 'Existing') { throw 'The machine phase must refresh PATH after installing Git and before cloning rc_files.' }
+    if (!(Test-Path -LiteralPath (Join-Path $fresh 'ssh-shell-called'))) { throw 'The grouped machine helper did not configure the SSH shell.' }
+    $steps = @(Get-Content -LiteralPath (Join-Path $fresh 'steps')) -join ';'
+    if ($steps -ne 'repair-links;prerequisites;repair-links;--config-only --backup fixture') { throw "Machine setup must restore existing links, prepare tools, repair new aliases and deploy trusted configuration in order: $steps" }
     Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, user Python launcher, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal

@@ -15,7 +15,7 @@ git clone https://github.com/jerryyin/scripts.git "$env:USERPROFILE\scripts"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\setup\windows\bootstrap.ps1" -Apply
 ```
 
-The execution policy flag applies to this process. Setup groups Developer Mode, WSL installation, machine-wide packages and SSH-agent service changes into one administrator approval. If none are needed, it requests no elevation. User applications, configuration, fonts and credentials run in the original process. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Conflicting local settings require review rather than a copy-based fallback.
+The execution policy flag applies to this process. Setup groups machine changes under one administrator approval and requests none when no administrator work is needed. For an existing SSH server, that worker also prepares rc_files prerequisites using their declared installation scopes and creates or repairs configuration links so SSH can read them. Credentials, fonts, plugins and application setup stay in the caller. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Conflicting local settings require review rather than a copy-based fallback.
 
 Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, machine utilities and first-time WSL selection are owned by [defaults/environment.json](defaults/environment.json). Configured application requirements and the terminal font belong to their packages in `rc_files`. Existing checkouts are reused without pulling, resetting or discarding local work.
 
@@ -29,6 +29,7 @@ From this directory:
 .\bootstrap.ps1 -Check                       # report missing tools and configuration drift
 .\bootstrap.ps1 -Apply -Update               # refresh installed plugins and adapters
 .\bootstrap.ps1 -Apply -SkipWsl              # opt out of WSL installation
+.\bootstrap.ps1 -Apply -SkipSsh              # leave SSH server configuration alone
 .\bootstrap.ps1 -Apply -NotesPath C:\notes -RcPath C:\dev\rc_files
 ```
 
@@ -45,6 +46,8 @@ Packages marked `"scope": "machine"` run in the grouped administrator step. Othe
 - **The notes repository** owns `.obsidian/community-plugins.json`, appearance choices and authored plugin settings. Downloads follow those choices; plugin code remains application runtime data.
 - **Native credential tools and private storage** own tokens, SSH keys and registry credentials. These stay outside configuration repositories and general setup backups.
 - **`%LOCALAPPDATA%\PersonalDevenv`** holds setup backups and local acceptance artifacts. It is not a configuration inventory.
+
+Within this directory, `Devenv.psm1` provides shared setup helpers; `Credentials.psm1` owns private files and SSH key permissions; `SshSession.psm1` owns SSH shell readiness and blocked-link recovery; and `Obsidian.psm1` installs the plugins and theme selected by the notes repository. `machine.ps1` is the single administrator worker. The entry scripts coordinate these modules.
 
 Installed settings link directly to their tracked sources. Edits through those links, including Terminal preferences, reach `rc_files`; review and commit them there. New ignored authored files still require explicit `git add -f`. Application runtime directories remain real directories, with individual settings links or per-skill directory links as appropriate. Bootstrap installs PowerToys; PowerToys manages its own settings locally.
 
@@ -64,7 +67,9 @@ After changing configuration, reload or restart the owning application. PowerShe
 
 ## Windows SSH sessions
 
-Run `pwsh -NoProfile -ExecutionPolicy Bypass -File .\Setup-SshSession.ps1` from an elevated Windows SSH session to inspect startup configuration; add `-Apply` to select the installed PowerShell 7 as the SSH shell and repair managed links blocked by Windows error 448 ("untrusted mount point"). The script checks rc_files' current link plan and the configured development tools' WinGet aliases, recreates only matching unreadable links with administrator ownership of their trust metadata, and backs up the previous links. It preserves authentication and RedirectionGuard settings. Rerun after setup or package updates if newly created links are blocked; ordinary updates to files behind existing links need no repair.
+`bootstrap.ps1 -Apply` is the setup and recovery command. When OpenSSH Server is installed, its grouped administrator step selects PowerShell, repairs matching blocked links, prepares missing native prerequisites, and deploys configuration links with administrator trust metadata. It preserves the original links in the setup backups. The normal user phase then applies credentials and application setup; it reuses the prepared links. SSH key/configuration permissions are reapplied by the credential phase without replacing existing keys or file contents.
+
+`bootstrap.ps1 -Check` checks link traversal in an isolated process with RedirectionGuard enabled where supported, so a desktop check can detect the restriction that SSH applies. It does not change the caller's security settings. Rerun `-Apply` after installation or manual changes cause drift; no separate repair script is needed. Setup does not install or enable SSH Server, change authentication, or restart it. `-SkipSsh` excludes SSH shell and trusted-link provisioning; `-SkipCredentials` excludes key permission setup.
 
 The rc_files PowerShell profile automatically attaches interactive SSH terminals to psmux `main`; command-only SSH requests and nested mux shells stay unaffected. Reconnect after changing the default shell. Client-side fonts and terminal palette remain the SSH client's settings; the prompt and mux status colors come from rc_files.
 

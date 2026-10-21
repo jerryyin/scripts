@@ -102,7 +102,7 @@ function Snapshot {
 }
 try {
     if (!$RuntimeOnly) {
-    $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $job.root 'bootstrap.ps1'), '-SkipPackages', '-SkipWsl', '-SkipFonts', '-SkipCredentials', '-RequireDeveloperMode', '-EnvironmentPath', $job.environment, '-DocumentsPath', (Join-Path $job.userRoot 'Documents'), '-TerminalPath', (Join-Path $job.userRoot 'Terminal/settings.json'))
+    $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $job.root 'bootstrap.ps1'), '-SkipPackages', '-SkipWsl', '-SkipFonts', '-SkipCredentials', '-RequireDeveloperMode -SkipSsh', '-EnvironmentPath', $job.environment, '-DocumentsPath', (Join-Path $job.userRoot 'Documents'), '-TerminalPath', (Join-Path $job.userRoot 'Terminal/settings.json'))
     foreach ($pass in @('first', 'second')) {
         Start-Transcript -LiteralPath (Join-Path $job.fixture ($pass + '.log')) | Out-Null
         & powershell.exe @common -Apply | Out-Host
