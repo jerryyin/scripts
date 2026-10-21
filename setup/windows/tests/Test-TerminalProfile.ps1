@@ -48,4 +48,37 @@ try {
     $branch = (& git branch --show-current).Trim()
     if (!$text.Contains(' ' + $branch)) { throw 'Prompt omits Git branch' }
 } finally { Pop-Location }
+$vimEnvironment = @{ WT_SESSION=$env:WT_SESSION; SSH_CONNECTION=$env:SSH_CONNECTION; SSH_CLIENT=$env:SSH_CLIENT }
+$script:vimThrows = $false
+function vim.exe {
+    $script:vimInvocation = @{ WindowTerminal=$env:WT_SESSION; Arguments=@($args) }
+    if ($script:vimThrows) { throw 'fixture launch failure' }
+    $global:LASTEXITCODE = 23
+}
+try {
+    foreach ($case in @(
+        @{ Connection=''; Client=''; Terminal=''; Workaround=$false },
+        @{ Connection=''; Client=''; Terminal='local-terminal'; Workaround=$false },
+        @{ Connection='fixture-ssh'; Client=''; Terminal=''; Workaround=$true },
+        @{ Connection=''; Client='fixture-client'; Terminal=''; Workaround=$true },
+        @{ Connection='fixture-ssh'; Client=''; Terminal='existing-terminal'; Workaround=$false }
+    )) {
+        $env:SSH_CONNECTION = $case.Connection; $env:SSH_CLIENT = $case.Client; $env:WT_SESSION = $case.Terminal
+        vi 'a file with spaces.txt' '+set readonly'
+        $actual = $script:vimInvocation
+        if ($case.Workaround) {
+            if (!$actual.WindowTerminal) { throw 'SSH Vim must preserve the terminal default background' }
+        } elseif ([string]$actual.WindowTerminal -ne $case.Terminal) { throw 'Local Vim or an existing terminal marker was changed' }
+        if (($actual.Arguments -join '|') -cne 'a file with spaces.txt|+set readonly' -or $LASTEXITCODE -ne 23) { throw 'Vim arguments or exit status were changed' }
+        if ([string]$env:WT_SESSION -ne $case.Terminal) { throw 'Vim leaked its terminal marker into PowerShell' }
+    }
+    $env:SSH_CONNECTION = 'fixture-ssh'; $env:WT_SESSION = $null; $script:vimThrows = $true
+    $failed = $false
+    try { vim } catch { $failed = $_.Exception.Message -eq 'fixture launch failure' }
+    if (!$failed -or $env:WT_SESSION) { throw 'A failed Vim launch leaked its terminal marker or lost the error' }
+} finally {
+    Remove-Item Function:\vim.exe
+    foreach ($name in $vimEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $vimEnvironment[$name], 'Process') }
+}
+Write-Output 'PASS: Vim background compatibility is SSH-only, preserves arguments and exit status, and restores the environment after success or failure.'
 Write-Output "PASS: one visible PowerShell, existing profiles retained, unchanged rerun, native prompt and Git branch. Fixture: $fixture"
