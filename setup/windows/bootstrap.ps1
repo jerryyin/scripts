@@ -17,7 +17,6 @@ param(
     [string]$TerminalPath,
     [string]$DocumentsPath,
     [string]$EnvironmentPath,
-    [switch]$Update,
     [switch]$SkipPackages,
     [switch]$SkipWsl,
     [switch]$SkipSsh,
@@ -58,8 +57,8 @@ if (!$Apply -and !$Check) {
     if (!$SkipSsh) { Write-Output 'PLAN: prepare tools and trusted configuration links for an existing SSH server in the same administrator step; verify SSH readability after deployment' }
     if (!$SkipCredentials) { Write-Output 'PLAN: SSH keys, vault over SSH, then GitHub CLI and Docker credentials from the vault via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with scripts/setup/linux/bootstrap.sh" }
-    Write-Output "PLAN: notes at $NotesPath; install missing Obsidian plugins and theme chosen in the vault"
-    if ($Update) { Write-Output 'PLAN: refresh existing Vim/CoC/Obsidian plugins and the Codex ACP adapter' }
+    Write-Output "PLAN: notes at $NotesPath; install or refresh the Obsidian plugins and theme chosen in the vault"
+    Write-Output 'PLAN: update existing scripts, rc_files, vault and notes checkouts (local edits are stashed and restored); replace differing settings files after backing them up; refresh plugins and the Codex ACP adapter'
     Write-Output 'Run with -Apply to provision, or -Check for a read-only inventory.'
     return
 }
@@ -156,6 +155,17 @@ if ($Check) {
 $nativeSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $nativeProfile = (Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $nativeSid)).ProfileImagePath
 if ($env:USERPROFILE -eq $nativeProfile -and (Get-Process Obsidian -ErrorAction SilentlyContinue)) { throw 'Close Obsidian before applying its settings and plugin files, then rerun.' }
+# Update this checkout first and rerun the updated bootstrap once, so every phase comes from one version.
+$scriptsRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+if ($env:USERPROFILE -eq $nativeProfile -and !$env:DEVENV_SCRIPTS_SYNCED -and (Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $scriptsRoot '.git'))) {
+    $before = (Invoke-GitQuiet $scriptsRoot @('rev-parse', 'HEAD')).Output
+    Ensure-Checkout $scriptsRoot ''
+    if ((Invoke-GitQuiet $scriptsRoot @('rev-parse', 'HEAD')).Output -ne $before) {
+        $env:DEVENV_SCRIPTS_SYNCED = '1'
+        & $PSCommandPath @PSBoundParameters
+        exit $LASTEXITCODE
+    }
+}
 if (!$SkipPackages -and !(Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install App Installer (WinGet), then rerun.' }
 if ($RequireDeveloperMode) {
     if (!(Test-DeveloperMode)) { throw 'This configuration-only run requires Developer Mode to be enabled beforehand; no machine settings were changed.' }
@@ -194,7 +204,7 @@ $machine = @{
     RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
     SshShell=$sshState.NeedsSetup; InstallPrerequisites=(!$SkipPackages); SshLinks=$sshLinks
     LinkPlanArguments=$sshPlan
-    LinkArguments=(@(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot))
+    LinkArguments=(@(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--replace-existing', '--backup', $backupRoot))
 }
 $wslState = Invoke-MachineSetup $machine
 
@@ -206,16 +216,15 @@ if (!$SkipPackages) {
     Invoke-RcSetup $RcPath @('prerequisites')
     Update-ProcessPath
 }
-Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
+Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
 
 # 4. Development environment: deploy application settings and verify SSH.
-$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--backup', $backupRoot)
+$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--replace-existing', '--backup', $backupRoot, '--update')
 if ($SkipPackages) { $deployment += '--no-install' }
 if ($SkipFonts) { $deployment += @('--skip-setup', 'terminal') }
 if ($SkipVimPlugins) { $deployment += @('--skip-setup', 'vim') }
 if ($SkipAddons) { $deployment += @('--skip-setup', 'tmux') }
-if ($Update) { $deployment += '--update' }
 Invoke-RcSetup $RcPath $deployment
 if (!$SkipSsh) {
     $sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
@@ -226,8 +235,8 @@ if (!$SkipSsh) {
 # 5. Notes and Obsidian: prepare the vault and its integrations together.
 Ensure-Checkout $NotesPath $manifest.notesRepository
 if (!$SkipAddons) {
-    Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
-    Install-CodexAdapter -Update:$Update
+    Install-ObsidianAddons $NotesPath $backupRoot -Update
+    Install-CodexAdapter -Update
     # Copilot's device ID lives in Obsidian localStorage. Use its Auto-detect
     # control to select this standard npm location on the first launch.
 }

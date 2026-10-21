@@ -24,7 +24,7 @@ bash ~/scripts/setup/linux/setup.sh --list
 `packages/` holds individual scripts such as `aiter.sh`, `llvm.sh`,
 and `tokenspeed.sh`. A workflow directory under `profiles/` keeps its
 `profile.sh` plan together with `deps.sh` and `workspace.sh`.
-`bootstrap.sh` establishes the machine baseline, delegates configured applications, their dependencies, plugins and shell setup to the independent `rc_files` installer, and links this repository's Docker commands into `~/.local/bin`. `setup.sh` coordinates that baseline, credentials, and the selected
+`bootstrap.sh` establishes the machine baseline, delegates configured applications, their dependencies, plugins and shell setup to the independent `rc_files` installer, and links this repository's Docker commands into `~/.local/bin`. Run it as your own user; it asks sudo only for machine steps and reruns itself as you if started through `sudo`. One command covers fresh installs, upgrades and replacement: existing `scripts`, `rc_files` and vault checkouts are fast-forwarded with local edits stashed and restored (on conflict the remote wins and the edits stay in `git stash list`), and tracked settings replace differing files, which are kept under `~/.dotfiles-backup`. `setup.sh` coordinates that baseline, credentials, and the selected
 workflow. Its built-in `base` default needs no separate profile file.
 
 ```text

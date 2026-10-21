@@ -15,9 +15,9 @@ git clone https://github.com/jerryyin/scripts.git "$env:USERPROFILE\scripts"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\setup\windows\bootstrap.ps1" -Apply
 ```
 
-The execution policy flag applies to this process. Setup groups machine changes under one administrator approval and requests none when no administrator work is needed. For an existing SSH server, that worker also prepares rc_files prerequisites using their declared installation scopes and creates or repairs configuration links so SSH can read them. Credentials, fonts, plugins and application setup stay in the caller. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Conflicting local settings require review rather than a copy-based fallback.
+The execution policy flag applies to this process. Setup groups machine changes under one administrator approval and requests none when no administrator work is needed. For an existing SSH server, that worker also prepares rc_files prerequisites using their declared installation scopes and creates or repairs configuration links so SSH can read them. Credentials, fonts, plugins and application setup stay in the caller. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Tracked settings win: a differing local file is moved to `%LOCALAPPDATA%\PersonalDevenv\backups` and replaced by its link.
 
-Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, machine utilities and first-time WSL selection are owned by [defaults/environment.json](defaults/environment.json). Configured application requirements and the terminal font belong to their packages in `rc_files`. Existing checkouts are reused without pulling, resetting or discarding local work.
+Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, machine utilities and first-time WSL selection are owned by [defaults/environment.json](defaults/environment.json). Configured application requirements and the terminal font belong to their packages in `rc_files`. The same `-Apply` handles fresh installs, upgrades and replacement. Existing `scripts`, `rc_files`, vault and notes checkouts are fast-forwarded to their remote branch, following a renamed default branch. Local edits are stashed and restored; when they conflict, the remote version is kept and the edits stay in `git stash list`. Local commits that are not on the remote leave the branch unchanged. When `scripts` itself moves forward, bootstrap reruns the updated copy.
 
 ## Plan, apply and check
 
@@ -25,9 +25,8 @@ From this directory:
 
 ```powershell
 .\bootstrap.ps1                              # show the plan
-.\bootstrap.ps1 -Apply                       # install, configure or repair
+.\bootstrap.ps1 -Apply                       # install, update, replace or repair
 .\bootstrap.ps1 -Check                       # report missing tools and configuration drift
-.\bootstrap.ps1 -Apply -Update               # refresh installed plugins and adapters
 .\bootstrap.ps1 -Apply -SkipWsl              # opt out of WSL installation
 .\bootstrap.ps1 -Apply -SkipSsh              # leave SSH server configuration alone
 .\bootstrap.ps1 -Apply -NotesPath C:\notes -RcPath C:\dev\rc_files
@@ -96,13 +95,11 @@ The credential phase runs before cloning private notes. It prepares native SSH p
 .\priv.ps1 -Apply -SshSource E:\backup\.ssh   # import missing keys from a trusted source
 ```
 
-Existing SSH keys are preserved. Supply a trusted backup or create and register a key yourself if none exists; setup does not silently replace your identity. Vault updates are explicit Git operations. Without a GitHub-registered SSH key the vault cannot be cloned, and setup stops rather than falling back to browser sign-in. Encrypted-key passphrases and service approval may require interaction on the target machine.
+Existing SSH keys are preserved. Supply a trusted backup or create and register a key yourself if none exists; setup does not silently replace your identity. An existing vault is updated like the other checkouts. Without a GitHub-registered SSH key the vault cannot be cloned, and setup stops rather than falling back to browser sign-in. Encrypted-key passphrases and service approval may require interaction on the target machine.
 
 ## Maintenance and first-use steps
 
-Pull the wanted configuration, notes or scripts checkout yourself, review local edits, and rerun setup. Correct links and completed installations are reused. Missing tools and incomplete plugin installations are repaired. Fresh package installs use the available upstream version; existing Windows packages are retained unless a required prerequisite upgrade is needed.
-
-Ordinary reruns retain installed Vim, mux and Obsidian plugins. `-Apply -Update` requests their refresh along with themes and the Codex ACP adapter. CoC checks the latest tracked and existing extension choices on every setup, preserving local additions. Obsidian updates preserve authored plugin settings; no downloaded plugin code or release hashes belong in the defaults file.
+Rerun `-Apply` to deploy the latest checkouts. Correct links are reused, differing settings are backed up and replaced, and missing tools are installed. WinGet packages are installed or upgraded to the available version, and the minimum versions of required tools are verified afterwards. Every run refreshes Vim, mux and Obsidian plugins, themes and the Codex ACP adapter. CoC checks the latest tracked and existing extension choices on every setup, preserving local additions. Obsidian updates preserve authored plugin settings; no downloaded plugin code or release hashes belong in the defaults file.
 
 Open the registered notes vault in Obsidian and select Codex Auto-detect in Copilot if the adapter has not been selected on that device. Pair KDE Connect with your devices. Native sign-in and device pairing remain first-use interactions.
 

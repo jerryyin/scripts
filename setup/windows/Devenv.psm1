@@ -262,14 +262,48 @@ function Invoke-Native([string]$Program, [string[]]$Arguments, [switch]$Capture)
     if ($Capture) { return (($result -join "`n") -replace "`0", '').Trim() }
 }
 
+function Invoke-GitQuiet([string]$Path, [string[]]$Arguments) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& git -C $Path @Arguments 2>&1)
+        return [pscustomobject]@{ Code = $LASTEXITCODE; Output = (($output | ForEach-Object { "$_" }) -join "`n").Trim() }
+    } finally { $ErrorActionPreference = $previousPreference }
+}
+
+# Clone a missing checkout; otherwise fast-forward it to its upstream (or the remote default
+# branch when the upstream is gone), carrying local edits across in a stash. Upstream wins a
+# conflict and the edits stay in `git stash list`. Failures to reach the remote only warn.
 function Ensure-Checkout([string]$Path, [string]$Url) {
     if (Test-Path -LiteralPath (Join-Path $Path '.git')) {
-        $priorGit = $env:GIT_CONFIG_GLOBAL
-        try {
-            $env:GIT_CONFIG_GLOBAL = 'NUL'
-            Invoke-Native git @('-C', $Path, 'rev-parse', '--verify', 'HEAD') -Capture | Out-Null
-        } finally { $env:GIT_CONFIG_GLOBAL = $priorGit }
-        Write-Host "SKIP Git checkout $Path (existing work preserved)"
+        if ((Invoke-GitQuiet $Path @('fetch', '--quiet', '--prune', 'origin')).Code) {
+            Write-Host "WARN Git checkout ${Path}: cannot reach origin; using it as is"
+            return
+        }
+        $target = (Invoke-GitQuiet $Path @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')).Output
+        if (!$target -or (Invoke-GitQuiet $Path @('rev-parse', '--verify', '--quiet', $target)).Code) {
+            Invoke-GitQuiet $Path @('remote', 'set-head', 'origin', '--auto') | Out-Null
+            $target = (Invoke-GitQuiet $Path @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')).Output
+        }
+        if (!$target) { Write-Host "WARN Git checkout ${Path}: no upstream branch; using it as is"; return }
+        $stashed = $false
+        if ((Invoke-GitQuiet $Path @('status', '--porcelain')).Output) {
+            $stash = Invoke-GitQuiet $Path @('stash', 'push', '--include-untracked', '--quiet', '-m', 'bootstrap sync')
+            if ($stash.Code) { throw "Cannot stash local edits in ${Path}: $($stash.Output)" }
+            $stashed = $true
+        }
+        if ((Invoke-GitQuiet $Path @('merge-base', '--is-ancestor', 'HEAD', $target)).Code) {
+            Write-Host "WARN Git checkout ${Path}: local commits are not on $target; branch left as is"
+        } else {
+            $branch = $target -replace '^[^/]+/', ''
+            $update = Invoke-GitQuiet $Path @('checkout', '--quiet', '-B', $branch, '--track', $target)
+            if ($update.Code) { throw "Cannot update ${Path} to ${target}: $($update.Output)" }
+        }
+        if ($stashed -and (Invoke-GitQuiet $Path @('stash', 'pop', '--quiet')).Code) {
+            Invoke-GitQuiet $Path @('reset', '--hard', '--quiet') | Out-Null
+            Write-Host "WARN Git checkout ${Path}: local edits conflict with $target; kept in git stash list"
+        }
+        Write-Host "OK Git checkout $Path at $target"
         return
     }
     if ((Test-Path -LiteralPath $Path) -and @(Get-ChildItem -LiteralPath $Path -Force).Count) { throw "Refusing to replace non-repository directory: $Path" }

@@ -21,9 +21,11 @@ try {
     Update-ProcessPath
     $sshLinks = $request.Contains('SshLinks') -and $request.SshLinks
     if (($request.Contains('RcMachine') -and $request.RcMachine) -or $sshLinks) {
-        $newCheckout = !(Test-Path -LiteralPath (Join-Path $request.RcPath '.git'))
-        Ensure-Checkout $request.RcPath $request.RcRepository
-        if ($newCheckout) { Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q') }
+        # Existing checkouts are updated by the unelevated caller so new files keep the user's ownership.
+        if (!(Test-Path -LiteralPath (Join-Path $request.RcPath '.git'))) {
+            Ensure-Checkout $request.RcPath $request.RcRepository
+            Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q')
+        }
         if (!$sshLinks) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine') }
     }
     if ($sshLinks) {

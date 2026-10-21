@@ -66,7 +66,8 @@ class BootstrapTests(Fixture, unittest.TestCase):
         start = source.index('# Machine and project prerequisites.')
         script = self.temp / 'required-bootstrap.sh'
         script.write_text('SCRIPT_DIR="$FIXTURE_LINUX"\n'
-                          'wait_for_dpkg_lock() { :; }\n' + source[start:source.index('# Clone scripts', start)] +
+                          'wait_for_dpkg_lock() { :; }\nsync_checkout() { :; }\n' +
+                          source[start:source.index('# Clone scripts', start)] +
                           '\npython3 "$HOME/rc_files/.setup"\n' +
                           '\nprintf "continued|unused|\\n" >> "$CALL_LOG"\n')
         (self.home / 'rc_files').mkdir()

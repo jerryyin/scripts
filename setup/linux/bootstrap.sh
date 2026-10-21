@@ -3,8 +3,24 @@ set -x
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# User configuration belongs to the invoking account; privileged steps use sudo themselves.
+if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    exec sudo -u "$SUDO_USER" -H bash "$SCRIPT_DIR/bootstrap.sh" "$@"
+fi
+
 . "$SCRIPT_DIR/lib/wait_for_dpkg_lock.sh"
 . "$SCRIPT_DIR/lib/fix_hostname.sh"
+. "$SCRIPT_DIR/lib/sync_checkout.sh"
+
+# Update this checkout first and rerun the updated bootstrap once.
+SCRIPTS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ -z "${DEVENV_SCRIPTS_SYNCED:-}" ] && command -v git >/dev/null 2>&1 && [ -d "$SCRIPTS_ROOT/.git" ]; then
+    before=$(git -C "$SCRIPTS_ROOT" rev-parse HEAD)
+    sync_checkout "$SCRIPTS_ROOT"
+    if [ "$(git -C "$SCRIPTS_ROOT" rev-parse HEAD)" != "$before" ]; then
+        DEVENV_SCRIPTS_SYNCED=1 exec bash "$SCRIPT_DIR/bootstrap.sh" "$@"
+    fi
+fi
 
 # On a freshly-imaged/rebooted bare-metal host, systemd's automatic update
 # timers (unattended-upgrades, apt-daily) can be mid-run and hold the dpkg
@@ -47,10 +63,15 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
      git python3 python-is-python3 less wget python3-pip
 
 # Clone once, then rerun the repository's self-contained installer to repair
-# incomplete deployment. Correct links are left intact; local conflicts stop setup.
+# incomplete deployment. Existing checkouts are updated with local edits restored.
 if [ ! -d "$HOME/rc_files" ]; then
     git clone https://github.com/jerryyin/rc_files.git "$HOME/rc_files"
     git -C "$HOME/rc_files" remote set-url origin git@github.com:jerryyin/rc_files.git
+else
+    sync_checkout "$HOME/rc_files"
+fi
+if [ -d "$HOME/vault/.git" ] && [ ! -L "$HOME/vault" ]; then
+    sync_checkout "$HOME/vault"
 fi
 
 # Clone scripts
@@ -72,8 +93,9 @@ fi
 wait_for_dpkg_lock
 sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 
-# rc_files owns application dependencies, configuration and plugins.
-python3 "$HOME/rc_files/.setup"
+# rc_files owns application dependencies, configuration and plugins. Tracked
+# settings replace differing local files, which are kept under ~/.dotfiles-backup.
+python3 "$HOME/rc_files/.setup" --replace-existing --update
 
 # Expose this checkout's Docker commands through the existing link installer.
 for command_file in "$SCRIPT_DIR/../../containers/docker/bin/"*; do

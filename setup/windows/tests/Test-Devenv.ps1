@@ -91,6 +91,26 @@ try {
     Save-Text (Join-Path $freshRc 'local-only.txt') 'keep on rerun' ''
     Ensure-Checkout $freshRc $source
     Assert (Test-Path -LiteralPath (Join-Path $freshRc 'local-only.txt')) 'Rerunning does not reset an existing rc_files checkout'
+    $commit = @('-c', 'user.name=Devenv Test', '-c', 'user.email=devenv@example.invalid', '-c', 'commit.gpgsign=false', '-c', ('core.hooksPath=' + (Join-Path $testRoot 'no-hooks')), 'commit', '-q', '-am')
+    $spacer = (0..4 | ForEach-Object { "`" unchanged $_" }) -join "`n"
+    Save-Text (Join-Path $source 'vim/.vimrc') "`" shared configuration`n$spacer`n" ''
+    Invoke-Native git (@('-C', $source) + $commit + 'spacer')
+    Ensure-Checkout $freshRc $source
+    Save-Text (Join-Path $source 'vim/.vimrc') "`" upstream configuration`n$spacer`n" ''
+    Invoke-Native git (@('-C', $source) + $commit + 'upstream')
+    Save-Text (Join-Path $freshRc 'vim/.vimrc') "`" shared configuration`n$spacer`n`" local addition`n" ''
+    Ensure-Checkout $freshRc $source
+    $vimrc = [IO.File]::ReadAllText((Join-Path $freshRc 'vim/.vimrc'))
+    Assert ($vimrc.Contains('upstream configuration') -and $vimrc.Contains('local addition') -and (Test-Path -LiteralPath (Join-Path $freshRc 'local-only.txt'))) 'Rerunning pulls upstream and restores independent local edits'
+    Assert (!(Invoke-GitQuiet $freshRc @('stash', 'list')).Output) 'Restored local edits leave no stash behind'
+    Save-Text (Join-Path $source 'vim/.vimrc') "`" newer configuration`n$spacer`n" ''
+    Invoke-Native git (@('-C', $source) + $commit + 'newer')
+    Save-Text (Join-Path $freshRc 'vim/.vimrc') "`" mine`n$spacer`n" ''
+    Ensure-Checkout $freshRc $source
+    Assert ([IO.File]::ReadAllText((Join-Path $freshRc 'vim/.vimrc')).Contains('newer configuration') -and (Invoke-GitQuiet $freshRc @('stash', 'list')).Output -match 'bootstrap sync') 'Conflicting local edits yield to upstream and stay stashed'
+    Invoke-Native git @('-C', $source, 'branch', '-q', '-m', 'main', 'trunk')
+    Ensure-Checkout $freshRc $source
+    Assert ((Invoke-GitQuiet $freshRc @('rev-parse', '--abbrev-ref', 'HEAD')).Output -ceq 'trunk') 'A renamed default branch is followed'
     $freshNotes = Join-Path $testRoot 'another clean account/notes'
     Ensure-Checkout $freshNotes $source
     Assert (Test-Path -LiteralPath (Join-Path $freshNotes '.git')) 'Notes are also Git cloned when their destination is absent'

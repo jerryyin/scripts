@@ -67,7 +67,7 @@ elseif (!$SkipSshAgent) {
 }
 
 # The vault holds the GitHub tokens, so it is cloned with the SSH key rather than a GitHub login.
-# Clone only when absent; never pull/reset an existing private vault.
+# Clone when absent; otherwise update it like the other checkouts.
 $repository = (Read-Json (Join-Path $PSScriptRoot 'defaults/environment.json')).vaultRepository
 if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     Assert-PrivatePath $VaultPath
@@ -77,7 +77,7 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     $sshRepository = $repository -replace '^https://github.com/', 'git@github.com:'
     [void][IO.Directory]::CreateDirectory($VaultPath)
     Set-PrivateAcl $VaultPath
-    $clone = Invoke-CredentialCommand git.exe @('-c', 'core.autocrlf=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--', $sshRepository, $VaultPath) '' @{ GIT_TERMINAL_PROMPT = '0'; GIT_SSH_COMMAND = (Join-Path $env:WINDIR 'System32/OpenSSH/ssh.exe') + ' -o BatchMode=yes' }
+    $clone = Invoke-CredentialCommand git.exe @('-c', 'core.autocrlf=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--', $sshRepository, $VaultPath) '' @{ GIT_TERMINAL_PROMPT = '0'; GIT_SSH_COMMAND = (Join-Path $env:WINDIR 'System32/OpenSSH/ssh.exe') + ' -o BatchMode=yes -o StrictHostKeyChecking=accept-new' }
     if ($clone.ExitCode -ne 0) { throw "Private vault clone over SSH failed. Register a GitHub SSH key (or rerun with -SshSource), then rerun." }
 } else {
     # The private vault is intentionally a Git checkout; runtime destinations are not.
@@ -87,6 +87,7 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     $normalizedRemote = $remote.Output.Trim().TrimEnd('/') -replace '^git@github.com:', 'https://github.com/'
     if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match vaultRepository in defaults/environment.json.' }
     Set-PrivateAcl $VaultPath
+    Ensure-Checkout $VaultPath $repository
 }
 # GitHub CLI accounts come from the vault tokens through rc_files' gh credential hook.
 Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--home', $env:USERPROFILE)
