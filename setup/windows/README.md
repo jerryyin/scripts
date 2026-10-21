@@ -87,16 +87,16 @@ Any registered WSL distribution satisfies the Windows setup requirement, regardl
 
 WSL setup installs the selected distribution without launching it or rebooting automatically. If Windows needs a restart or distribution initialization, bootstrap completes native setup, reports the remaining step and exits with code `3010`. Restart when required, launch Ubuntu to create the Linux account, then rerun `-Apply`. Run `setup/linux/bootstrap.sh` separately inside Linux. Existing Linux configuration is left to that installer.
 
-The credential phase runs before cloning private notes. It preserves working GitHub and Codex logins, clones the configured private vault when missing, invokes `rc_files/.setup credentials --vault PATH` for application credentials, and prepares native SSH permissions and agent use. Application rendering belongs to rc_files; the credential phase installs nothing. Docker Desktop is not installed by this phase.
+The credential phase runs before cloning private notes. It prepares native SSH permissions and agent use, clones the configured private vault over SSH when missing, and invokes `rc_files/.setup credentials --vault PATH` for application credentials. GitHub CLI accounts come from the vault tokens, the same ones Linux uses, and are stored in the Windows credential store; existing accounts are kept. Codex is never signed in automatically: its OAuth refresh tokens are single-use, so run `codex login --device-auth` yourself when needed. Application rendering belongs to rc_files; the credential phase installs nothing. Docker Desktop is not installed by this phase.
 
 ```powershell
 .\priv.ps1                                  # plan
 .\priv.ps1 -Status                          # inspect current credentials
-.\priv.ps1 -Apply                           # perform native sign-in and setup
+.\priv.ps1 -Apply                           # apply SSH, vault and application credentials
 .\priv.ps1 -Apply -SshSource E:\backup\.ssh   # import missing keys from a trusted source
 ```
 
-Existing SSH keys are preserved. Supply a trusted backup or create and register a key yourself if none exists; setup does not silently replace your identity. Vault updates are explicit Git operations. Browser sign-in, encrypted-key passphrases and service approval may require interaction on the target machine.
+Existing SSH keys are preserved. Supply a trusted backup or create and register a key yourself if none exists; setup does not silently replace your identity. Vault updates are explicit Git operations. Without a GitHub-registered SSH key the vault cannot be cloned, and setup stops rather than falling back to browser sign-in. Encrypted-key passphrases and service approval may require interaction on the target machine.
 
 ## Maintenance and first-use steps
 

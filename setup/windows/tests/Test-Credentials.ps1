@@ -129,6 +129,8 @@ catch { Write-Output ('Fixture error: ' + $_.Exception.Message); exit 1 }
 
     $bootstrap = [IO.File]::ReadAllText((Join-Path $root 'bootstrap.ps1'))
     Assert ($bootstrap.IndexOf('Ensure-Checkout $RcPath') -lt $bootstrap.IndexOf("'priv.ps1') -Apply") -and $bootstrap.IndexOf("'priv.ps1') -Apply") -lt $bootstrap.IndexOf('Ensure-Checkout $NotesPath')) 'Bootstrap configures credentials before cloning private notes'
+    $priv = [IO.File]::ReadAllText((Join-Path $root 'priv.ps1'))
+    Assert ($priv -notmatch "'--web'" -and $priv -notmatch 'Invoke-Native codex' -and $priv -notmatch "'auth', 'login'") 'Credential phase never starts GitHub or Codex browser sign-in'
     Write-Output "$script:passed credential assertions passed. Real account credentials were not modified."
 } finally {
     $full = [IO.Path]::GetFullPath($fixture)

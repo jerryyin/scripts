@@ -56,7 +56,7 @@ if (!$Apply -and !$Check) {
     Write-Output 'PLAN: PowerShell 7, Gruvbox colors, font, prompt and shell shortcuts'
     Write-Output 'PLAN: group machine changes under one administrator approval; keep credentials and application setup in the caller'
     if (!$SkipSsh) { Write-Output 'PLAN: prepare tools and trusted configuration links for an existing SSH server in the same administrator step; verify SSH readability after deployment' }
-    if (!$SkipCredentials) { Write-Output 'PLAN: native GitHub, Docker, SSH and Codex credentials via priv.ps1 before cloning private notes' }
+    if (!$SkipCredentials) { Write-Output 'PLAN: SSH keys, vault over SSH, then GitHub CLI and Docker credentials from the vault via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with scripts/setup/linux/bootstrap.sh" }
     Write-Output "PLAN: notes at $NotesPath; install missing Obsidian plugins and theme chosen in the vault"
     if ($Update) { Write-Output 'PLAN: refresh existing Vim/CoC/Obsidian plugins and the Codex ACP adapter' }

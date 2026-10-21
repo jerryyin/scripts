@@ -26,9 +26,9 @@ $dockerRoot = if ($env:DOCKER_CONFIG) { $env:DOCKER_CONFIG } else { Join-Path $e
 $dockerConfig = [IO.Path]::GetFullPath((Join-Path $dockerRoot 'config.json'))
 
 if (!$Apply -and !$Status) {
-    Write-Output 'PLAN: reuse GitHub/Codex login, or run their interactive login once.'
-    Write-Output "PLAN: reuse/clone private vault at $VaultPath; restore Docker registry credential."
     Write-Output 'PLAN: preserve SSH keys, restrict Windows permissions, enable native ssh-agent.'
+    Write-Output "PLAN: reuse/clone private vault at $VaultPath over SSH; apply GitHub CLI and Docker credentials from it."
+    Write-Output 'PLAN: report Codex login status; Codex sign-in stays manual.'
     Write-Output 'Use -SshSource to import missing id_* keys from an explicitly chosen backup.'
     Write-Output 'Run -Apply to configure or -Status for a read-only inventory.'
     return
@@ -50,51 +50,6 @@ if ($Status) {
     return
 }
 
-# GitHub CLI uses the Windows credential store. Do not render the Linux hosts.yml
-# token template or replace native credentials with a second plaintext copy.
-function Invoke-GhConfiguration([string[]]$Arguments) {
-    $platformConfig = Join-Path $env:USERPROFILE '.config/git/platform.conf'
-    $item = Get-Item -LiteralPath $platformConfig -Force -ErrorAction SilentlyContinue
-    if (!$item -or $item.LinkType -ne 'SymbolicLink') { throw 'Deploy the tracked Git platform configuration before configuring GitHub authentication.' }
-    $previous = $env:GIT_CONFIG_GLOBAL
-    try {
-        $env:GIT_CONFIG_GLOBAL = $platformConfig
-        Invoke-Native gh $Arguments
-    } finally { $env:GIT_CONFIG_GLOBAL = $previous }
-}
-if (!(Get-Command gh -ErrorAction SilentlyContinue)) { throw 'Install GitHub.cli (or run bootstrap.ps1 -Apply) first.' }
-$login = Invoke-CredentialCommand gh @('auth', 'status', '--hostname', 'github.com') ''
-if ($login.ExitCode -ne 0) {
-    Write-Output 'Sign into the GitHub account that can read your private vault and notes.'
-    Invoke-GhConfiguration @('auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--skip-ssh-key')
-}
-
-# Clone only when absent; never pull/reset an existing private vault.
-$repository = (Read-Json (Join-Path $PSScriptRoot 'defaults/environment.json')).vaultRepository
-if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
-    Assert-PrivatePath $VaultPath
-    if ((Test-Path -LiteralPath $VaultPath) -and @(Get-ChildItem -LiteralPath $VaultPath -Force).Count) {
-        throw 'Vault destination is not an empty directory or Git checkout.'
-    }
-    $probe = Invoke-CredentialCommand git.exe @('-c', 'credential.interactive=never', 'ls-remote', $repository, 'HEAD') '' @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
-    if ($probe.ExitCode -ne 0) {
-        Invoke-GhConfiguration @('auth', 'setup-git', '--hostname', 'github.com')
-    }
-    [void][IO.Directory]::CreateDirectory($VaultPath)
-    Set-PrivateAcl $VaultPath
-    $clone = Invoke-CredentialCommand git.exe @('-c', 'core.autocrlf=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--', $repository, $VaultPath) '' @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
-    if ($clone.ExitCode -ne 0) { throw 'Private vault clone failed. Check GitHub account/repository access, then rerun.' }
-} else {
-    # The private vault is intentionally a Git checkout; runtime destinations are not.
-    Assert-PrivatePath (Split-Path ([IO.Path]::GetFullPath($VaultPath)) -Parent)
-    Assert-PrivatePath $VaultPath -AllowGit
-    $remote = Invoke-CredentialCommand git.exe @('-C', $VaultPath, 'remote', 'get-url', 'origin') ''
-    $normalizedRemote = $remote.Output.Trim().TrimEnd('/') -replace '^git@github.com:', 'https://github.com/'
-    if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match vaultRepository in defaults/environment.json.' }
-    Set-PrivateAcl $VaultPath
-}
-Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--home', $env:USERPROFILE)
-
 $keys = @(Initialize-NativeSsh $sshPath $SshSource)
 if (!$keys.Count) { Write-Output 'SSH: no keys yet. Rerun with -SshSource <trusted .ssh folder>, or create a key with ssh-keygen.' }
 elseif (!$SkipSshAgent) {
@@ -111,7 +66,38 @@ elseif (!$SkipSshAgent) {
     Write-Output 'OK SSH: native Windows agent enabled; existing keys and config preserved.'
 }
 
-if (!(Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Install Codex (or run bootstrap.ps1 -Apply) first.' }
-$login = Invoke-CredentialCommand codex @('login', 'status') ''
-if ($login.ExitCode -ne 0) { Invoke-Native codex @('login') }
-Write-Output 'OK Codex: native login ready. Existing app credentials were preserved.'
+# The vault holds the GitHub tokens, so it is cloned with the SSH key rather than a GitHub login.
+# Clone only when absent; never pull/reset an existing private vault.
+$repository = (Read-Json (Join-Path $PSScriptRoot 'defaults/environment.json')).vaultRepository
+if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
+    Assert-PrivatePath $VaultPath
+    if ((Test-Path -LiteralPath $VaultPath) -and @(Get-ChildItem -LiteralPath $VaultPath -Force).Count) {
+        throw 'Vault destination is not an empty directory or Git checkout.'
+    }
+    $sshRepository = $repository -replace '^https://github.com/', 'git@github.com:'
+    [void][IO.Directory]::CreateDirectory($VaultPath)
+    Set-PrivateAcl $VaultPath
+    $clone = Invoke-CredentialCommand git.exe @('-c', 'core.autocrlf=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--', $sshRepository, $VaultPath) '' @{ GIT_TERMINAL_PROMPT = '0'; GIT_SSH_COMMAND = (Join-Path $env:WINDIR 'System32/OpenSSH/ssh.exe') + ' -o BatchMode=yes' }
+    if ($clone.ExitCode -ne 0) { throw "Private vault clone over SSH failed. Register a GitHub SSH key (or rerun with -SshSource), then rerun." }
+} else {
+    # The private vault is intentionally a Git checkout; runtime destinations are not.
+    Assert-PrivatePath (Split-Path ([IO.Path]::GetFullPath($VaultPath)) -Parent)
+    Assert-PrivatePath $VaultPath -AllowGit
+    $remote = Invoke-CredentialCommand git.exe @('-C', $VaultPath, 'remote', 'get-url', 'origin') ''
+    $normalizedRemote = $remote.Output.Trim().TrimEnd('/') -replace '^git@github.com:', 'https://github.com/'
+    if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match vaultRepository in defaults/environment.json.' }
+    Set-PrivateAcl $VaultPath
+}
+# GitHub CLI accounts come from the vault tokens through rc_files' gh credential hook.
+Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--home', $env:USERPROFILE)
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    $login = Invoke-CredentialCommand gh @('auth', 'status', '--hostname', 'github.com') ''
+    if ($login.ExitCode -eq 0) { Write-Output 'OK GitHub CLI: vault accounts available.' } else { Write-Output 'MISSING GitHub CLI login: check the vault gh_token_*.txt files.' }
+}
+
+# Codex uses single-use OAuth refresh tokens, so it is never signed in unattended.
+if (Get-Command codex -ErrorAction SilentlyContinue) {
+    $login = Invoke-CredentialCommand codex @('login', 'status') ''
+    if ($login.ExitCode -eq 0) { Write-Output 'OK Codex: existing login preserved.' }
+    else { Write-Output 'SKIP Codex: not signed in. Run `codex login --device-auth` when you want it.' }
+}

@@ -14,6 +14,7 @@ if (!(Test-InstalledLink $path $source)) { throw 'Terminal configuration is not 
 $settings = Read-Json $path
 $visible = @($settings.profiles.list | Where-Object { !$_.Contains('hidden') -or !$_.hidden })
 if (@($visible | Where-Object { $_.name -eq 'PowerShell' }).Count -ne 1) { throw 'Duplicate PowerShell entries remain visible' }
+if (@($visible | Where-Object { $_.name -in @('Windows PowerShell', 'Command Prompt') }).Count) { throw 'Alternative native shells remain visible beside PowerShell 7' }
 $wsl = @($visible | Where-Object { $_.name -eq 'Ubuntu' })
 if ($wsl.Count -ne 1 -or $wsl[0].commandline -cne 'wsl.exe --cd ~' -or $wsl[0].Contains('source')) {
     throw 'One Ubuntu profile must launch the default distro without a machine-specific profile source'
