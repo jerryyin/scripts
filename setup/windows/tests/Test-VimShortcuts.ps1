@@ -26,12 +26,15 @@ Invoke-Native git @('-C', $reviewProject, 'add', '--', 'review.py')
 Save-Text (Join-Path $reviewProject 'review.py') ('value = "working' + (' ' * 180) + '"') ''
 $prior = @{VIM_AUDIT_RESULT=$env:VIM_AUDIT_RESULT; VIM_AUDIT_ROOT=$env:VIM_AUDIT_ROOT; VIM_AUDIT_SCRIPTS=$env:VIM_AUDIT_SCRIPTS; VIM_AUDIT_RC=$env:VIM_AUDIT_RC; PSMUX_TARGET_SESSION=$env:PSMUX_TARGET_SESSION; PSMUX_SESSION=$env:PSMUX_SESSION; TMUX=$env:TMUX}
 $console = $null
+$prior.TMUX_PANE = $env:TMUX_PANE
 $prior.RC_REVIEW_PROJECT = $env:RC_REVIEW_PROJECT
 $prior.RC_REVIEW_REPORT = $env:RC_REVIEW_REPORT
 $prior.RC_REVIEW_FUGITIVE = $env:RC_REVIEW_FUGITIVE
 $socket = 'vim-ai-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $mux = (Get-Command psmux.exe).Source
 try {
+    # This Vim runs outside the caller's pane and the isolated AI server.
+    $env:TMUX_PANE = $null
     $env:RC_REVIEW_PROJECT = $reviewProject
     $env:RC_REVIEW_REPORT = Join-Path $fixture 'reviews.json'
     $env:RC_REVIEW_FUGITIVE = Join-Path $env:USERPROFILE '.vim/plugged/vim-fugitive'

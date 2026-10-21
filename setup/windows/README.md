@@ -35,7 +35,15 @@ From this directory:
 
 Use `Get-Help .\bootstrap.ps1 -Full` and the script's parameter block for the complete interface, including redirected locations and optional setup phases. `-Check` checks installed tools, configuration links, font availability and required plugin files. It does not establish successful GUI interaction, authentication or model instruction loading.
 
-Setup installs missing Windows packages, prepares native credentials, clones missing configuration and notes repositories, deploys settings through `rc_files/.setup`, and prepares fonts, Vim, psmux and Obsidian integration. The native package set includes everyday tools such as PowerToys, KDE Connect, Rufus, WizTree and VLC; maintain the actual choices in the defaults file.
+Apply runs in five phases:
+
+1. **Prepare:** inspect the machine, install user-level bootstrap prerequisites, and locate or clone `rc_files` when Git is available.
+2. **Machine setup:** run needed administrator operations together through `machine.ps1`, including prerequisites, trusted links and SSH service/shell settings.
+3. **User configuration and access:** ensure native prerequisites, apply Git configuration, then call `priv.ps1` for credentials and SSH keys.
+4. **Development environment:** deploy settings and run application setup through `rc_files/.setup`, then verify SSH readiness.
+5. **Notes and Obsidian:** locate or clone notes, install its selected plugins/theme and the Codex adapter, then register the vault.
+
+The native package set includes everyday tools such as PowerToys, KDE Connect, Rufus, WizTree and VLC; maintain the actual choices in the defaults file.
 
 Packages marked `"scope": "machine"` run in the grouped administrator step. Other packages install with `--scope user`; Python's launcher is also explicitly installed for the current user. Existing installations are retained regardless of scope. The machine helper logs to `%LOCALAPPDATA%\PersonalDevenv\logs`; its temporary request and result files contain no credentials and are removed after use. Cancelling UAC or a machine-install failure stops setup without retrying elevation.
 

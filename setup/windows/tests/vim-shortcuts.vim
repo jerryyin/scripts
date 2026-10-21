@@ -31,12 +31,12 @@ catch
 endtry
 try
   cclose
-  execute 'edit ' . fnameescape($VIM_AUDIT_SCRIPTS . '/setup/windows/Devenv.psm1')
-  call search('Ensure-Wsl')
+  execute 'edit ' . fnameescape($VIM_AUDIT_RC . '/vim/.vim/config/project.vim')
+  call search('IsTritonProject')
   call setqflist([])
   call s:Keys('\sg')
   sleep 1000m
-  call s:Check(!empty(filter(getqflist(), 'v:val.valid && v:val.text =~# "Ensure-Wsl"')), '\sg searches tracked Git files')
+  call s:Check(!empty(filter(getqflist(), 'v:val.valid && v:val.text =~# "IsTritonProject"')), '\sg searches tracked Git files')
   call s:Keys('\qo')
   call s:Check(&buftype ==# 'quickfix', '\qo opens search results')
   call s:Keys('\qc')

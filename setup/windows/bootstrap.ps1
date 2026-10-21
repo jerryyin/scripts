@@ -151,6 +151,7 @@ if ($Check) {
     return
 }
 
+# 1. Prepare: inspect the machine and resolve bootstrap prerequisites.
 # A separately redirected test home doesn't share the running app's user data.
 $nativeSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $nativeProfile = (Get-ItemProperty -LiteralPath ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $nativeSid)).ProfileImagePath
@@ -186,6 +187,7 @@ if ($sshState.Installed) {
     $sshLinks = $rcMachine -or !(Test-Path -LiteralPath (Join-Path $RcPath '.git')) -or @(Get-SshSessionProblems $RcPath $sshPlan).Count -gt 0
     if (!$sshLinks -and !$SkipPackages) { $sshLinks = @(Get-RcMissingPackages $RcPath 'user').Count -gt 0 }
 }
+# 2. Machine setup: group administrator work into one request.
 $machine = @{
     DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'machine' })
     Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
@@ -195,6 +197,8 @@ $machine = @{
     LinkArguments=(@(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--backup', $backupRoot))
 }
 $wslState = Invoke-MachineSetup $machine
+
+# 3. User configuration and access: prepare tools, Git and credentials.
 Update-ProcessPath
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
@@ -204,7 +208,8 @@ if (!$SkipPackages) {
 }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
-Ensure-Checkout $NotesPath $manifest.notesRepository
+
+# 4. Development environment: deploy application settings and verify SSH.
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--backup', $backupRoot)
 if ($SkipPackages) { $deployment += '--no-install' }
 if ($SkipFonts) { $deployment += @('--skip-setup', 'terminal') }
@@ -217,6 +222,9 @@ if (!$SkipSsh) {
     $sshProblems = @(Get-SshSessionProblems $RcPath $sshPlan)
     if ($sshProblems.Count) { throw ($sshProblems -join [Environment]::NewLine) }
 }
+
+# 5. Notes and Obsidian: prepare the vault and its integrations together.
+Ensure-Checkout $NotesPath $manifest.notesRepository
 if (!$SkipAddons) {
     Install-ObsidianAddons $NotesPath $backupRoot -Update:$Update
     Install-CodexAdapter -Update:$Update
