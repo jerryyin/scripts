@@ -62,6 +62,12 @@ Bare `psmux` or `tmux` resumes the most recently active native session, creating
 
 After changing configuration, reload or restart the owning application. PowerShell reads its profile in a new shell. Reload tmux/psmux configuration directly; no generated translation needs refreshing. Font and color preferences stay in the application's tracked settings.
 
+## Windows SSH sessions
+
+Run `pwsh -NoProfile -ExecutionPolicy Bypass -File .\Setup-SshSession.ps1` from an elevated Windows SSH session to inspect startup configuration; add `-Apply` to select the installed PowerShell 7 as the SSH shell and repair managed links blocked by Windows error 448 ("untrusted mount point"). The script checks rc_files' current link plan and the configured development tools' WinGet aliases, recreates only matching unreadable links with administrator ownership of their trust metadata, and backs up the previous links. It preserves authentication and RedirectionGuard settings. Rerun after setup or package updates if newly created links are blocked; ordinary updates to files behind existing links need no repair.
+
+The rc_files PowerShell profile automatically attaches interactive SSH terminals to psmux `main`; command-only SSH requests and nested mux shells stay unaffected. Reconnect after changing the default shell. Client-side fonts and terminal palette remain the SSH client's settings; the prompt and mux status colors come from rc_files.
+
 ## WSL and credentials
 
 Any registered WSL distribution satisfies the Windows setup requirement, regardless of its name or Linux flavor. Terminal uses WSL's configured default. The manifest's distribution choice controls first-time installation when no distribution is registered; setup preserves existing distributions and the selected default.
