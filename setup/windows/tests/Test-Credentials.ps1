@@ -33,6 +33,19 @@ try {
     Assert ([IO.File]::ReadAllText($path) -ceq 'rotated test credential') 'Credential rotation replaces content'
     Assert (@(Get-ChildItem -LiteralPath (Split-Path $path -Parent) -Force).Count -eq 1) 'Credential writer leaves no backup or staging copy'
 
+    $modifyOnly = Join-Path $fixture 'native/known_hosts'
+    [IO.File]::WriteAllText($modifyOnly, 'fixture.example ssh-ed25519 AAAA')
+    $restricted = New-Object Security.AccessControl.FileSecurity
+    $restricted.SetAccessRuleProtection($true, $false)
+    $user = New-Object Security.Principal.SecurityIdentifier($sid)
+    $administrators = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $restricted.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($user, 'Modify, Synchronize', 'Allow')))
+    $restricted.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($administrators, 'FullControl', 'Allow')))
+    (Get-Item -LiteralPath $modifyOnly).SetAccessControl($restricted)
+    Set-PrivateAcl $modifyOnly
+    $identities = @((Get-Acl -LiteralPath $modifyOnly).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
+    Assert ($identities.Count -eq 2 -and $identities -contains $sid -and $identities -contains 'S-1-5-18') 'Owned files without take-ownership rights become private'
+
     $repo = Join-Path $fixture 'checkout'
     [void][IO.Directory]::CreateDirectory((Join-Path $repo '.git'))
     Assert-Throws { Save-PrivateText (Join-Path $repo 'config.json') 'test' } 'Credential writes inside Git checkouts are refused'
@@ -72,7 +85,7 @@ try {
     $acl = Get-Acl -LiteralPath $keyPath
     $everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
-    Set-Acl -LiteralPath $keyPath -AclObject $acl
+    (Get-Item -LiteralPath $keyPath).SetAccessControl($acl)
     Initialize-NativeSsh $ssh '' | Out-Null
     $acl = Get-Acl -LiteralPath $keyPath
     $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })

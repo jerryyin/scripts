@@ -25,7 +25,8 @@ function Set-PrivateAcl([string]$Path) {
     $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
     $directory = (Get-Item -LiteralPath $Path -Force).PSIsContainer
     $acl = if ($directory) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
-    $acl.SetOwner($sid)
+    # Writing the owner needs WRITE_OWNER even when unchanged; an owner can always replace the DACL.
+    if ((Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]) -ne $sid) { $acl.SetOwner($sid) }
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($identity in @($sid, $system)) {
         $rule = if ($directory) {
