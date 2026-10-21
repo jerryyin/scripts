@@ -19,7 +19,7 @@ $wsl = @($visible | Where-Object { $_.name -eq 'Ubuntu' })
 if ($wsl.Count -ne 1 -or $wsl[0].commandline -cne 'wsl.exe --cd ~' -or $wsl[0].Contains('source')) {
     throw 'One Ubuntu profile must launch the default distro without a machine-specific profile source'
 }
-if ($settings.disabledProfileSources -notcontains 'Windows.Terminal.Wsl' -or $settings.disabledProfileSources -notcontains 'Microsoft.WSL') { throw 'Generated WSL profiles must not duplicate the single Ubuntu entry' }
+if (@('Windows.Terminal.Wsl', 'Microsoft.WSL', 'CanonicalGroupLimited.Ubuntu_79rhkp1fndgsc', 'CanonicalGroupLimited.Ubuntu24.04LTS_79rhkp1fndgsc' | Where-Object { $settings.disabledProfileSources -notcontains $_ }).Count) { throw 'Generated WSL and Ubuntu app profiles must not duplicate the single Ubuntu entry' }
 $before = (Get-Item $path).CreationTimeUtc.Ticks
 Invoke-TestLink $path $source ''
 if ((Get-Item $path).CreationTimeUtc.Ticks -ne $before) { throw 'Terminal rerun replaced its link' }

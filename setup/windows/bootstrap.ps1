@@ -235,7 +235,7 @@ Set-VaultRegistration $registryPath $NotesPath $backupRoot
 if ($InstallCodexDesktop) { Invoke-Native codex @('app', $NotesPath) }
 Write-Output "Provisioning complete. Backups: $backupRoot"
 Write-Output 'Restart Terminal. vim/vi use native Vim; tmux uses psmux; dev attaches to a native main session.'
-Write-Output 'Open Obsidian and select Codex Auto-detect if needed. Sign in to Codex/GitHub as needed.'
+Write-Output 'Open Obsidian and select Codex Auto-detect if needed. Run codex login --device-auth yourself when you want Codex.'
 Write-Output 'Pair KDE Connect with your devices on first use.'
 Write-Output 'Run bootstrap.ps1 -Check to inspect readiness.'
 if ($wslState -in @('RebootRequired', 'PendingInitialization')) {
