@@ -31,6 +31,7 @@ class Fixture:
         self.repo = self.temp / 'relocated checkout'
         self.log = self.temp / 'calls.log'
         self.env = dict(os.environ, HOME=str(self.home), CALL_LOG=str(self.log),
+                        XDG_CONFIG_HOME=str(self.home / '.config'),
                         DEVENV_PERSISTENT_ROOT='', PYTHONDONTWRITEBYTECODE='1')
         self.env.pop('FAIL_STEP', None)
         self.env.pop('DEVENV_WORKSPACE_ROOT', None)

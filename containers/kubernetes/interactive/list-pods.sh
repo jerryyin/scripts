@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.json"
+CONFIG_FILE="${KUBE_DEV_CONFIG:-${SCRIPT_DIR}/config.json}"
 PORT_MAPPING_FILE="$HOME/.kube/pod-port-mappings.json"
 
 if [ ! -f "$CONFIG_FILE" ]; then

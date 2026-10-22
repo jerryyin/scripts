@@ -6,11 +6,11 @@ Development setup, execution infrastructure, and GPU engineering tools.
 | --- | --- |
 | [setup](setup/README.md) | Linux and Windows installation, credentials, project workspaces, remote provisioning |
 | [agent](agent/README.md) | Claude and Cursor sessions, progress and verdict tracking for unattended runs |
+| [tools](tools/README.md) | Independent, single-purpose utilities: Windows/WSL execution, GitHub attachments, GDB lane printing |
 | [containers](containers/README.md) | Docker image utilities and Kubernetes connections, pods, and storage |
 | [profiling](profiling/README.md) | Hardware trace capture, analysis, and event replay |
 | [am](am/README.md) | AM/FFM simulator execution, downloads, and instruction trace analysis |
 | [board](board/README.md) | GPU access coordination and board preparation |
-| `gdb` | Debugger helpers, including GPU lane inspection |
 | `triton`, `iree`, `llvm`, `tokenspeed` | Project experiments, reproducers, analysis, build configuration |
 | `bench`, `numerics` | Benchmarks and numerical analysis |
 | `archive` | Historical workflows |
@@ -32,6 +32,10 @@ Development setup, execution infrastructure, and GPU engineering tools.
 - Keep helpers and tests with their owner. `setup/linux/lib` is internal to Linux setup.
 - Keep utilities with their subject: `profiling/` owns hardware trace capture,
   `am/` owns simulator execution, and `agent/claude/` owns Claude session inspection.
+- `tools/` is for standalone utilities with one dedicated use case and no dependency
+  on another tool or repository module. Shared implementations and cooperating
+  workflows belong in a subject directory. Its local `AGENTS.md` and CI tests
+  enforce this boundary; prerequisites and usage stay in its README.
 - `rc_files` owns configured applications, their dependencies, settings, plugins and application credential hooks. This repository owns machine provisioning, vault availability and interactive sign-in, everyday utilities and project workflows. Credential values and runtime data stay outside both repositories.
 
 See [Linux setup](setup/linux/README.md) for profiles, lifecycle phases, and the

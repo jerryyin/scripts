@@ -33,10 +33,12 @@ class StructureTests(unittest.TestCase):
                 self.assertTrue(lines[1].startswith('WORKSPACE_STEPS=('))
 
     def test_subject_directories_and_agent_utilities_have_canonical_owners(self):
-        self.assertFalse((ROOT / 'tools').exists())
+        self.assertTrue((ROOT / 'tools/AGENTS.md').is_file())
+        self.assertTrue((ROOT / 'tools/gdb_print_lanes.py').is_file())
+        self.assertFalse((ROOT / 'gdb/print_lanes.py').exists())
         self.assertFalse((ROOT / 'kubernetes').exists())
         self.assertTrue((ROOT / 'containers/kubernetes').is_dir())
-        for name in ('am', 'profiling', 'board', 'gdb', 'bench', 'numerics',
+        for name in ('am', 'profiling', 'board', 'tools', 'bench', 'numerics',
                      'triton', 'iree', 'llvm', 'tokenspeed'):
             with self.subTest(subject=name):
                 self.assertTrue((ROOT / name).is_dir())

@@ -64,6 +64,8 @@ fi
                 result = self.build(SERVICE_NAME=args['SERVICE_NAME'],
                                     SETUP_PROFILE=args.get('SETUP_PROFILE', ''))
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.home / '.config/scripts/setup-profile').read_text().strip(),
+                                 args.get('SETUP_PROFILE') or args['SERVICE_NAME'])
                 steps = [row[0] for row in self.calls()]
                 self.assertIn('bootstrap.sh', steps)
                 self.assertNotIn('credentials/activate.sh', steps)

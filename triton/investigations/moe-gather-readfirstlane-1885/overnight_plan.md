@@ -73,7 +73,7 @@ metrics, not cycle counts, unless a perf harness exists (see Q3).
 **Sub-goals:**
 - (a) **Observe** the recorded baseline in-loop `v_readfirstlane`. First, download
   the IR tarball kwang102 attached to the ticket (`IR_moe_gluon_4x512x1024_…`) via
-  `~/scripts/iree/download_github_attachment.py` and inspect it directly — that is
+  `~/scripts/tools/github_attachments.py` with the full issue URL and inspect it directly — that is
   the faithful recorded artifact, no rebuild needed.
 - (b) **Check the descriptor pattern** in that recorded IR: is the VGPR→SGPR
   descriptor churn present there too, or is it new to the current base?

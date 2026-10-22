@@ -92,3 +92,10 @@ for step in "${STEPS[@]}"; do
         bash "$DEVENV_DIR/$step"
     fi
 done
+
+# Credential refresh and dry runs must not change the selected development shell.
+if ! "$PLAN" && [[ "$PHASE" != activate ]]; then
+    selection_dir="${XDG_CONFIG_HOME:-$HOME/.config}/scripts"
+    mkdir -p "$selection_dir"
+    printf '%s\n' "$PROFILE" > "$selection_dir/setup-profile"
+fi

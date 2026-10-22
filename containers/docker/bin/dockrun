@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# == 0 )); then
+    echo 'Usage: dockrun [docker run options...] <image> [command...]' >&2
+    exit 2
+fi
+
+name="${USER:-$(id -un)}-$(date +%m%d-%H%M%S)-$$"
+exec sudo docker run -it --network=host --device=/dev/kfd --device=/dev/dri \
+    --group-add video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+    --name "$name" -h "$name" -v /data:/data -v "$HOME:/zyin" "$@"

@@ -13,5 +13,20 @@ if [[ ! -f "$compose_file" ]]; then
     exit 1
 fi
 compose_file=$(readlink -f "$compose_file")
-export COMPOSE_PROJECT_NAME="${USER:-$(id -un)}-${!#}-$(date +%m%d-%H%M)"
+case "$1" in
+    -p|--project-name)
+        if [[ $# -lt 3 || -z "$2" || "$2" == -* ]]; then
+            echo 'Usage: dcompose -p <project> <command> [arguments...]' >&2
+            exit 2
+        fi
+        export COMPOSE_PROJECT_NAME="$2"
+        ;;
+    --project-name=*) export COMPOSE_PROJECT_NAME="${1#*=}" ;;
+esac
+if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
+    case "$1" in
+        build|config|ls|version) ;;
+        *) echo 'Select an existing project: dcompose -p <project> <command>, or set COMPOSE_PROJECT_NAME.' >&2; exit 2 ;;
+    esac
+fi
 exec docker compose -f "$compose_file" "$@"

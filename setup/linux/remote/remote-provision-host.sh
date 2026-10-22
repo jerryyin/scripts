@@ -67,4 +67,5 @@ if [ -n "${NO_BASE_PULL:-}" ]; then
     exit 0
 fi
 
-bash "$HOME/scripts/containers/docker/pull-base-images.sh" triton triton-mi450
+bash "$HOME/scripts/containers/docker/pull-base-images.sh" triton triton-mi450 ||
+    echo 'Optional base-image prefetch failed; provisioning completed. Retry pull-base-images.sh before building.' >&2

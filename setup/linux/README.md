@@ -16,6 +16,7 @@ bash ~/scripts/setup/linux/setup.sh --list
 | `bootstrap.sh` | Machine prerequisites and certificate trust, then complete `rc_files` setup |
 | `packages/` | Standalone install/build scripts, including one-off and historical recipes |
 | `credentials/` | SSH/vault availability, delegation to rc_files credential hooks |
+| `shell.zsh` | The selected project's shell settings |
 | `profiles/triton/`, `profiles/iree/` | Each environment's plan, dependencies, and workspace preparation |
 | `remote/` | Provision remote hosts over SSH |
 | `lib/` | Internal helpers for package management, shells, storage, workspaces |
@@ -114,6 +115,42 @@ Docker supplies `/zyin` during startup; Kubernetes supplies its PVC mount or dis
 persistence for an ephemeral pod. Docker-specific base-image pulls live in
 `containers/docker/pull-base-images.sh`; remote provisioning invokes that optional operation
 after preparing the host.
+
+## Project shell settings
+
+The rc_files Zsh configuration optionally sources
+`${SCRIPTS_ROOT:-$HOME/scripts}/setup/linux/shell.zsh`. After successful setup,
+`setup.sh` records the selected profile in
+`${XDG_CONFIG_HOME:-$HOME/.config}/scripts/setup-profile`. Docker builds and
+Kubernetes setup already select that profile; later shells, including SSH logins,
+read it. Dry runs, failed setup, and credential-only activation leave it unchanged.
+`SETUP_PROFILE` overrides the saved choice for a shell. Without either, the choice
+is `base` (no project settings).
+
+The loader sources only the selected `profiles/iree/shell.zsh` or
+`profiles/triton/shell.zsh`, without running installers.
+Only existing checkout/build directories enter PATH or PYTHONPATH; loading twice
+does not duplicate them or overwrite unrelated settings. `IREE_DIR` and
+`TRITON_DIR` override the usual `$DEVENV_WORKSPACE_ROOT/iree` and
+`$DEVENV_WORKSPACE_ROOT/triton-mi450` locations (workspace root defaults to HOME).
+
+The Triton shell also activates mounted simulator environments using the
+[mount and backend rules](../../am/README.md#shell-auto-loading).
+The IREE and base profiles do not activate models. The Triton profile reads the private LLVM download
+token from the vault only when no token is already set.
+Shell activation does not install dependencies or change directories. Without
+the scripts checkout, rc_files still loads normally.
+
+Existing images need the revised setup run (or an explicit `SETUP_PROFILE`) to
+select their project; shell loading does not guess from installed checkout paths.
+
+### Alternatives Considered
+
+Loading all project hooks leaks one project's settings into another. Inferring a
+profile from existing checkouts is ambiguous on development hosts. Saving the
+setup choice works for new shells and SSH sessions without relying on inherited
+process variables. Keeping model activation in the Triton hook avoids another
+loader and limits automatic simulator settings to Triton shells.
 
 ## Docker build and startup
 

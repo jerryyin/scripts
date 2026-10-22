@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# == 0 )); then
+if (( $# != 1 )) || [[ "$1" == -* ]]; then
     echo 'Usage: drun <service>' >&2
     exit 2
 fi
 
-containers=$(docker ps -a --format '{{.Names}}')
-if grep -Fxq zyin-tools-setup <<< "$containers"; then
-    echo 'Removing existing container: zyin-tools-setup'
-    docker rm -f zyin-tools-setup
-fi
-
 command_dir=$(dirname "$(readlink -f "$0")")
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${USER:-$(id -un)}-$1-$(date +%m%d-%H%M%S)-$$}"
+services=$("$command_dir/dcompose" --profile "$1" config --services)
+if ! grep -Fxq -- "$1" <<< "$services"; then
+    echo "Unknown Compose service: $1" >&2
+    exit 2
+fi
+echo "Compose project: $COMPOSE_PROJECT_NAME"
 exec "$command_dir/dcompose" up -d --no-build "$@"

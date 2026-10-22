@@ -1,3 +1,6 @@
+"""Print one variable across selected GPU lanes in a GDB session."""
+
+
 def print_variable_for_lanes(var_name, start=1, end=32):
     """Print the value of a given variable for all lanes in a compact format."""""
     values = []  # Store values from each lane
@@ -16,6 +19,6 @@ def print_variable_for_lanes(var_name, start=1, end=32):
     print(f"{var_name} values: [" + ", ".join(values) + "]")
 
 # Example usage: print the 'first' variable across lanes for the range specified
-# (gdb) source print_lanes.py
+# (gdb) source tools/gdb_print_lanes.py
 # (gdb) python print_variable_for_lanes("first.data")
 # (gdb) python print_variable_for_lanes("lIdx", 0, 3)

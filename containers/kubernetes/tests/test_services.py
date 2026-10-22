@@ -15,6 +15,59 @@ spec.loader.exec_module(services)
 
 
 class ServiceTests(unittest.TestCase):
+    def test_list_and_stop_use_the_selected_configuration(self):
+        with tempfile.TemporaryDirectory(prefix='kube-config-') as temporary:
+            root = Path(temporary)
+            config = root / 'alternate config.json'
+            config.write_text(json.dumps({'namespace': 'selected-namespace', 'default_cluster': 'selected.conf'}))
+            log = root / 'calls.jsonl'
+            kubectl = root / 'kubectl'
+            kubectl.write_text('''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['CALL_LOG'], 'a') as stream:
+    stream.write(json.dumps([sys.argv[1:], os.environ.get('KUBECONFIG')]) + '\\n')
+print('{"items": []}')
+''')
+            jq = root / 'jq'
+            jq.write_text('''#!/usr/bin/env python3
+import json, sys
+if sys.argv[2] in ('.namespace', '.default_cluster'):
+    with open(sys.argv[3]) as stream:
+        print(json.load(stream)[sys.argv[2][1:]])
+''')
+            kubectl.chmod(0o755)
+            jq.chmod(0o755)
+            environment = dict(os.environ, HOME=temporary, USER=root.name, KUBECONFIG='',
+                               KUBE_DEV_CONFIG=str(config), CALL_LOG=str(log), PATH=temporary + ':' + os.environ['PATH'])
+            for command in ('list-pods.sh', 'stop.sh'):
+                with self.subTest(command=command):
+                    log.unlink(missing_ok=True)
+                    result = subprocess.run(['bash', str(INTERACTIVE / command)], env=environment,
+                                            input='', text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertTrue(calls)
+                    for arguments, kubeconfig in calls:
+                        self.assertIn('selected-namespace', arguments)
+                        self.assertEqual(kubeconfig, str(root / '.kube/configs/selected.conf'))
+
+    def test_existing_pod_refresh_copies_the_relocated_tools(self):
+        source = (INTERACTIVE / 'connect.sh').read_text()
+        start = source.index('                for directory in ')
+        end = source.index('\n                done', start) + len('\n                done')
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / 'copies'
+            kubectl = Path(temporary) / 'kubectl'
+            kubectl.write_text('#!/bin/sh\ntest -d "$2" || exit 9\nprintf "%s\\n" "$2" >> "$COPY_LOG"\n')
+            kubectl.chmod(0o755)
+            result = subprocess.run(['bash', '-eu', '-c', source[start:end]], text=True, capture_output=True,
+                                    env=dict(os.environ, PATH=temporary + ':' + os.environ['PATH'],
+                                             SCRIPTS_ROOT=str(ROOT), NAMESPACE='fixture', POD_NAME='fixture', COPY_LOG=str(log)))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            copied = {Path(path).name for path in log.read_text().splitlines()}
+            self.assertIn('tools', copied)
+            self.assertNotIn('gdb', copied)
+
     def test_all_services_select_existing_profiles(self):
         configured = services.load_services(INTERACTIVE / 'config.json')
         self.assertEqual(set(configured), {'base', 'rocmlir', 'ck', 'triton', 'triton-mi450', 'triton-b0', 'iree'})

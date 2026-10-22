@@ -1,9 +1,5 @@
 import os
-from pathlib import Path
-import runpy
-import shlex
 import shutil
-import subprocess
 import unittest
 
 from support import Fixture, ROOT, executable, recorder
@@ -12,6 +8,20 @@ from support import Fixture, ROOT, executable, recorder
 class ProfileTests(Fixture, unittest.TestCase):
     def setup_profile(self, *args, **kwargs):
         return self.run_shell(self.repo / 'setup/linux/setup.sh', *args, **kwargs)
+
+    def test_successful_setup_remembers_only_its_selected_shell_profile(self):
+        selection = self.home / '.config/scripts/setup-profile'
+        self.setup_profile('iree', '--phase', 'build')
+        self.assertEqual(selection.read_text(), 'iree\n')
+        for arguments in (('triton', '--plan'), ('triton', '--phase', 'activate')):
+            self.setup_profile(*arguments)
+            self.assertEqual(selection.read_text(), 'iree\n')
+        result = self.setup_profile('triton', check=False,
+                                    env=dict(self.env, FAIL_STEP='profiles/triton/deps.sh'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(selection.read_text(), 'iree\n')
+        self.setup_profile('triton', '--phase', 'workspace')
+        self.assertEqual(selection.read_text(), 'triton\n')
 
     def test_triton_keeps_dependencies_and_orders_credentials_before_workspace(self):
         self.setup_profile('triton')
@@ -100,44 +110,11 @@ exit 97
         self.assertEqual(self.log.read_text().splitlines(), [
             str(numerics / 'genRandInput.py'), str(numerics / 'compare.py')])
 
-    def test_rc_shell_finds_ffm_plugin_in_am_directory(self):
-        rc_root = Path(os.environ.get('RC_FILES_ROOT', ROOT.parent / 'rc_files'))
-        source = (rc_root / 'zsh/.linux/.zshrc').read_text()
-        start = source.index('function load_ffm_env()')
-        end = source.index('\nload_ffm_env', start)
-        function = source[start:end]
-        vendor = self.temp / 'ffmlite_env.sh'
-        vendor.write_text('# Disposable simulator environment\n')
-        function = function.replace('/am-ffm/ffmlite_env.sh', shlex.quote(str(vendor)))
-        plugin = self.home / 'scripts/am/ffm_teardown.py'
-        plugin.parent.mkdir(parents=True)
-        shutil.copy2(ROOT / 'am/ffm_teardown.py', plugin)
-        code = '''import importlib.util; print(importlib.util.find_spec("ffm_teardown").origin)'''
-        command = function + '\nload_ffm_env\npython3 -B -c ' + shlex.quote(code)
-        result = subprocess.run(['zsh', '-f', '-c', command], cwd=self.temp,
-                                env=dict(self.env, _TRITON_MODEL_PKG='', PYTHONPATH=''),
-                                text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), str(plugin))
-
     def test_libraries_are_sourceable_without_clobbering_callers_directory(self):
         for library in (self.repo / 'setup/linux/lib').glob('*.sh'):
             with self.subTest(library=library.name):
                 self.run_shell('-c', 'SCRIPT_DIR=caller; source "$1"; test "$SCRIPT_DIR" = caller',
                                'fixture', library)
-
-    def test_gdb_utility_preserves_injected_gdb_and_exports_helpers(self):
-        class Gdb:
-            error = RuntimeError
-
-            @staticmethod
-            def execute(command, to_string=False):
-                return '$1 = 42'
-
-        namespace = runpy.run_path(str(ROOT / 'gdb/print_lanes.py'),
-                                  init_globals={'gdb': Gdb})
-        self.assertTrue(callable(namespace['print_variable_for_lanes']))
-        self.assertIs(namespace['print_variable_for_lanes'].__globals__['gdb'], Gdb)
 
     def test_standalone_remote_helper_survives_scp_and_preserves_repository(self):
         target = self.repo / 'setup/linux/remote/remote-provision-host.sh'
@@ -183,6 +160,21 @@ exit 97
                 self.assertTrue(target.exists())
                 if standalone:
                     self.assertFalse(entry.exists())
+
+    def test_remote_optional_prefetch_failure_reports_warning_after_setup(self):
+        target = self.repo / 'setup/linux/remote/remote-provision-host.sh'
+        shutil.copy2(ROOT / 'setup/linux/remote/remote-provision-host.sh', target)
+        (self.home / 'scripts').symlink_to(self.repo, target_is_directory=True)
+        (self.repo / '.git').mkdir()
+        binaries = self.temp / 'bin'
+        recorder(binaries / 'git', 'git')
+        recorder(self.repo / 'containers/docker/pull-base-images.sh', 'prefetch')
+        result = self.run_shell(target, env=dict(
+            self.env, NO_BASE_PULL='', FAIL_STEP='prefetch',
+            PATH=str(binaries) + os.pathsep + self.env['PATH']))
+        self.assertIn('Optional base-image prefetch failed', result.stderr)
+        self.assertEqual([row[0] for row in self.calls()], [
+            'git', 'bootstrap.sh', 'credentials/activate.sh', 'prefetch'])
 
 
 if __name__ == '__main__':

@@ -8,7 +8,8 @@ Self-contained Kubernetes configuration for connecting to TensorWave clusters. A
 `image` and a `setup_profile`, such as `triton-mi450` using profile `triton`.
 `image_env` optionally names an environment variable that overrides the image.
 Docker Compose is not needed for service discovery. Use `KUBE_DEV_CONFIG` to select
-an alternate configuration, including custom services.
+an alternate configuration, including custom services. `connect.sh`, `list-pods.sh`,
+and `stop.sh` all honor this selection; use the same value throughout a session.
 
 ```sh
 bash ~/scripts/containers/kubernetes/interactive/connect.sh --list-services
@@ -16,7 +17,7 @@ bash ~/scripts/containers/kubernetes/interactive/connect.sh --service triton-mi4
 ```
 
 The connector copies the scripts checkout into a new SSH pod, or refreshes `setup`,
-`containers`, `agent`, `am`, `board`, `profiling`, and `gdb` in an existing checkout. It invokes
+`containers`, `agent`, `am`, `board`, `profiling`, and `tools` in an existing checkout. It invokes
 `setup/linux/setup.sh SETUP_PROFILE` inside the pod. Setup chooses installers;
 Kubernetes chooses the image, storage, and connection. Persistent pods pass their
 PVC mount as `DEVENV_PERSISTENT_ROOT`; ephemeral pods explicitly disable persistence.

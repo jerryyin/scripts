@@ -70,6 +70,24 @@ ATT sees the waves on **one SIMD**; an AM summary covers **every wave of the wor
 Where the waves are near enough symmetric the shares stay comparable, but they are not the
 same population, and a difference of a few percent should not be read as a finding.
 
+## Shell auto-loading
+
+[`setup/linux/profiles/triton/shell.zsh`](../setup/linux/profiles/triton/shell.zsh)
+auto-loads models only for the Triton profile. It detects a runtime package at `/am-ffm`, falling back to `/ffm`
+when `/am-ffm` is absent. `AM_FFM_DIR` explicitly selects another package path
+inside the current environment.
+
+When `ffmlite_env.sh` exists, it preserves the interactive FFM default. An AM-only
+package loads `am_env.sh` instead. It sources one backend, adds the teardown
+plugin while preserving other pytest plugins, and avoids repeated activation.
+Missing mounts leave the shell unchanged. `run_on_model.sh --backend am` still
+selects AM explicitly, including its trace/counter settings; both vendor
+environments are never sourced together by the shell loader.
+
+Compose's host-side `AM_FFM_DIR` selects what is mounted at `/am-ffm`; it is not
+automatically exported inside the container. The image supplies the project
+profile, and the runtime mount supplies the simulator package.
+
 ## Tests
 
 Decoder discovery works without a simulator package:

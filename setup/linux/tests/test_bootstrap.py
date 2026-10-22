@@ -19,8 +19,9 @@ class BootstrapTests(Fixture, unittest.TestCase):
                              source[source.index('# Expose this checkout'):])
         environment = dict(self.env, COMMAND_SETUP_DIR=str(ROOT / 'setup/linux'))
         self.run_shell(installer, env=environment)
-        commands = list((ROOT / 'containers/docker/bin').iterdir())
-        self.assertEqual({path.name for path in commands}, {'drun', 'dbuild', 'dcompose'})
+        names = {'drun', 'dbuild', 'dcompose', 'dockrun'}
+        self.assertEqual({path.name for path in (self.home / '.local/bin').iterdir()}, names)
+        commands = [ROOT / 'containers/docker/bin' / name for name in names]
         stamps = {}
         for command in commands:
             target = self.home / '.local/bin' / command.name

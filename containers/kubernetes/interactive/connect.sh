@@ -532,7 +532,7 @@ else
             else
                 echo "   Scripts exist, updating key directories..."
                 # Sync key directories that we actively develop
-                for directory in setup containers agent am board profiling gdb; do
+                for directory in setup containers agent am board profiling tools; do
                     kubectl cp "$SCRIPTS_ROOT/$directory" "$NAMESPACE/$POD_NAME:/home/ossci/scripts/"
                 done
                 echo "   ✅ Scripts synchronized"
