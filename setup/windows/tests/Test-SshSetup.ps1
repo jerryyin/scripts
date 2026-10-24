@@ -15,6 +15,8 @@ function Assert($ok, [string]$message) {
     $script:Registry = [pscustomobject]@{ DefaultShell='C:\Windows\System32\cmd.exe' }
     $script:Writes = 0
     $script:Installs = 0
+    $script:StableShell = ''
+    function script:Test-Path { param($LiteralPath) return $LiteralPath -eq $script:StableShell }
     function script:Get-Service { if ($script:Installed) { @{Name='sshd'} } }
     function script:Get-Command { if ($script:Shell) { @{Source=$script:Shell} } }
     function script:Get-ItemProperty { return $script:Registry }
@@ -49,6 +51,14 @@ try { Set-SshShell } catch { $failed = $_.Exception.Message -like '*PowerShell 7
 Assert ($failed -and (& $module { $script:Installs }) -eq 0) 'Package-skipping setup reports a missing shell without installing'
 & $module { $script:Shell='C:\fixture\pwsh.exe'; $script:Registry = [pscustomobject]@{} }
 Assert ((Get-SshShellState).NeedsSetup) 'An SSH registry key without DefaultShell is handled'
+& $module {
+    $script:StableShell=Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
+    $script:Shell='C:\user\WindowsApps\Microsoft.PowerShell_package\pwsh.exe'
+}
+Set-SshShell
+Assert ((Get-SshShellState).ShellPath -eq (Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe')) 'SSH uses the installed machine shell ahead of a caller-specific Store alias'
+& $module { $script:Shell='C:\user\WindowsApps\pwsh.exe' }
+Assert (!(Get-SshShellState).NeedsSetup) 'Changing the caller PATH does not cause repeated SSH shell repairs'
 Write-Output 'PASS: SSH setup checks are read-only and do not touch real services or registry values.'
 
 Remove-Module SshSession

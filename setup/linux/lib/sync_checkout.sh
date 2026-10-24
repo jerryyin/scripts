@@ -28,6 +28,11 @@ sync_checkout() {
         echo "WARN $dir: no upstream branch; using it as is"
         return 0
     fi
+    if [ "$(git -C "$dir" rev-parse HEAD)" = "$(git -C "$dir" rev-parse "$target")" ] &&
+       [ "$(git -C "$dir" rev-parse --abbrev-ref HEAD)" = "${target#*/}" ]; then
+        echo "OK $dir at $target"
+        return 0
+    fi
     if [ -n "$(git -C "$dir" status --porcelain)" ]; then
         git -C "$dir" stash push --include-untracked --quiet -m 'bootstrap sync'
         stashed=1

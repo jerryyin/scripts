@@ -89,8 +89,13 @@ try {
     Assert ((Invoke-Native git @('-C', $freshRc, 'remote', 'get-url', 'origin') -Capture) -eq $source) 'Cloned rc_files retains its Git remote'
     Assert ((Invoke-Native git @('-C', $freshRc, 'config', '--local', 'core.autocrlf') -Capture) -ceq 'false') 'New checkout preserves shared rc line endings'
     Save-Text (Join-Path $freshRc 'local-only.txt') 'keep on rerun' ''
+    Save-Text (Join-Path $freshRc 'vim/.vimrc') '" staged local edit' ''
+    Invoke-Native git @('-C', $freshRc, 'add', 'vim/.vimrc')
     Ensure-Checkout $freshRc $source
     Assert (Test-Path -LiteralPath (Join-Path $freshRc 'local-only.txt')) 'Rerunning does not reset an existing rc_files checkout'
+    Assert ((Invoke-GitQuiet $freshRc @('diff', '--cached', '--name-only')).Output -ceq 'vim/.vimrc') 'An up-to-date checkout keeps staged edits staged without stashing'
+    Save-Text (Join-Path $freshRc 'vim/.vimrc') '" shared configuration' ''
+    Invoke-Native git @('-C', $freshRc, 'add', 'vim/.vimrc')
     $commit = @('-c', 'user.name=Devenv Test', '-c', 'user.email=devenv@example.invalid', '-c', 'commit.gpgsign=false', '-c', ('core.hooksPath=' + (Join-Path $testRoot 'no-hooks')), 'commit', '-q', '-am')
     $spacer = (0..4 | ForEach-Object { "`" unchanged $_" }) -join "`n"
     Save-Text (Join-Path $source 'vim/.vimrc') "`" shared configuration`n$spacer`n" ''

@@ -49,6 +49,13 @@ class SyncCheckoutTests(unittest.TestCase):
         self.assertTrue((self.clone / 'local.txt').exists())
         self.assertEqual(git('stash', 'list', cwd=self.clone), '')
 
+    def test_unchanged_upstream_preserves_staged_edits(self) -> None:
+        (self.clone / 'settings.conf').write_text('color = staged\n')
+        git('add', 'settings.conf', cwd=self.clone)
+        self.sync()
+        self.assertEqual(git('diff', '--cached', '--name-only', cwd=self.clone), 'settings.conf')
+        self.assertEqual(git('diff', '--name-only', cwd=self.clone), '')
+
     def test_conflicting_local_edits_yield_to_upstream_and_stay_stashed(self) -> None:
         self.publish('color = new\nsize = 10\n')
         (self.clone / 'settings.conf').write_text('color = mine\nsize = 10\n')

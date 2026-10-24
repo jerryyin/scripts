@@ -301,6 +301,11 @@ function Ensure-Checkout([string]$Path, [string]$Url) {
             $target = (Invoke-GitQuiet $Path @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')).Output
         }
         if (!$target) { Write-Host "WARN Git checkout ${Path}: no upstream branch; using it as is"; return }
+        if ((Invoke-GitQuiet $Path @('rev-parse', 'HEAD')).Output -eq (Invoke-GitQuiet $Path @('rev-parse', $target)).Output -and
+            (Invoke-GitQuiet $Path @('rev-parse', '--abbrev-ref', 'HEAD')).Output -eq ($target -replace '^[^/]+/', '')) {
+            Write-Host "OK Git checkout $Path at $target"
+            return
+        }
         $stashed = $false
         if ((Invoke-GitQuiet $Path @('status', '--porcelain')).Output) {
             $stash = Invoke-GitQuiet $Path @('stash', 'push', '--include-untracked', '--quiet', '-m', 'bootstrap sync')

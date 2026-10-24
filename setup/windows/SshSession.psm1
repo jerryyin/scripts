@@ -7,8 +7,14 @@ function Get-SshShellState {
     if (!(Get-Service sshd -ErrorAction SilentlyContinue)) {
         return @{ Installed=$false; NeedsSetup=$false; ShellPath='' }
     }
-    $shell = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    $path = if ($shell) { $shell.Source } else { '' }
+    # Elevation and terminal hosts can prepend different Store aliases to PATH.
+    $path = @((Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'),
+              (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps/pwsh.exe')) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (!$path) {
+        $shell = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $path = if ($shell) { $shell.Source } else { '' }
+    }
     $current = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\OpenSSH' -ErrorAction SilentlyContinue
     $configured = if ($current) { ($current | Select-Object -ExpandProperty DefaultShell -ErrorAction SilentlyContinue) } else { '' }
     return @{ Installed=$true; NeedsSetup=(!$path -or $configured -ne $path); ShellPath=$path }
