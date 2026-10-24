@@ -13,7 +13,7 @@
         {
             "id": "Python.Python.3.14",
             "scope": "machine",
-            "installerArguments": "InstallAllUsers=1 InstallLauncherAllUsers=1 Include_launcher=1 PrependPath=1"
+            "installerArguments": "InstallAllUsers=1 InstallLauncherAllUsers=1 Include_launcher=1 PrependPath=1 TargetDir="
         },
         {
             "id": "Obsidian.Obsidian",
