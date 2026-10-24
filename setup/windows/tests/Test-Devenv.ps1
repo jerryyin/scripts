@@ -59,7 +59,7 @@ try {
     $everyday = @('Microsoft.PowerToys', 'KDE.KDEConnect', 'Rufus.Rufus', 'AntibodySoftware.WizTree', 'VideoLAN.VLC')
     Assert (@($everyday | Where-Object { $environment.packages.id -notcontains $_ }).Count -eq 0) 'All requested everyday Windows tools are included in WinGet setup'
     $kde = @($environment.packages | Where-Object id -eq 'KDE.KDEConnect')
-    Assert ($kde.Count -eq 1 -and $kde[0].installedAppxName -eq 'KDEe.V.KDEConnect') 'KDE Connect recognizes the existing Microsoft Store edition'
+    Assert ($kde.Count -eq 1 -and $kde[0].scope -eq 'machine' -and !$kde[0].Contains('installedAppxName')) 'A user Store edition cannot satisfy the shared KDE Connect requirement'
     $profile = Join-Path $testRoot 'shell/profile.ps1'
     $sharedProfile = Join-Path $testRoot "Someone's computer/profile.ps1"
     Save-Text $sharedProfile '# tracked profile' ''

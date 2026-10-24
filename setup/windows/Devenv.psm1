@@ -129,13 +129,24 @@ function Get-MissingPackages([object[]]$Packages) {
     foreach ($package in $Packages) {
         if ($package.id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or
             ($package.Contains('scope') -and $package.scope -notin @('user', 'machine'))) { throw 'Invalid package ID or installation scope.' }
-        if ($package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
+        $scope = if ($package.Contains('scope')) { $package.scope } else { 'machine' }
+        if ($scope -eq 'machine' -and $package.id -like 'Python.Python.*') {
+            # CPython's Burn bundle can register in HKCU even for an all-users interpreter.
+            $version = $package.id.Substring('Python.Python.'.Length)
+            $key = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Python\PythonCore\$version\InstallPath" -ErrorAction SilentlyContinue
+            if ($key -and (Test-Path -LiteralPath $key.ExecutablePath -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'py.exe') -PathType Leaf)) {
+                Write-Host "SKIP $($package.id) (machine interpreter and launcher)"
+            } else { $package }
+            continue
+        }
+        if ($scope -eq 'user' -and $package.Contains('installedCommand') -and (Get-Command $package.installedCommand -CommandType Application -ErrorAction SilentlyContinue)) {
             Write-Host "SKIP $($package.id) (existing native command)"; continue
         }
-        if ($package.Contains('installedAppxName') -and (Get-AppxPackage -Name $package.installedAppxName -ErrorAction SilentlyContinue)) {
+        if ($scope -eq 'user' -and $package.Contains('installedAppxName') -and (Get-AppxPackage -Name $package.installedAppxName -ErrorAction SilentlyContinue)) {
             Write-Host "SKIP $($package.id) (Microsoft Store installation)"; continue
         }
-        & winget list --id $package.id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        & winget list --id $package.id --exact --scope $scope --source winget --accept-source-agreements --disable-interactivity | Out-Null
         if ($LASTEXITCODE -eq -1978335212) { $package }
         elseif ($LASTEXITCODE -eq 0) { Write-Host "SKIP $($package.id) (installed)" }
         else { throw "WinGet inventory failed for $($package.id) (exit $LASTEXITCODE); refusing to treat a query error as a missing package." }
@@ -143,10 +154,13 @@ function Get-MissingPackages([object[]]$Packages) {
 }
 
 function Install-WinGetPackage($Package) {
-    $scope = if ($Package.Contains('scope')) { $Package.scope } else { 'user' }
-    $arguments = @('install', '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    $scope = if ($Package.Contains('scope')) { $Package.scope } else { 'machine' }
+    $arguments = @('install', '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity', '--silent')
     if ($Package.Contains('installerArguments')) { $arguments += @('--custom', $Package.installerArguments) }
+    # This package was missing in the requested scope; do not reuse a user installation.
+    $arguments += '--force'
     Invoke-Native winget $arguments
+    if (@(Get-MissingPackages @($Package)).Count) { throw "Package is still missing in $scope scope: $($Package.id)" }
 }
 
 function Ensure-SshAgent([switch]$ReadyOnly) {
@@ -167,7 +181,7 @@ function Ensure-SshAgent([switch]$ReadyOnly) {
 }
 
 function Invoke-MachineSetup($Plan) {
-    if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !$Plan.SshAgent -and !($Plan.Contains('SshShell') -and $Plan.SshShell) -and !($Plan.Contains('SshLinks') -and $Plan.SshLinks)) { return $Plan.WslState }
+    if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !($Plan.Contains('Fonts') -and $Plan.Fonts) -and !$Plan.SshAgent -and !($Plan.Contains('SshShell') -and $Plan.SshShell) -and !($Plan.Contains('SshLinks') -and $Plan.SshLinks)) { return $Plan.WslState }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
     $identifier = [guid]::NewGuid().ToString('N')
     $work = Join-Path $stateRoot ('machine-' + $identifier)
@@ -226,9 +240,10 @@ function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
 }
 
-function Get-RcMissingPackages([string]$RcRoot, [string]$Scope = '') {
+function Get-RcMissingPackages([string]$RcRoot, [string]$Scope = '', [switch]$Update) {
     $arguments = @('prerequisites', '--json')
     if ($Scope) { $arguments += @('--scope', $Scope) }
+    if ($Update) { $arguments += '--update' }
     $priorGit = $env:GIT_CONFIG_GLOBAL
     try {
         # Inventory must work before an unreadable .gitconfig link is repaired.
@@ -351,20 +366,10 @@ function Ensure-Wsl([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$Di
     return 'PendingInitialization'
 }
 
-function Install-CodexAdapter([switch]$Update) {
-    $prefix = Invoke-Native npm.cmd @('prefix', '--global') -Capture
-    $package = Join-Path $prefix 'node_modules/@agentclientprotocol/codex-acp/package.json'
-    if (!$Update -and (Test-Path -LiteralPath $package) -and (Test-Path -LiteralPath (Join-Path $prefix 'codex-acp.cmd'))) {
-        Write-Host 'SKIP Codex ACP adapter (installed)'
-        return
-    }
-    Invoke-Native npm.cmd @('install', '--global', '@agentclientprotocol/codex-acp@latest')
-}
-
 function Update-ProcessPath {
     # Keep explicitly supplied tool paths (portable tests/custom installs), and
     # discover binaries added by installers without discarding inherited PATH.
-    $paths = @($env:PATH, [Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'))
+    $paths = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), $env:PATH, [Environment]::GetEnvironmentVariable('Path', 'User'))
     $env:PATH = ((($paths -join ';') -split ';' | Where-Object { $_ } | Select-Object -Unique) -join ';')
 }
 

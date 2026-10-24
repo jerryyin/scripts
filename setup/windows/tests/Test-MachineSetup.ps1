@@ -9,6 +9,49 @@ $savedLocal = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $fixture "Someone's Windows account"
 try {
     & $module {
+        $script:PackageScopeCalls=@()
+        $script:PackageScopeResults=[Collections.Generic.Queue[int]]::new()
+        function script:winget {
+            $script:PackageScopeCalls += ,$args
+            $global:LASTEXITCODE=$script:PackageScopeResults.Dequeue()
+        }
+    }
+    $tool=@{id='Fixture.Shared'; scope='machine'; installedCommand='powershell.exe'; installedAppxName='Fixture.UserApp'}
+    & $module { $script:PackageScopeResults.Enqueue(-1978335212) }
+    if (@(Get-MissingPackages @($tool)).Count -ne 1) { throw 'An existing user command must not satisfy a machine package.' }
+    & $module { $script:PackageScopeResults.Enqueue(0) }
+    if (@(Get-MissingPackages @($tool)).Count -ne 0) { throw 'A registered machine package must be reused.' }
+    & $module { $script:PackageScopeResults.Enqueue(0); $script:PackageScopeResults.Enqueue(-1978335212) }
+    $failed=$false
+    try { Install-WinGetPackage $tool } catch { $failed=$_.Exception.Message -like '*still missing in machine scope*' }
+    if (!$failed) { throw 'Installer success must be checked against machine registration.' }
+    & $module { $script:PackageScopeResults.Enqueue(5) }
+    $failed=$false
+    try { Get-MissingPackages @($tool) } catch { $failed=$_.Exception.Message -like '*inventory failed*' }
+    if (!$failed) { throw 'An inventory error must not be reported as a missing package.' }
+    if (@((& $module { ,$script:PackageScopeCalls }) | Where-Object { $_ -notcontains '--scope' -or $_ -notcontains 'machine' }).Count) { throw 'All inventory and installation calls must explicitly select machine scope.' }
+    & $module {
+        $script:PythonKey=$null
+        $script:Launcher=$false
+        function script:Get-ItemProperty {
+            param($LiteralPath, $ErrorAction)
+            if ($LiteralPath -notlike 'HKLM:*PythonCore*') { throw 'Python must use machine interpreter registration.' }
+            return $script:PythonKey
+        }
+        function script:Test-Path {
+            param($LiteralPath, $PathType)
+            if ($LiteralPath -eq 'machine-python.exe') { return $true }
+            return $script:Launcher
+        }
+    }
+    $pythonPackage=@{id='Python.Python.3.14'; scope='machine'}
+    if (@(Get-MissingPackages @($pythonPackage)).Count -ne 1) { throw 'A user-only Python must not satisfy machine setup.' }
+    & $module { $script:PythonKey=@{ExecutablePath='machine-python.exe'} }
+    if (@(Get-MissingPackages @($pythonPackage)).Count -ne 1) { throw 'A machine interpreter without its shared launcher is incomplete.' }
+    & $module { $script:Launcher=$true }
+    if (@(Get-MissingPackages @($pythonPackage)).Count -ne 0) { throw 'Python readiness must use machine files even when the installer bundle is registered per user.' }
+    & $module { Remove-Item Function:Get-ItemProperty; Remove-Item Function:Test-Path }
+    & $module {
         function script:Invoke-RcSetup { param($RcRoot, $Arguments, [switch]$Capture) return $script:RequirementsJson }
     }
     foreach ($json in @('[]', '[{"command":"one"}]', '[{"command":"one"},{"command":"two"}]')) {
@@ -41,6 +84,11 @@ try {
     $plan = @{ DeveloperMode=$false; Distribution=''; Packages=@(); RcMachine=$false; SshAgent=$false; WslState='Existing' }
     $state = Invoke-MachineSetup $plan
     if ($state -ne 'Existing' -or (& $module { $script:Launches.Count }) -ne 0) { throw 'An unchanged machine must need zero UAC launches' }
+    $plan.Fonts=$true
+    Invoke-MachineSetup $plan | Out-Null
+    if ((& $module { $script:Launches.Count }) -ne 1 -or !(& $module { $script:Request.Fonts })) { throw 'Fonts alone must enter the same grouped administrator phase' }
+    $plan.Fonts=$false
+    & $module { $script:Launches=@() }
     $plan.SshLinks=$true
     Invoke-MachineSetup $plan | Out-Null
     if ((& $module { $script:Launches.Count }) -ne 1 -or !(& $module { $script:Request.SshLinks })) { throw 'Configuration link work alone must enter the grouped machine phase' }
@@ -89,7 +137,7 @@ try {
     }
     if ((Ensure-Wsl $manifest.wsl.distribution) -ne 'Existing' -or (& $module { $script:WslInventoryCalls }) -ne 1) { throw 'Existing default Ubuntu was not reused' }
     $python = @($manifest.packages | Where-Object id -eq 'Python.Python.3.14')[0]
-    if (!$python.Contains('installerArguments') -or $python.installerArguments -notmatch 'InstallLauncherAllUsers=0') { throw 'The user Python installer must not request a separate UAC for its launcher' }
+    if ($python.scope -ne 'machine' -or $python.installerArguments -notmatch 'InstallAllUsers=1 InstallLauncherAllUsers=1') { throw 'Python and its launcher must both use the grouped machine installation' }
     $fresh = Join-Path $fixture 'fresh machine'
     [void][IO.Directory]::CreateDirectory($fresh)
     Copy-Item -LiteralPath (Join-Path $root 'machine.ps1') -Destination (Join-Path $fresh 'machine.ps1')
@@ -132,8 +180,8 @@ function Repair-SshLinks($RcRoot, $Arguments, [switch]$ExistingOnly) {
     if ($LASTEXITCODE -ne 0 -or (Read-Json $freshResult).WslState -ne 'Existing') { throw 'The machine phase must refresh PATH after installing Git and before cloning rc_files.' }
     if (!(Test-Path -LiteralPath (Join-Path $fresh 'ssh-shell-called'))) { throw 'The grouped machine helper did not configure the SSH shell.' }
     $steps = @(Get-Content -LiteralPath (Join-Path $fresh 'steps')) -join ';'
-    if ($steps -ne 'repair-links;prerequisites;repair-links;--config-only --backup fixture') { throw "Machine setup must restore existing links, prepare tools, repair new aliases and deploy trusted configuration in order: $steps" }
-    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, user Python launcher, quoted paths, account identity, failures and cleanup.'
+    if ($steps -ne 'repair-links;prerequisites --update;repair-links;--config-only --backup fixture') { throw "Machine setup must restore existing links, prepare tools, repair new aliases and deploy trusted configuration in order: $steps" }
+    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal
     $resolved = [IO.Path]::GetFullPath($fixture)

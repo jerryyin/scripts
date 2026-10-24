@@ -80,6 +80,11 @@ if ($Check) {
         $name = if ($package.command) { $package.command } else { $package.winget }
         [void]$missing.Add($name); Write-Output "MISSING rc_files requirement: $name"
     }
+    if (!$SkipPackages) {
+        foreach ($package in @(Get-MissingPackages $manifest.packages)) {
+            [void]$missing.Add($package.id); Write-Output "MISSING machine package: $($package.id)"
+        }
+    }
     try {
         $nativeVim = Get-NativeVim
         $vimOnPath = Get-Command vim.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
@@ -92,12 +97,8 @@ if ($Check) {
     }
     if (!$SkipFonts) {
         $fontFace = (Read-Json $terminalSource).profiles.defaults.font.face
-        Add-Type -AssemblyName System.Drawing
-        $fonts = New-Object Drawing.Text.InstalledFontCollection
-        try {
-            if ($fonts.Families.Name -contains $fontFace) { Write-Output "OK font $fontFace" }
-            else { [void]$missing.Add('font'); Write-Output "MISSING font $fontFace" }
-        } finally { $fonts.Dispose() }
+        if (& (Join-Path $RcPath 'terminal/.setup/font.ps1') -Check) { Write-Output "OK machine font $fontFace" }
+        else { [void]$missing.Add('font'); Write-Output "MISSING machine font $fontFace" }
     }
     if (Test-Path -LiteralPath $TerminalPath) {
         $terminal = Read-Json $TerminalPath
@@ -119,7 +120,7 @@ if ($Check) {
         }
     }
     if (!$SkipAddons) {
-        $prefix = Invoke-Native npm.cmd @('prefix','--global') -Capture
+        $prefix = Join-Path $env:ProgramFiles 'npm'
         if (!(Test-Path -LiteralPath (Join-Path $prefix 'node_modules/@agentclientprotocol/codex-acp/package.json')) -or !(Test-Path -LiteralPath (Join-Path $prefix 'codex-acp.cmd'))) {
             [void]$missing.Add('Codex ACP adapter'); Write-Output 'MISSING Codex ACP adapter'
         }
@@ -172,14 +173,14 @@ if ($RequireDeveloperMode) {
 }
 Update-ProcessPath
 $packages = if ($SkipPackages) { @() } else { @(Get-MissingPackages $manifest.packages) }
-# Python is a per-user bootstrap prerequisite; Git is installed in the grouped machine step.
-foreach ($package in $packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'user' }) { Install-WinGetPackage $package }
-Update-ProcessPath
+# Git and Python are installed before rc_files is inspected in the machine phase.
+foreach ($package in $packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'user' }) { Install-WinGetPackage $package }
 if (Get-Command git -ErrorAction SilentlyContinue) { Ensure-Checkout $RcPath $manifest.rcRepository }
-$rcMachine = !$SkipPackages -and !(Test-Path -LiteralPath (Join-Path $RcPath '.git'))
+$rcMachine = !$SkipPackages -and (!(Test-Path -LiteralPath (Join-Path $RcPath '.git')) -or @($packages | Where-Object id -like 'Python.Python.*').Count -gt 0)
 if (!$SkipPackages -and !$rcMachine) {
-    $rcMachine = @(Get-RcMissingPackages $RcPath 'machine').Count -gt 0
+    $rcMachine = @(Get-RcMissingPackages $RcPath 'machine' -Update).Count -gt 0
 }
+$fonts = !$SkipFonts -and (!(Test-Path -LiteralPath (Join-Path $RcPath 'terminal/.setup/font.ps1')) -or !(& (Join-Path $RcPath 'terminal/.setup/font.ps1') -Check))
 $wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions).Count -gt 0) { 'Existing' } else { 'PendingInitialization' }
 $sshKeys = @()
 if (!$SkipCredentials) {
@@ -199,10 +200,11 @@ if ($sshState.Installed) {
 }
 # 2. Machine setup: group administrator work into one request.
 $machine = @{
-    DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'machine' })
+    DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'machine' })
     Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
     RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
-    SshShell=$sshState.NeedsSetup; InstallPrerequisites=(!$SkipPackages); SshLinks=$sshLinks
+    SshShell=($sshState.Installed -and ($sshState.NeedsSetup -or $rcMachine)); InstallPrerequisites=(!$SkipPackages); SshLinks=$sshLinks
+    Fonts=$fonts
     LinkPlanArguments=$sshPlan
     LinkArguments=(@(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--config-only', '--replace-existing', '--backup', $backupRoot))
 }
@@ -213,15 +215,14 @@ Update-ProcessPath
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
 if (!$SkipPackages) {
-    Invoke-RcSetup $RcPath @('prerequisites')
+    Invoke-RcSetup $RcPath @('prerequisites', '--no-install')
     Update-ProcessPath
 }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
 if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
 
 # 4. Development environment: deploy application settings and verify SSH.
-$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--replace-existing', '--backup', $backupRoot, '--update')
-if ($SkipPackages) { $deployment += '--no-install' }
+$deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--replace-existing', '--backup', $backupRoot, '--update', '--no-install')
 if ($SkipFonts) { $deployment += @('--skip-setup', 'terminal') }
 if ($SkipVimPlugins) { $deployment += @('--skip-setup', 'vim') }
 if ($SkipAddons) { $deployment += @('--skip-setup', 'tmux') }
@@ -236,7 +237,6 @@ if (!$SkipSsh) {
 Ensure-Checkout $NotesPath $manifest.notesRepository
 if (!$SkipAddons) {
     Install-ObsidianAddons $NotesPath $backupRoot -Update
-    Install-CodexAdapter -Update
     # Copilot's device ID lives in Obsidian localStorage. Use its Auto-detect
     # control to select this standard npm location on the first launch.
 }

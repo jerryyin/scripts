@@ -12,10 +12,12 @@
         },
         {
             "id": "Python.Python.3.14",
-            "installerArguments": "InstallAllUsers=0 InstallLauncherAllUsers=0 PrependPath=1"
+            "scope": "machine",
+            "installerArguments": "InstallAllUsers=1 InstallLauncherAllUsers=1 PrependPath=1"
         },
         {
-            "id": "Obsidian.Obsidian"
+            "id": "Obsidian.Obsidian",
+            "scope": "machine"
         },
         {
             "id": "Microsoft.PowerToys",
@@ -23,11 +25,11 @@
         },
         {
             "id": "KDE.KDEConnect",
-            "scope": "machine",
-            "installedAppxName": "KDEe.V.KDEConnect"
+            "scope": "machine"
         },
         {
-            "id": "Rufus.Rufus"
+            "id": "Rufus.Rufus",
+            "scope": "machine"
         },
         {
             "id": "AntibodySoftware.WizTree",

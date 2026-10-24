@@ -15,30 +15,35 @@ try {
     $wslState = $request.WslState
     if ($request.Distribution) { $wslState = Ensure-Wsl $request.Distribution }
     foreach ($package in $request.Packages) {
-        if ($package.scope -ne 'machine') { throw 'Only machine-scoped packages belong in the administrator step.' }
+        if ($package.Contains('scope') -and $package.scope -ne 'machine') { throw 'Only machine-scoped packages belong in the administrator step.' }
         Install-WinGetPackage $package
     }
     Update-ProcessPath
     $sshLinks = $request.Contains('SshLinks') -and $request.SshLinks
-    if (($request.Contains('RcMachine') -and $request.RcMachine) -or $sshLinks) {
+    if (($request.Contains('RcMachine') -and $request.RcMachine) -or ($request.Contains('Fonts') -and $request.Fonts) -or $sshLinks) {
         # Existing checkouts are updated by the unelevated caller so new files keep the user's ownership.
         if (!(Test-Path -LiteralPath (Join-Path $request.RcPath '.git'))) {
             Ensure-Checkout $request.RcPath $request.RcRepository
             Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q')
         }
-        if (!$sshLinks) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine') }
+        if (!$sshLinks -and $request.RcMachine) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine', '--update') }
     }
     if ($sshLinks) {
         Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
         # Restore existing links before tools use them, then cover aliases made by installers.
         Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
         if ($request.InstallPrerequisites) {
-            Invoke-RcSetup $request.RcPath @('prerequisites')
+            Invoke-RcSetup $request.RcPath @('prerequisites', '--update')
             Update-ProcessPath
             Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
         }
         Invoke-RcSetup $request.RcPath $request.LinkArguments
     }
+    if ($request.Contains('Fonts') -and $request.Fonts) {
+        & (Join-Path $request.RcPath 'terminal/.setup/font.ps1')
+        if (!$?) { throw 'Machine font installation failed' }
+    }
+    Update-ProcessPath
     if ($request.SshAgent) { Ensure-SshAgent }
     if ($request.Contains('SshShell') -and $request.SshShell) {
         Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking

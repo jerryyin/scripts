@@ -9,13 +9,13 @@ Use a Windows account with WinGet, network access to the package feeds and GitHu
 Install Git if needed and clone this repository:
 
 ```powershell
-winget install --id Git.Git --exact --source winget
+winget install --id Git.Git --exact --scope machine --source winget
 # Reopen PowerShell if git is not on PATH yet.
 git clone https://github.com/jerryyin/scripts.git "$env:USERPROFILE\scripts"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\scripts\setup\windows\bootstrap.ps1" -Apply
 ```
 
-The execution policy flag applies to this process. Setup groups machine changes under one administrator approval and requests none when no administrator work is needed. For an existing SSH server, that worker also prepares rc_files prerequisites using their declared installation scopes and creates or repairs configuration links so SSH can read them. Credentials, fonts, plugins and application setup stay in the caller. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Tracked settings win: a differing local file is moved to `%LOCALAPPDATA%\PersonalDevenv\backups` and replaced by its link.
+The execution policy flag applies to this process. Setup groups machine changes under one administrator approval and requests none when no administrator work is needed. Programs, shared npm commands and fonts are installed for all users in that phase. For an existing SSH server, the worker also creates or repairs configuration links so SSH can read them. Credentials, plugins and personal settings stay in the caller. Approve UAC with the same Windows account that started setup; a different administrator account is rejected before machine changes. Tracked settings win: a differing local file is moved to `%LOCALAPPDATA%\PersonalDevenv\backups` and replaced by its link.
 
 Neither `rc_files`, notes nor the native tools need to exist beforehand. Repository URLs, machine utilities and first-time WSL selection are owned by [defaults/environment.json](defaults/environment.json). Configured application requirements and the terminal font belong to their packages in `rc_files`. The same `-Apply` handles fresh installs, upgrades and replacement. Existing `scripts`, `rc_files`, vault and notes checkouts are fast-forwarded to their remote branch, following a renamed default branch. Local edits are stashed and restored; when they conflict, the remote version is kept and the edits stay in `git stash list`. Local commits that are not on the remote leave the branch unchanged. When `scripts` itself moves forward, bootstrap reruns the updated copy.
 
@@ -36,15 +36,19 @@ Use `Get-Help .\bootstrap.ps1 -Full` and the script's parameter block for the co
 
 Apply runs in five phases:
 
-1. **Prepare:** inspect the machine, install user-level bootstrap prerequisites, and locate or clone `rc_files` when Git is available.
-2. **Machine setup:** run needed administrator operations together through `machine.ps1`, including prerequisites, trusted links and SSH service/shell settings.
-3. **User configuration and access:** ensure native prerequisites, apply Git configuration, then call `priv.ps1` for credentials and SSH keys.
+1. **Prepare:** inspect installation scopes and locate or clone `rc_files` when Git is available. A fresh machine does not need Python at this point.
+2. **Machine setup:** install Git and Python first, then rc_files requirements, shared npm commands and fonts through `machine.ps1`, together with trusted links and SSH service/shell settings.
+3. **User configuration and access:** verify prerequisites without installing again, apply Git configuration, then call `priv.ps1` for credentials and SSH keys.
 4. **Development environment:** deploy settings and run application setup through `rc_files/.setup`, then verify SSH readiness.
-5. **Notes and Obsidian:** locate or clone notes, install its selected plugins/theme and the Codex adapter, then register the vault.
+5. **Notes and Obsidian:** locate or clone notes, install its selected plugins/theme, then register the vault. The shared Codex adapter was prepared with the other tools.
 
 The native package set includes everyday tools such as PowerToys, KDE Connect, Rufus, WizTree and VLC; maintain the actual choices in the defaults file.
 
-Packages marked `"scope": "machine"` run in the grouped administrator step. Other packages install with `--scope user`; Python's launcher is also explicitly installed for the current user. Existing installations are retained regardless of scope. The machine helper logs to `%LOCALAPPDATA%\PersonalDevenv\logs`; its temporary request and result files contain no credentials and are removed after use. Cancelling UAC or a machine-install failure stops setup without retrying elevation.
+Packages default to machine scope, and all shipped choices use it. Python and its launcher both install for all users; PowerShell selects its MSI installer. Scope-aware inventory rejects user-only installations and verifies machine installation afterwards. Windows Terminal uses app provisioning for new accounts. Claude and the Codex ACP adapter use `%ProgramFiles%\npm` on the machine PATH, and the font uses `%WINDIR%\Fonts` with HKLM registration. Existing user copies are left in place; setup does not uninstall tools running the current session or migrate personal data. Restart shells after migration so they inherit the shared command paths.
+
+The machine helper logs to `%LOCALAPPDATA%\PersonalDevenv\logs`; its temporary request and result files contain no credentials and are removed after use. Cancelling UAC or a machine-install failure stops setup without retrying elevation. `-Apply` refreshes shared npm commands, which requires the administrator phase even when their files already exist.
+
+A new account reuses the installed programs and fonts but needs its own checkout, settings, plugins and credentials. With machine prerequisites already prepared, `py -3 PATH\TO\rc_files\.setup --no-install` performs that account's configuration and plugin setup without reinstalling shared programs. Credential setup remains separate. WSL distributions and application data belong to each account.
 
 ## Configuration ownership
 
