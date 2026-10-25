@@ -163,23 +163,6 @@ function Install-WinGetPackage($Package) {
     if (@(Get-MissingPackages @($Package)).Count) { throw "Package is still missing in $scope scope: $($Package.id)" }
 }
 
-function Ensure-SshAgent([switch]$ReadyOnly) {
-    $agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
-    if (!$agent) { throw 'Install the Windows OpenSSH Client optional feature, then rerun setup.' }
-    if ($agent.Status -eq 'Running' -and $agent.StartType -eq 'Automatic') { return }
-    if ($ReadyOnly) { throw 'SSH agent requires machine setup. Rerun bootstrap to prepare it in the grouped administrator step.' }
-    if (Test-IsAdministrator) {
-        Set-Service ssh-agent -StartupType Automatic
-        Start-Service ssh-agent
-    } else {
-        $command = '$ErrorActionPreference = "Stop"; Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent; if ((Get-Service ssh-agent).Status -ne "Running") { exit 1 }'
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-        $process = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
-        if ($process.ExitCode -ne 0) { throw 'Could not enable ssh-agent.' }
-    }
-    if ((Get-Service ssh-agent).Status -ne 'Running') { throw 'SSH agent did not start.' }
-}
-
 function Invoke-MachineSetup($Plan) {
     if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !($Plan.Contains('Fonts') -and $Plan.Fonts) -and !$Plan.SshAgent -and !($Plan.Contains('SshShell') -and $Plan.SshShell) -and !($Plan.Contains('SshLinks') -and $Plan.SshLinks)) { return $Plan.WslState }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'

@@ -44,7 +44,10 @@ try {
         if (!$?) { throw 'Machine font installation failed' }
     }
     Update-ProcessPath
-    if ($request.SshAgent) { Ensure-SshAgent }
+    if ($request.SshAgent) {
+        & (Join-Path $request.RcPath 'ssh/.setup/windows.ps1') -PrepareAgent -Elevated -VaultPath $request.VaultPath
+        if (!$?) { throw 'SSH agent preparation failed.' }
+    }
     if ($request.Contains('SshShell') -and $request.SshShell) {
         Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
         Set-SshShell

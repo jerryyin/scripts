@@ -88,31 +88,4 @@ function Invoke-CredentialCommand([string]$Program, [string[]]$Arguments, [strin
     } finally { $process.Dispose() }
 }
 
-function Initialize-NativeSsh([string]$SshPath, [string]$SourcePath) {
-    Assert-PrivatePath $SshPath
-    [void][IO.Directory]::CreateDirectory($SshPath)
-    Set-PrivateAcl $SshPath
-    if ($SourcePath) {
-        if (!(Test-Path -LiteralPath $SourcePath -PathType Container)) { throw 'SSH source directory does not exist.' }
-        # An explicit source can be a Windows backup or WSL ~/.ssh. Copy only
-        # missing keys; Linux host config may contain nonportable commands.
-        foreach ($key in @(Get-ChildItem -LiteralPath $SourcePath -File -Filter 'id_*' | Where-Object { $_.Name -notmatch '\.(pub|cert\.pub)$' })) {
-            $target = Join-Path $SshPath $key.Name
-            if (Test-Path -LiteralPath $target) { continue }
-            $text = [IO.File]::ReadAllText($key.FullName)
-            if ($text -notmatch '^-----BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED) PRIVATE KEY-----') { continue }
-            Save-PrivateText $target $text
-            if (Test-Path -LiteralPath ($key.FullName + '.pub')) {
-                $publicTarget = $target + '.pub'
-                if (!(Test-Path -LiteralPath $publicTarget)) { Save-PrivateText $publicTarget ([IO.File]::ReadAllText($key.FullName + '.pub')) }
-            }
-        }
-    }
-    foreach ($file in @(Get-ChildItem -LiteralPath $SshPath -File)) {
-        Assert-PrivatePath $file.FullName
-        Set-PrivateAcl $file.FullName
-    }
-    return @(Get-ChildItem -LiteralPath $SshPath -File -Filter 'id_*' | Where-Object { $_.Name -notmatch '\.' })
-}
-
-Export-ModuleMember -Function Assert-PrivatePath, Set-PrivateAcl, Save-PrivateText, Invoke-CredentialCommand, Initialize-NativeSsh
+Export-ModuleMember -Function Assert-PrivatePath, Set-PrivateAcl, Save-PrivateText, Invoke-CredentialCommand

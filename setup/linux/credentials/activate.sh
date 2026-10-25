@@ -2,14 +2,14 @@
 # activate.sh - Prepare credentials on a host, in Docker, or in Kubernetes.
 #
 # Invoked at every container start (see docker-compose.yml `command:`), so it
-# MUST be lean: no apt/pip/npm installs here. Two phases:
+# MUST be lean: no apt/pip/npm installs here. Activation order:
 #
-#   1. First-time bootstrap (only when ~/.ssh/id_rsa is missing):
-#        - SSH keys from persistent storage
+#   1. First-time bootstrap when SSH or the vault is unprepared:
+#        - SSH activation through rc_files
 #        - Hostname resolution fix
 #        - sync_vault (link mounted vault, or clone the private vault repo)
 #
-#   2. Delegate application credentials to rc_files after vault setup.
+#   2. Refresh application credentials through rc_files, excluding SSH.
 #      This phase never runs application or package installation.
 #
 # Works with:
@@ -26,22 +26,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# First-time bootstrap is gated on two artifacts, so a partial prior setup
-# self-heals instead of getting stuck:
-#   1. SSH private key (id_rsa or id_ed25519) — the heavy one-time setup marker.
-#   2. The vault (~/vault). SSH keys can be present (e.g. restored from
-#      persistent storage on a prior start) while the vault was never synced,
-#      which would otherwise leave credential hooks permanently warning
-#      "vault not synced yet". Missing either one re-runs the (idempotent)
-#      bootstrap.
+# Existing configuration and vault availability determine readiness; no marker file.
 needs_first_time_bootstrap() {
-    if [ ! -f ~/.ssh/id_rsa ] && [ ! -f ~/.ssh/id_ed25519 ]; then
-        return 0
-    fi
-    if ! vault_available; then
-        return 0
-    fi
-    return 1
+    [ ! -L "$HOME/.ssh/private.conf" ] || ! vault_available
 }
 
 # Vault is usable once ~/vault resolves to a populated directory — either a
@@ -54,42 +41,6 @@ vault_available() {
 # Find the persistent storage root (mounted host home or PVC)
 . "$SCRIPT_DIR/../lib/find_persistent_root.sh"
 . "$SCRIPT_DIR/../lib/fix_hostname.sh"
-
-# Setup SSH keys from persistent storage. GitHub host-key trust (the
-# ssh.github.com:443 redirect this network needs) is handled declaratively by
-# rc_files' ~/.ssh/config (StrictHostKeyChecking accept-new on the github.com
-# block) once it's linked, so it doesn't need any imperative setup here.
-setup_ssh() {
-    local persistent_root="$1"
-
-    if [ -z "$persistent_root" ]; then
-        echo "ℹ️  No persistent storage - skipping SSH setup"
-        return 0
-    fi
-
-    if [ ! -d "$persistent_root/.ssh" ]; then
-        echo "ℹ️  No SSH keys in persistent storage - skipping SSH setup"
-        return 0
-    fi
-
-    if [ -f ~/.ssh/id_rsa ] || [ -f ~/.ssh/id_ed25519 ]; then
-        echo "✓ SSH keys already configured"
-        return 0
-    fi
-
-    echo "🔑 Setting up SSH keys from $persistent_root..."
-    mkdir -p ~/.ssh
-    local key
-    for key in "$persistent_root/.ssh"/id_*; do
-        [ -f "$key" ] || continue
-        [ -e "$HOME/.ssh/$(basename "$key")" ] || cp "$key" ~/.ssh/
-    done
-    chmod 700 ~/.ssh 2>/dev/null || true
-    # Lock down private keys; public pairs (*.pub) stay world-readable.
-    chmod 600 ~/.ssh/id_* 2>/dev/null || true
-    chmod 644 ~/.ssh/id_*.pub 2>/dev/null || true
-    echo "✓ SSH keys configured"
-}
 
 # Clone the private vault repo (~/vault). Holds shared dev secrets in plaintext;
 # its privacy is gated by GitHub repo permissions / your account's SSH keys.
@@ -140,7 +91,7 @@ first_time_bootstrap() {
     echo "════════════════════════════════════════════════════════════════"
     echo ""
 
-    setup_ssh "$persistent_root"
+    activate_credentials "$persistent_root" --package ssh
     fix_hostname
 
     echo ""
@@ -154,14 +105,10 @@ first_time_bootstrap() {
 # Phase 2: cheap, idempotent, runs at every container start.
 # No package/dep installs, apt/pip/npm or normal application setup here.
 # Docker may authenticate through its configured credential helper.
-# Each step must early-return quickly when there is nothing to do, and stay
-# silent on the no-op path so repeat container starts don't spam.
-runtime_patches() {
-    local persistent_root
-    persistent_root=$(find_persistent_root)
-    if [ -n "$persistent_root" ] && [ -d "$persistent_root/vault" ]; then
-        QUIET_VAULT_SYNC=1 sync_vault "$persistent_root"
-    fi
+# Package selection belongs to the caller's initialization or refresh phase.
+activate_credentials() {
+    local persistent_root="$1"
+    shift
     local rc_path="${RC_FILES_DIR:-$HOME/rc_files}"
     [ -f "$rc_path/.setup/__main__.py" ] || {
         echo "Missing rc_files setup: $rc_path/.setup" >&2
@@ -171,14 +118,16 @@ runtime_patches() {
     if [ -n "$persistent_root" ]; then
         arguments+=(--persistent-root "$persistent_root")
     fi
-    python3 "$rc_path/.setup" "${arguments[@]}"
+    python3 "$rc_path/.setup" "${arguments[@]}" "$@"
 }
 
 main() {
     if [ "${1:-}" = "--force" ] || needs_first_time_bootstrap; then
         first_time_bootstrap
     fi
-    runtime_patches
+    local persistent_root
+    persistent_root=$(find_persistent_root)
+    activate_credentials "$persistent_root" --exclude-package ssh
 }
 
 main "$@"

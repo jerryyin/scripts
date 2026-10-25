@@ -116,13 +116,6 @@ try {
     $cancelled = $false
     try { Invoke-MachineSetup $plan } catch { $cancelled=$_.Exception.NativeErrorCode -eq 1223 }
     if (!$cancelled -or (& $module { $script:Launches.Count }) -ne 1) { throw 'Declined UAC must stop setup without retrying' }
-    & $module {
-        function script:Get-Service { return @{Status='Stopped'; StartType='Disabled'} }
-        $script:Launches = @()
-    }
-    $failed = $false
-    try { Ensure-SshAgent -ReadyOnly } catch { $failed=$_.Exception.Message -like '*grouped administrator step*' }
-    if (!$failed -or (& $module { $script:Launches.Count }) -ne 0) { throw 'The credential phase must never start another administrator prompt' }
     if (@(Get-ChildItem -LiteralPath $env:LOCALAPPDATA -Recurse -Filter request.json).Count) { throw 'Machine request files were left behind' }
     $manifest = Read-Json (Join-Path $root 'defaults/environment.json')
     if ($manifest.wsl.distribution -cne 'Ubuntu') { throw 'Default setup must reuse the Ubuntu environment, rather than request a second version-named distro' }

@@ -116,6 +116,8 @@ persistence for an ephemeral pod. Docker-specific base-image pulls live in
 `containers/docker/pull-base-images.sh`; remote provisioning invokes that optional operation
 after preparing the host.
 
+Session activation initializes SSH once inside first-time bootstrap, before private vault access. Existing private SSH configuration and a usable vault indicate completion; missing setup is retried without a separate marker file. Later starts refresh application credentials with SSH excluded. Use `credentials/activate.sh --force` or the explicit `rc_files` SSH credential command to import additional keys.
+
 ## Project shell settings
 
 The rc_files Zsh configuration optionally sources

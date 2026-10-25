@@ -66,32 +66,6 @@ try {
 
     $auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('fixture-user:fixture:password'))
 
-    $ssh = Join-Path $fixture 'ssh'
-    $source = Join-Path $fixture 'backup'
-    [void][IO.Directory]::CreateDirectory($source)
-    $fakeKey = "-----BEGIN OPENSSH PRIVATE KEY-----`nfake test data`n-----END OPENSSH PRIVATE KEY-----`n"
-    [IO.File]::WriteAllText((Join-Path $source 'id_test'), $fakeKey)
-    [IO.File]::WriteAllText((Join-Path $source 'id_test.pub'), 'fake public key')
-    [IO.File]::WriteAllText((Join-Path $source 'config'), 'Linux-only configuration')
-    $keys = @(Initialize-NativeSsh $ssh $source)
-    Assert ($keys.Count -eq 1 -and [IO.File]::ReadAllText((Join-Path $ssh 'id_test')) -ceq $fakeKey) 'SSH imports a missing key from an explicit source'
-    Assert ((Test-Path -LiteralPath (Join-Path $ssh 'id_test.pub')) -and !(Test-Path -LiteralPath (Join-Path $ssh 'config'))) 'SSH imports the public key without copying Linux host configuration'
-    Save-PrivateText (Join-Path $ssh 'config') 'existing Windows hosts'
-    [IO.File]::WriteAllText((Join-Path $source 'id_test'), $fakeKey.Replace('fake test data', 'different fake data'))
-    Initialize-NativeSsh $ssh $source | Out-Null
-    Assert ([IO.File]::ReadAllText((Join-Path $ssh 'id_test')) -ceq $fakeKey -and [IO.File]::ReadAllText((Join-Path $ssh 'config')) -ceq 'existing Windows hosts') 'SSH reruns preserve existing keys and host configuration'
-
-    $keyPath = Join-Path $ssh 'id_test'
-    $acl = Get-Acl -LiteralPath $keyPath
-    $everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
-    (Get-Item -LiteralPath $keyPath).SetAccessControl($acl)
-    Initialize-NativeSsh $ssh '' | Out-Null
-    $acl = Get-Acl -LiteralPath $keyPath
-    $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
-    Assert ($acl.AreAccessRulesProtected -and $identities.Count -eq 2 -and $identities -contains $sid -and $identities -contains 'S-1-5-18') 'Repeated setup removes explicit extra access and uses the credential permission policy'
-    Assert ([IO.File]::ReadAllText($keyPath) -ceq $fakeKey) 'Repeated setup preserves private key contents'
-
     # Full Apply orchestration: real local Git vault, fake gh/codex executables,
     # and a separate Windows home. No browser, real key or service is touched.
     if (!$HelpersOnly) {
@@ -115,7 +89,7 @@ try {
     $runner = Join-Path $fixture 'run-fixture.ps1'
     [IO.File]::WriteAllText($runner, @'
 param($Script, $Vault, $Rc)
-try { & $Script -Apply -SkipSshAgent -VaultPath $Vault -RcPath $Rc }
+try { & $Script -Apply -VaultPath $Vault -RcPath $Rc }
 catch { Write-Output ('Fixture error: ' + $_.Exception.Message); exit 1 }
 '@)
     $applyArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Script', (Join-Path $utility 'priv.ps1'), '-Vault', $targetVault, '-Rc', $RcPath)

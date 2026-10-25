@@ -182,15 +182,8 @@ if (!$SkipPackages -and !$rcMachine) {
 }
 $fonts = !$SkipFonts -and (!(Test-Path -LiteralPath (Join-Path $RcPath 'terminal/.setup/font.ps1')) -or !(& (Join-Path $RcPath 'terminal/.setup/font.ps1') -Check))
 $wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions).Count -gt 0) { 'Existing' } else { 'PendingInitialization' }
-$sshKeys = @()
-if (!$SkipCredentials) {
-    foreach ($path in @((Join-Path $env:USERPROFILE '.ssh'), $SshSource) | Where-Object { $_ }) {
-        if ($path -eq $SshSource -and !(Test-Path -LiteralPath $path -PathType Container)) { throw 'SSH source directory does not exist.' }
-        $sshKeys += @(Get-ChildItem -LiteralPath $path -File -Filter 'id_*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.' })
-    }
-}
-$agent = Get-Service ssh-agent -ErrorAction SilentlyContinue
-if ($sshKeys.Count -and !$agent) { throw 'Install the Windows OpenSSH Client optional feature before importing SSH keys.' }
+$sshSetup = Join-Path $RcPath 'ssh/.setup/windows.ps1'
+$sshReady = (Test-Path -LiteralPath $sshSetup) -and (& $sshSetup -Check -VaultPath $VaultPath)
 $sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
 $sshState = if ($SkipSsh) { @{Installed=$false; NeedsSetup=$false} } else { Get-SshShellState }
 $sshLinks = $false
@@ -202,7 +195,7 @@ if ($sshState.Installed) {
 $machine = @{
     DeveloperMode=(!(Test-DeveloperMode)); Packages=@($packages | Where-Object { !$_.Contains('scope') -or $_.scope -eq 'machine' })
     Distribution=$(if (!$SkipWsl -and $wslState -ne 'Existing') { $manifest.wsl.distribution } else { '' }); WslState=$wslState
-    RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; SshAgent=($sshKeys.Count -gt 0 -and ($agent.Status -ne 'Running' -or $agent.StartType -ne 'Automatic'))
+    RcMachine=$rcMachine; RcPath=$RcPath; RcRepository=$manifest.rcRepository; VaultPath=$VaultPath; SshAgent=(!$SkipPackages -and !$sshReady)
     SshShell=($sshState.Installed -and ($sshState.NeedsSetup -or $rcMachine)); InstallPrerequisites=(!$SkipPackages); SshLinks=$sshLinks
     Fonts=$fonts
     LinkPlanArguments=$sshPlan
@@ -218,8 +211,8 @@ if (!$SkipPackages) {
     Invoke-RcSetup $RcPath @('prerequisites', '--no-install')
     Update-ProcessPath
 }
-Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
-if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource -RequireSshAgent }
+Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--package', 'ssh', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
+if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource }
 
 # 4. Development environment: deploy application settings and verify SSH.
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--replace-existing', '--backup', $backupRoot, '--update', '--no-install')

@@ -27,10 +27,15 @@ class ActivationTests(unittest.TestCase):
 from pathlib import Path
 with (Path.home() / 'calls').open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
+if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh':
+    target = Path.home() / '.ssh/private.conf'
+    if not target.is_symlink():
+        target.symlink_to(Path.home() / 'vault/ssh/config')
 ''')
         ssh = self.home / '.ssh'
         ssh.mkdir()
         (ssh / 'id_ed25519').write_text('fake-existing-key')
+        (ssh / 'private.conf').symlink_to(self.vault / 'ssh/config')
         self.root = Path(__file__).resolve().parents[1]
         self.script = self.root / 'credentials/activate.sh'
         self.environment = dict(os.environ, HOME=str(self.home), VAULT_DIR=str(self.vault),
@@ -46,15 +51,15 @@ with (Path.home() / 'calls').open('a') as stream:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
         self.assertEqual(calls, [['credentials', '--vault', str(self.vault),
-                                 '--persistent-root', str(self.storage)]] * 2)
+                                 '--persistent-root', str(self.storage), '--exclude-package', 'ssh']] * 2)
         self.assertEqual((self.home / '.ssh/id_ed25519').read_text(), 'fake-existing-key')
 
     def test_persistence_opt_out_and_custom_vault(self) -> None:
         self.environment['DEVENV_PERSISTENT_ROOT'] = ''
         result = self.activate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads((self.home / 'calls').read_text()),
-                         ['credentials', '--vault', str(self.vault)])
+        self.assertEqual([json.loads(line) for line in (self.home / 'calls').read_text().splitlines()],
+                         [['credentials', '--vault', str(self.vault), '--exclude-package', 'ssh']])
 
     def test_missing_configuration_stops_and_propagates_hook_failure(self) -> None:
         entry = self.rc / '.setup/__main__.py'
@@ -65,7 +70,7 @@ with (Path.home() / 'calls').open('a') as stream:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Missing rc_files setup', result.stderr)
 
-    def test_ssh_restore_keeps_existing_configuration(self) -> None:
+    def test_ssh_is_delegated_before_vault_access(self) -> None:
         fixture = self.home / 'fixture'
         (fixture / 'credentials').mkdir(parents=True)
         (fixture / 'lib').mkdir()
@@ -75,6 +80,7 @@ with (Path.home() / 'calls').open('a') as stream:
         self.script = fixture / 'credentials/activate.sh'
         (self.vault / '.git').mkdir()
         (self.home / '.ssh/id_ed25519').unlink()
+        (self.home / '.ssh/private.conf').unlink()
         config = self.home / '.ssh/config'
         config.write_text('existing host aliases')
         keys = self.storage / '.ssh'
@@ -84,8 +90,22 @@ with (Path.home() / 'calls').open('a') as stream:
         result = self.activate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(config.read_text(), 'existing host aliases')
-        self.assertEqual((self.home / '.ssh/id_ed25519').read_text(), 'fake-restored-key')
-        self.assertEqual((self.home / '.ssh/id_ed25519').stat().st_mode & 0o777, 0o600)
+        calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
+        self.assertEqual(calls[0], ['credentials', '--vault', str(self.vault),
+                                    '--persistent-root', str(self.storage), '--package', 'ssh'])
+        self.assertFalse((self.home / '.ssh/id_ed25519').exists())
+
+    def test_ssh_initialization_runs_once_and_force_repeats_it(self) -> None:
+        (self.home / '.ssh/private.conf').unlink()
+        (self.vault / '.git').mkdir()
+        self.environment['HOSTNAME'] = ''
+        for arguments in ([], [], ['--force']):
+            result = subprocess.run(['bash', str(self.script), *arguments], env=self.environment,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
+        self.assertEqual(sum('--package' in call for call in calls), 2)
+        self.assertEqual(sum('--exclude-package' in call for call in calls), 3)
 
     def test_build_phase_excludes_activation(self) -> None:
         result = subprocess.run(['bash', str(self.root / 'setup.sh'), 'base', '--phase', 'build', '--plan'],
