@@ -33,6 +33,7 @@ try {
     & $module {
         $script:PythonKey=$null
         $script:Launcher=$false
+        $script:PythonWorks=$false
         function script:Get-ItemProperty {
             param($LiteralPath, $ErrorAction)
             if ($LiteralPath -notlike 'HKLM:*PythonCore*') { throw 'Python must use machine interpreter registration.' }
@@ -40,17 +41,32 @@ try {
         }
         function script:Test-Path {
             param($LiteralPath, $PathType)
-            if ($LiteralPath -eq 'machine-python.exe') { return $true }
+            if ($LiteralPath -eq (Join-Path $env:ProgramFiles 'Python314/python.exe')) { return $true }
             return $script:Launcher
+        }
+        function script:Invoke-Native {
+            param($Program, $Arguments, [switch]$Capture)
+            if ($Program -eq 'winget') { $script:PythonInstallArguments = $Arguments; return }
+            if (!$script:PythonWorks) { throw 'Failed to import encodings module' }
+            if ($Arguments[0] -ne '-I' -or !$Capture) { throw 'Python must be verified in isolation.' }
+            return (Join-Path $env:ProgramFiles 'Python314')
         }
     }
     $pythonPackage=@{id='Python.Python.3.14'; scope='machine'}
     if (@(Get-MissingPackages @($pythonPackage)).Count -ne 1) { throw 'A user-only Python must not satisfy machine setup.' }
-    & $module { $script:PythonKey=@{ExecutablePath='machine-python.exe'} }
+    & $module { $script:PythonKey=@{ExecutablePath=(Join-Path $env:ProgramFiles 'Python314/python.exe')} }
     if (@(Get-MissingPackages @($pythonPackage)).Count -ne 1) { throw 'A machine interpreter without its shared launcher is incomplete.' }
     & $module { $script:Launcher=$true }
+    if (@(Get-MissingPackages @($pythonPackage)).Count -ne 1) { throw 'An interpreter missing its standard library must not satisfy machine setup.' }
+    & $module { $script:PythonWorks=$true }
     if (@(Get-MissingPackages @($pythonPackage)).Count -ne 0) { throw 'Python readiness must use machine files even when the installer bundle is registered per user.' }
-    & $module { Remove-Item Function:Get-ItemProperty; Remove-Item Function:Test-Path }
+    $pythonManifest = (Read-Json (Join-Path $root 'defaults/environment.json')).packages | Where-Object id -eq 'Python.Python.3.14'
+    Install-WinGetPackage $pythonManifest
+    $installArguments = & $module { ,$script:PythonInstallArguments }
+    $custom = $installArguments[[Array]::IndexOf($installArguments, '--custom') + 1]
+    if (!$custom.Contains(('TargetDir="' + (Join-Path $env:ProgramFiles 'Python314') + '"')) -or
+        !$custom.Contains('InstallAllUsers=1 InstallLauncherAllUsers=1') -or $installArguments -notcontains 'machine') { throw 'Python must receive an explicit quoted system target and all-users installer options.' }
+    & $module { Remove-Item Function:Get-ItemProperty; Remove-Item Function:Test-Path; Remove-Item Function:Invoke-Native }
     & $module {
         function script:Invoke-RcSetup { param($RcRoot, $Arguments, [switch]$Capture) return $script:RequirementsJson }
     }

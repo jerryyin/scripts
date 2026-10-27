@@ -13,7 +13,7 @@
         {
             "id": "Python.Python.3.14",
             "scope": "machine",
-            "installerArguments": "InstallAllUsers=1 InstallLauncherAllUsers=1 Include_launcher=1 PrependPath=1 TargetDir="
+            "installerArguments": "InstallAllUsers=1 InstallLauncherAllUsers=1 Include_launcher=1 PrependPath=1 Include_exe=1 Include_lib=1 Include_pip=1"
         },
         {
             "id": "Obsidian.Obsidian",
@@ -25,7 +25,8 @@
         },
         {
             "id": "KDE.KDEConnect",
-            "scope": "machine"
+            "scope": "machine",
+            "userAppxNames": ["KDEe.V.KDEConnect"]
         },
         {
             "id": "Rufus.Rufus",

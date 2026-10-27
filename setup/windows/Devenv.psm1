@@ -134,8 +134,18 @@ function Get-MissingPackages([object[]]$Packages) {
             # CPython's Burn bundle can register in HKCU even for an all-users interpreter.
             $version = $package.id.Substring('Python.Python.'.Length)
             $key = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Python\PythonCore\$version\InstallPath" -ErrorAction SilentlyContinue
-            if ($key -and (Test-Path -LiteralPath $key.ExecutablePath -PathType Leaf) -and
+            $ready = $false
+            if ($key -and $key.ExecutablePath -and
+                $key.ExecutablePath.StartsWith($env:ProgramFiles + '\', [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-Path -LiteralPath $key.ExecutablePath -PathType Leaf) -and
                 (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'py.exe') -PathType Leaf)) {
+                try {
+                    $probe = "import sys, encodings, ssl, sqlite3, venv, ensurepip; assert sys.version_info[:2] == tuple(map(int, '$version'.split('.'))); print(sys.prefix)"
+                    $prefix = Invoke-Native $key.ExecutablePath @('-I', '-c', $probe) -Capture
+                    $ready = $prefix.TrimEnd('\') -ieq (Split-Path $key.ExecutablePath -Parent).TrimEnd('\')
+                } catch { Write-Host "REPAIR $($package.id): $($_.Exception.Message)" }
+            }
+            if ($ready) {
                 Write-Host "SKIP $($package.id) (machine interpreter and launcher)"
             } else { $package }
             continue
@@ -156,11 +166,37 @@ function Get-MissingPackages([object[]]$Packages) {
 function Install-WinGetPackage($Package) {
     $scope = if ($Package.Contains('scope')) { $Package.scope } else { 'machine' }
     $arguments = @('install', '--id', $Package.id, '--exact', '--scope', $scope, '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity', '--silent')
-    if ($Package.Contains('installerArguments')) { $arguments += @('--custom', $Package.installerArguments) }
+    $custom = if ($Package.Contains('installerArguments')) { $Package.installerArguments } else { '' }
+    if ($scope -eq 'machine' -and $Package.id -like 'Python.Python.*') {
+        $version = $Package.id.Substring('Python.Python.'.Length).Replace('.', '')
+        $target = Join-Path $env:ProgramFiles "Python$version"
+        $custom += ' TargetDir="' + $target + '"'
+    }
+    if ($custom) { $arguments += @('--custom', $custom.Trim()) }
     # This package was missing in the requested scope; do not reuse a user installation.
     $arguments += '--force'
     Invoke-Native winget $arguments
     if (@(Get-MissingPackages @($Package)).Count) { throw "Package is still missing in $scope scope: $($Package.id)" }
+}
+
+function Remove-UserPackageDuplicates([object[]]$Packages, [string]$RcRoot) {
+    Import-Module (Join-Path $RcRoot '.setup/packages.psm1') -DisableNameChecking
+    foreach ($package in $Packages) {
+        if ($package.Contains('scope') -and $package.scope -ne 'machine') { continue }
+        if ($package.id -like 'Python.Python.*') {
+            # Burn may register an all-users bundle in HKCU. Only remove a real user interpreter.
+            $version = $package.id.Substring('Python.Python.'.Length)
+            $key = Get-ItemProperty -LiteralPath "HKCU:\SOFTWARE\Python\PythonCore\$version\InstallPath" -ErrorAction SilentlyContinue
+            if (!$key -or !$key.ExecutablePath -or
+                !$key.ExecutablePath.StartsWith($env:USERPROFILE.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        }
+        $replacement = $package
+        $verify = {
+            if (@(Get-MissingPackages @($replacement)).Count) { throw "Cannot remove user copy without a working machine replacement: $($replacement.id)" }
+        }.GetNewClosure()
+        $appx = if ($package.Contains('userAppxNames')) { $package.userAppxNames } else { @() }
+        Remove-WindowsUserPackage -Id $package.id -AppxNames $appx -VerifyMachine $verify
+    }
 }
 
 function Invoke-MachineSetup($Plan) {
@@ -254,6 +290,11 @@ function Get-ConfigurationProblems([string]$UserRoot, [string]$RcRoot, [string]$
 }
 
 function Invoke-Native([string]$Program, [string[]]$Arguments, [switch]$Capture) {
+    $passing = Get-Variable PSNativeCommandArgumentPassing -ErrorAction SilentlyContinue
+    if ([IO.Path]::GetFileNameWithoutExtension($Program) -ieq 'winget' -and (!$passing -or $passing.Value -eq 'Legacy')) {
+        # Windows PowerShell otherwise strips the quotes inside WinGet's --custom argument.
+        $Arguments = @($Arguments | ForEach-Object { $_.Replace('"', '\"') })
+    }
     if ($Capture) { $result = & $Program @Arguments; $code = $LASTEXITCODE }
     else { & $Program @Arguments | Out-Host; $code = $LASTEXITCODE }
     if ($code -ne 0) { throw "$Program failed with exit code $code" }

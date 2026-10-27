@@ -208,7 +208,10 @@ Update-ProcessPath
 Ensure-Checkout $RcPath $manifest.rcRepository
 if (!(Test-Path -LiteralPath (Join-Path $RcPath '.setup/__main__.py'))) { throw 'Update rc_files: .setup/__main__.py is required.' }
 if (!$SkipPackages) {
+    Remove-UserPackageDuplicates $manifest.packages $RcPath
     Invoke-RcSetup $RcPath @('prerequisites', '--no-install')
+    # Machine prerequisites are ready; normal setup also removes this user's duplicate tools.
+    Invoke-RcSetup $RcPath @('prerequisites')
     Update-ProcessPath
 }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--package', 'ssh', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
