@@ -53,7 +53,9 @@ function Get-SshLinkReadErrors([object[]]$Links) {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-$links = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))
+# Redirected input may include the parent console encoding's byte-order mark.
+$reader = New-Object IO.StreamReader([Console]::OpenStandardInput())
+$links = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($reader.ReadToEnd())))
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;

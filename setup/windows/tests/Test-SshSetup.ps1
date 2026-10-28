@@ -74,12 +74,18 @@ try {
     $target = Join-Path $fixture ('profile-' + [char]0x03bb + '.ps1')
     [IO.File]::WriteAllText($source, '# fixture profile')
     New-Item -ItemType SymbolicLink -Path $target -Target $source | Out-Null
-    $readErrors = @(& $module {
-        param($target)
-        Get-SshLinkReadErrors @(@{target=$target; directory=$false}, @{target=($target + '.missing'); directory=$false})
-    } $target)
-    if ($readErrors.Count -ne 1 -or $readErrors[0].code -ne 2 -or $readErrors[0].target -cne ($target + '.missing')) { throw "Unexpected SSH read errors: $(ConvertTo-Json -InputObject $readErrors -Compress)" }
-    Write-Output 'PASS: Isolated SSH probe preserves Unicode paths and reports actual file errors'
+    $priorEncoding = [Console]::InputEncoding
+    try {
+        foreach ($encoding in @($priorEncoding, [Text.UTF8Encoding]::new($true))) {
+            [Console]::InputEncoding = $encoding
+            $readErrors = @(& $module {
+                param($target)
+                Get-SshLinkReadErrors @(@{target=$target; directory=$false}, @{target=($target + '.missing'); directory=$false})
+            } $target)
+            if ($readErrors.Count -ne 1 -or $readErrors[0].code -ne 2 -or $readErrors[0].target -cne ($target + '.missing')) { throw "Unexpected SSH read errors: $(ConvertTo-Json -InputObject $readErrors -Compress)" }
+        }
+    } finally { [Console]::InputEncoding = $priorEncoding }
+    Write-Output 'PASS: Isolated SSH probe preserves Unicode paths and reports actual file errors with either console encoding'
     & $module {
         param($source, $target)
         $script:Link = @{source=$source; target=$target; directory=$false}
