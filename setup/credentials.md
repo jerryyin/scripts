@@ -6,7 +6,7 @@
 
 Scripts selects and makes the vault available; rc_files owns application credential formats. Each vault contains `.vault-scope` with exactly `work` or `homelab`. Activation rejects a mismatched or unmarked existing vault. No caller falls back to the mixed `~/vault` repository. SSH bootstrap may run before the selected vault exists, using already selected local keys.
 
-Work contains the AMD GitHub, AMD Claude gateway, AtlArtifactory and MKMHub Docker credentials and work SSH inventory. Homelab contains personal GitHub and home service credentials, Samsung signing material and home SSH inventory. Private SSH keys remain outside both repositories. A key used for music-server, homelab or desktop must not be copied into the work environment, even when a work host also accepts that key.
+Work contains the AMD GitHub, AMD Claude gateway, AtlArtifactory and MKMHub Docker credentials and work SSH inventory. Homelab contains personal GitHub and home service credentials, Samsung signing material and home SSH inventory. The personal GitHub token `gh_token_jerryyin.txt` is explicitly shared with work so personal repositories are available there; no other home credential is shared. Work GitHub setup seeds both available accounts, with AMD as the default, while the owner-aware launcher selects jerryyin for personal repositories. Private SSH keys remain outside both repositories. A key used for music-server, homelab or desktop must not be copied into the work environment, even when a work host also accepts that key.
 
 Containers mount a dedicated role directory at `/zyin` and only the selected vault, read-only, at `/zyin/vault-<scope>`. They do not mount the host home, host SSH directory, SSH agent socket or all of `/data`. The role directory is `~/.local/share/devenv/<scope>` by default and holds that environment's workspace and explicitly imported keys/logins. A directory already used by another role cannot be reused. Builds use a separate Docker credential configuration for the selected role; vault files never enter the image build context or image layers.
 
@@ -16,7 +16,7 @@ Existing development images must be rebuilt after scripts and rc_files are updat
 
 ## Validation
 
-Tests must show one GitHub account per selected vault, refusal of a wrong or mixed vault, correct mounts and Docker credential directory, no host-home bind, and separate persistent roots. Existing SSH, credential rotation, argument handling and image-build isolation checks remain applicable. Migration compares secret bytes without printing them. Each new GitHub repository must be verified private before any upload.
+Tests must show both permitted GitHub accounts in work and only jerryyin in homelab, refusal of a wrong or mixed vault, correct mounts and Docker credential directory, no host-home bind, and separate persistent roots. Existing SSH, credential rotation, argument handling and image-build isolation checks remain applicable. Migration compares secret bytes without printing them. Each new GitHub repository must be verified private before any upload.
 
 ## Alternatives Considered
 
