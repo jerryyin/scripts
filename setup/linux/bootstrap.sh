@@ -70,8 +70,9 @@ if [ ! -d "$HOME/rc_files" ]; then
 else
     sync_checkout "$HOME/rc_files"
 fi
-if [ -d "$HOME/vault/.git" ] && [ ! -L "$HOME/vault" ]; then
-    sync_checkout "$HOME/vault"
+selected_vault="${VAULT_DIR:-$HOME/vault-${VAULT_SCOPE:-work}}"
+if [ -d "$selected_vault/.git" ] && [ ! -L "$selected_vault" ]; then
+    sync_checkout "$selected_vault"
 fi
 
 # Clone scripts

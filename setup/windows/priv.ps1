@@ -10,12 +10,14 @@ Native Windows credentials: GitHub, Docker, SSH, Codex and Claude settings.
 param(
     [switch]$Apply,
     [switch]$Status,
-    [string]$VaultPath = (Join-Path $env:USERPROFILE 'vault'),
+    [ValidateSet('work', 'homelab')][string]$VaultScope = 'homelab',
+    [string]$VaultPath,
     [string]$RcPath = (Join-Path $env:USERPROFILE 'rc_files'),
     [string]$SshSource
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
+if (!$VaultPath) { $VaultPath = Join-Path $env:USERPROFILE "vault-$VaultScope" }
 Import-Module (Join-Path $PSScriptRoot 'Devenv.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'Credentials.psm1') -Force -DisableNameChecking
 if ($Apply -and $Status) { throw 'Choose -Apply or -Status.' }
@@ -47,13 +49,13 @@ if ($Status) {
     return
 }
 
-$sshArguments = @('credentials', '--package', 'ssh', '--home', $env:USERPROFILE, '--vault', $VaultPath)
+$sshArguments = @('credentials', '--package', 'ssh', '--home', $env:USERPROFILE, '--vault', $VaultPath, '--vault-scope', $VaultScope)
 if ($SshSource) { $sshArguments += @('--source', $SshSource) }
 Invoke-RcSetup $RcPath $sshArguments
 
 # The vault holds the GitHub tokens, so it is cloned with the SSH key rather than a GitHub login.
 # Clone when absent; otherwise update it like the other checkouts.
-$repository = (Read-Json (Join-Path $PSScriptRoot 'defaults/environment.json')).vaultRepository
+$repository = (Read-Json (Join-Path $PSScriptRoot 'defaults/environment.json')).vaultRepositories[$VaultScope]
 if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     Assert-PrivatePath $VaultPath
     if ((Test-Path -LiteralPath $VaultPath) -and @(Get-ChildItem -LiteralPath $VaultPath -Force).Count) {
@@ -70,12 +72,12 @@ if (!(Test-Path -LiteralPath (Join-Path $VaultPath '.git'))) {
     Assert-PrivatePath $VaultPath -AllowGit
     $remote = Invoke-CredentialCommand git.exe @('-C', $VaultPath, 'remote', 'get-url', 'origin') ''
     $normalizedRemote = $remote.Output.Trim().TrimEnd('/') -replace '^git@github.com:', 'https://github.com/'
-    if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match vaultRepository in defaults/environment.json.' }
+    if ($remote.ExitCode -ne 0 -or $normalizedRemote -ne $repository) { throw 'Existing vault origin does not match the selected vaultRepositories entry in defaults/environment.json.' }
     Set-PrivateAcl $VaultPath
     Ensure-Checkout $VaultPath $repository
 }
 # GitHub CLI accounts come from the vault tokens through rc_files' gh credential hook.
-Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--home', $env:USERPROFILE, '--exclude-package', 'ssh')
+Invoke-RcSetup $RcPath @('credentials', '--vault', $VaultPath, '--vault-scope', $VaultScope, '--home', $env:USERPROFILE, '--exclude-package', 'ssh')
 if (Get-Command gh -ErrorAction SilentlyContinue) {
     $login = Invoke-CredentialCommand gh @('auth', 'status', '--hostname', 'github.com') ''
     if ($login.ExitCode -eq 0) { Write-Output 'OK GitHub CLI: vault accounts available.' } else { Write-Output 'MISSING GitHub CLI login: check the vault gh_token_*.txt files.' }

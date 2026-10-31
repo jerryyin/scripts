@@ -76,20 +76,21 @@ try {
     $repoSource = Join-Path $fixture 'source-vault'
     [void][IO.Directory]::CreateDirectory($repoSource)
     [IO.File]::WriteAllText((Join-Path $repoSource 'docker_mkmhub_auth.txt'), $auth)
+    [IO.File]::WriteAllText((Join-Path $repoSource '.vault-scope'), "work`n")
     Invoke-Native git @('init', $repoSource)
-    Invoke-Native git @('-C', $repoSource, 'add', 'docker_mkmhub_auth.txt')
+    Invoke-Native git @('-C', $repoSource, 'add', '-f', 'docker_mkmhub_auth.txt', '.vault-scope')
     Invoke-Native git @('-C', $repoSource, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fake credential fixture')
     $utility = Join-Path $fixture 'utility'
     [void][IO.Directory]::CreateDirectory((Join-Path $utility 'defaults'))
     foreach ($file in @('priv.ps1', 'Credentials.psm1', 'Devenv.psm1')) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $utility $file) }
-    Save-Json (Join-Path $utility 'defaults/environment.json') ([ordered]@{ vaultRepository = $repoSource }) ''
+    Save-Json (Join-Path $utility 'defaults/environment.json') ([ordered]@{ vaultRepositories = @{work = $repoSource; homelab = $repoSource} }) ''
     $homePath = Join-Path $fixture 'fresh account'
-    $targetVault = Join-Path $homePath 'vault'
+    $targetVault = Join-Path $homePath 'vault-work'
     $childEnvironment = @{ USERPROFILE = $homePath; DOCKER_CONFIG = (Join-Path $homePath '.docker'); PATH = $bin + ';' + $env:PATH }
     $runner = Join-Path $fixture 'run-fixture.ps1'
     [IO.File]::WriteAllText($runner, @'
 param($Script, $Vault, $Rc)
-try { & $Script -Apply -VaultPath $Vault -RcPath $Rc }
+try { & $Script -Apply -VaultPath $Vault -VaultScope work -RcPath $Rc }
 catch { Write-Output ('Fixture error: ' + $_.Exception.Message); exit 1 }
 '@)
     $applyArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Script', (Join-Path $utility 'priv.ps1'), '-Vault', $targetVault, '-Rc', $RcPath)

@@ -12,7 +12,8 @@ param(
     [switch]$Check,
     [string]$NotesPath,
     [string]$RcPath = (Join-Path $env:USERPROFILE 'rc_files'),
-    [string]$VaultPath = (Join-Path $env:USERPROFILE 'vault'),
+    [ValidateSet('work', 'homelab')][string]$VaultScope = 'homelab',
+    [string]$VaultPath,
     [string]$SshSource,
     [string]$TerminalPath,
     [string]$DocumentsPath,
@@ -28,6 +29,7 @@ param(
     [switch]$InstallCodexDesktop
 )
 if (!$EnvironmentPath) { $EnvironmentPath = Join-Path $PSScriptRoot 'defaults/environment.json' }
+if (!$VaultPath) { $VaultPath = Join-Path $env:USERPROFILE "vault-$VaultScope" }
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Devenv.psm1') -Force -DisableNameChecking
@@ -215,14 +217,18 @@ if (!$SkipPackages) {
     Update-ProcessPath
 }
 Invoke-RcSetup $RcPath @('apply', '--package', 'git', '--package', 'ssh', '--home', $env:USERPROFILE, '--replace-existing', '--backup', $backupRoot)
-if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -RcPath $RcPath -SshSource $SshSource }
+if (!$SkipCredentials) { & (Join-Path $PSScriptRoot 'priv.ps1') -Apply -VaultPath $VaultPath -VaultScope $VaultScope -RcPath $RcPath -SshSource $SshSource }
 
 # 4. Development environment: deploy application settings and verify SSH.
 $deployment = @(Get-DeploymentArguments '' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--replace-existing', '--backup', $backupRoot, '--update', '--no-install')
 if ($SkipFonts) { $deployment += @('--skip-setup', 'terminal') }
 if ($SkipVimPlugins) { $deployment += @('--skip-setup', 'vim') }
 if ($SkipAddons) { $deployment += @('--skip-setup', 'tmux') }
-Invoke-RcSetup $RcPath $deployment
+$previousCredentialVault = $env:RC_CREDENTIALS_VAULT
+try {
+    $env:RC_CREDENTIALS_VAULT = $VaultPath
+    Invoke-RcSetup $RcPath $deployment
+} finally { $env:RC_CREDENTIALS_VAULT = $previousCredentialVault }
 if (!$SkipSsh) {
     $sshPlan = @(Get-DeploymentArguments 'plan' $env:USERPROFILE $RcPath $documents $TerminalPath) + @('--json')
     $sshProblems = @(Get-SshSessionProblems $RcPath $sshPlan)

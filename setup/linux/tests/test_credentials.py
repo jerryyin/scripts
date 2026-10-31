@@ -14,11 +14,12 @@ class ActivationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='session-credentials-')
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.vault = self.home / 'vault'
+        self.vault = self.home / 'vault-work'
         self.vault.mkdir()
-        (self.vault / 'fake').touch()
+        (self.vault / '.vault-scope').write_text('work\n')
         self.storage = self.home / 'storage'
         self.storage.mkdir()
+        (self.storage / '.vault-scope').write_text('work\n')
         self.rc = self.home / 'rc_files'
         self.rc.mkdir()
         setup = self.rc / '.setup'
@@ -30,7 +31,7 @@ with (Path.home() / 'calls').open('a') as stream:
 if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh':
     target = Path.home() / '.ssh/private.conf'
     if not target.is_symlink():
-        target.symlink_to(Path.home() / 'vault/ssh/config')
+        target.symlink_to(Path.home() / 'vault-work/ssh/config')
 ''')
         ssh = self.home / '.ssh'
         ssh.mkdir()
@@ -38,7 +39,7 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
         (ssh / 'private.conf').symlink_to(self.vault / 'ssh/config')
         self.root = Path(__file__).resolve().parents[1]
         self.script = self.root / 'credentials/activate.sh'
-        self.environment = dict(os.environ, HOME=str(self.home), VAULT_DIR=str(self.vault),
+        self.environment = dict(os.environ, HOME=str(self.home), VAULT_SCOPE='work', VAULT_DIR=str(self.vault),
                                 RC_FILES_DIR=str(self.rc), DEVENV_PERSISTENT_ROOT=str(self.storage))
 
     def activate(self) -> subprocess.CompletedProcess[str]:
@@ -50,8 +51,8 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
             result = self.activate()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
-        self.assertEqual(calls, [['credentials', '--vault', str(self.vault),
-                                 '--persistent-root', str(self.storage), '--exclude-package', 'ssh']] * 2)
+        self.assertEqual(calls, [['credentials', '--vault', str(self.vault), '--vault-scope', 'work',
+                                 '--persistent-root', str(self.storage)]] * 2)
         self.assertEqual((self.home / '.ssh/id_ed25519').read_text(), 'fake-existing-key')
 
     def test_persistence_opt_out_and_custom_vault(self) -> None:
@@ -59,7 +60,7 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
         result = self.activate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([json.loads(line) for line in (self.home / 'calls').read_text().splitlines()],
-                         [['credentials', '--vault', str(self.vault), '--exclude-package', 'ssh']])
+                         [['credentials', '--vault', str(self.vault), '--vault-scope', 'work', '--exclude-package', 'ssh']])
 
     def test_missing_configuration_stops_and_propagates_hook_failure(self) -> None:
         entry = self.rc / '.setup/__main__.py'
@@ -91,7 +92,7 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(config.read_text(), 'existing host aliases')
         calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
-        self.assertEqual(calls[0], ['credentials', '--vault', str(self.vault),
+        self.assertEqual(calls[0], ['credentials', '--vault', str(self.vault), '--vault-scope', 'work',
                                     '--persistent-root', str(self.storage), '--package', 'ssh'])
         self.assertFalse((self.home / '.ssh/id_ed25519').exists())
 
@@ -105,7 +106,7 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = [json.loads(line) for line in (self.home / 'calls').read_text().splitlines()]
         self.assertEqual(sum('--package' in call for call in calls), 2)
-        self.assertEqual(sum('--exclude-package' in call for call in calls), 3)
+        self.assertEqual(sum('--package' not in call for call in calls), 3)
 
     def test_build_phase_excludes_activation(self) -> None:
         result = subprocess.run(['bash', str(self.root / 'setup.sh'), 'base', '--phase', 'build', '--plan'],
@@ -119,7 +120,6 @@ if '--package' in sys.argv and sys.argv[sys.argv.index('--package') + 1] == 'ssh
         self.environment['RC_FILES_DIR'] = os.environ['RC_FILES_TEST_ROOT']
         (self.vault / 'claude_key.txt').write_text('fake-claude-key')
         (self.vault / 'docker_mkmhub_auth.txt').write_text('ZmFrZTpzZWNyZXQ=')
-        (self.vault / 'gh_token_jerryyin.txt').write_text('fake-personal-token')
         (self.vault / 'gh_token_amdeng.txt').write_text('fake-work-token')
         (self.vault / 'atlartifactory_token.txt').write_text('fake-artifactory-token')
         codex = self.storage / '.codex'

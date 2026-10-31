@@ -9,11 +9,11 @@
 #        - Hostname resolution fix
 #        - sync_vault (link mounted vault, or clone the private vault repo)
 #
-#   2. Refresh application credentials through rc_files, excluding SSH.
+#   2. Refresh application credentials through rc_files; containers also refresh SSH inventory.
 #      This phase never runs application or package installation.
 #
 # Works with:
-#   - Docker: host home mounted at /zyin
+#   - Docker: selected role storage mounted at /zyin
 #   - Kubernetes: PVC mounted at /{username}
 #
 # Called by:
@@ -26,31 +26,34 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Existing configuration and vault availability determine readiness; no marker file.
+# Existing SSH configuration and a correctly scoped vault determine readiness.
 needs_first_time_bootstrap() {
-    [ ! -L "$HOME/.ssh/private.conf" ] || ! vault_available
+    { [ ! -L "$HOME/.ssh/private.conf" ] && [ ! -f "$HOME/.ssh/private.conf" ]; } || ! vault_available
 }
 
-# Vault is usable once ~/vault resolves to a populated directory — either a
+# Vault is usable once its selected path resolves to a populated directory — either a
 # symlink to persistent storage or a cloned repo. A dangling symlink, a missing
 # path, or an empty dir (partial clone) all count as unavailable so we retry.
 vault_available() {
-    [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]
+    [ -f "$VAULT_DIR/.vault-scope" ] && [ "$(cat "$VAULT_DIR/.vault-scope")" = "$VAULT_SCOPE" ]
 }
 
 # Find the persistent storage root (mounted host home or PVC)
 . "$SCRIPT_DIR/../lib/find_persistent_root.sh"
 . "$SCRIPT_DIR/../lib/fix_hostname.sh"
 
-# Clone the private vault repo (~/vault). Holds shared dev secrets in plaintext;
+# Clone the selected private vault. Holds its role's secrets in plaintext;
 # its privacy is gated by GitHub repo permissions / your account's SSH keys.
-# Idempotent: clone if missing, otherwise no-op (run `git -C ~/vault pull` by
+# Idempotent: clone if missing, otherwise no-op (pull the selected vault by
 # hand to refresh).
-VAULT_REPO="${VAULT_REPO:-git@github.com:jerryyin/vault.git}"
-VAULT_DIR="${VAULT_DIR:-$HOME/vault}"
+VAULT_SCOPE="${VAULT_SCOPE:-work}"
+case "$VAULT_SCOPE" in work|homelab) ;; *) echo 'VAULT_SCOPE must be work or homelab' >&2; exit 2 ;; esac
+export VAULT_SCOPE
+VAULT_REPO="${VAULT_REPO:-git@github.com:jerryyin/vault-$VAULT_SCOPE.git}"
+VAULT_DIR="${VAULT_DIR:-$HOME/vault-$VAULT_SCOPE}"
 sync_vault() {
     local persistent_root="${1:-}"
-    local persistent_vault="${persistent_root:+$persistent_root/vault}"
+    local persistent_vault="${persistent_root:+$persistent_root/vault-$VAULT_SCOPE}"
 
     if [ -n "$persistent_vault" ] && [ -d "$persistent_vault" ] && [ ! -e "$VAULT_DIR" ] && [ ! -L "$VAULT_DIR" ]; then
         ln -s "$persistent_vault" "$VAULT_DIR"
@@ -70,7 +73,7 @@ sync_vault() {
         echo "✓ vault cloned to $VAULT_DIR"
     else
         echo "⚠️  vault clone failed — make sure your SSH key is added at https://github.com/settings/keys"
-        echo "   (application credential hooks skip missing vault entries)"
+        return 1
     fi
 }
 
@@ -105,7 +108,7 @@ first_time_bootstrap() {
 # Phase 2: cheap, idempotent, runs at every container start.
 # No package/dep installs, apt/pip/npm or normal application setup here.
 # Docker may authenticate through its configured credential helper.
-# Package selection belongs to the caller's initialization or refresh phase.
+# Mounted vaults stay read-only; their SSH inventory is rendered into the container home.
 activate_credentials() {
     local persistent_root="$1"
     shift
@@ -114,8 +117,12 @@ activate_credentials() {
         echo "Missing rc_files setup: $rc_path/.setup" >&2
         return 1
     }
-    local arguments=(credentials --vault "$VAULT_DIR")
+    local arguments=(credentials --vault "$VAULT_DIR" --vault-scope "$VAULT_SCOPE")
     if [ -n "$persistent_root" ]; then
+        if [ ! -f "$persistent_root/.vault-scope" ] || [ "$(cat "$persistent_root/.vault-scope")" != "$VAULT_SCOPE" ]; then
+            echo "Persistent storage must be prepared for vault scope $VAULT_SCOPE; do not reuse a mixed host home or PVC." >&2
+            return 1
+        fi
         arguments+=(--persistent-root "$persistent_root")
     fi
     python3 "$rc_path/.setup" "${arguments[@]}" "$@"
@@ -127,7 +134,12 @@ main() {
     fi
     local persistent_root
     persistent_root=$(find_persistent_root)
-    activate_credentials "$persistent_root" --exclude-package ssh
+    # A container renders its inventory from the read-only mount on every start.
+    if [ -n "$persistent_root" ]; then
+        activate_credentials "$persistent_root"
+    else
+        activate_credentials "$persistent_root" --exclude-package ssh
+    fi
 }
 
 main "$@"

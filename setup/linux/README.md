@@ -116,7 +116,7 @@ persistence for an ephemeral pod. Docker-specific base-image pulls live in
 `containers/docker/pull-base-images.sh`; remote provisioning invokes that optional operation
 after preparing the host.
 
-Session activation initializes SSH once inside first-time bootstrap, before private vault access. Existing private SSH configuration and a usable vault indicate completion; missing setup is retried without a separate marker file. Later starts refresh application credentials with SSH excluded. Use `credentials/activate.sh --force` or the explicit `rc_files` SSH credential command to import additional keys.
+Session activation initializes SSH once inside first-time bootstrap, before private vault access. Existing private SSH configuration and a usable vault indicate completion; missing setup is retried without a separate initialization marker. Later starts refresh application credentials; containers also refresh a local SSH inventory from their read-only vault mount. Use `credentials/activate.sh --force` or the explicit `rc_files` SSH credential command to import additional keys.
 
 ## Project shell settings
 
@@ -167,9 +167,9 @@ and `dbuild` commands stay the same. Compose startup runs
 `scripts/setup/linux/credentials/activate.sh` with `DEVENV_PERSISTENT_ROOT=/zyin`
 before starting Zsh.
 
-Image builds do not clone or read the vault. Activation restores missing SSH keys without replacing SSH configuration, links a mounted vault or clones it when needed, then invokes `python3 "$HOME/rc_files/.setup" credentials --vault "$VAULT_DIR"`. It passes `--persistent-root` when storage is available. Application token formats, private writes and login persistence belong to rc_files package hooks; the credential phase runs no installers. `VAULT_DIR` and `RC_FILES_DIR` override the default locations.
+Image builds do not clone or read the vault. Activation restores missing SSH keys without replacing SSH configuration, links a mounted vault or clones it when needed, then invokes `python3 "$HOME/rc_files/.setup" credentials --vault "$VAULT_DIR" --vault-scope "$VAULT_SCOPE"`. It passes `--persistent-root` when storage is available. Application token formats, private writes and login persistence belong to rc_files package hooks; the credential phase runs no installers. `VAULT_SCOPE` defaults to `work`; the selected private repository is `~/vault-work` or `~/vault-homelab`. Its `.vault-scope` marker must match. `VAULT_DIR` and `RC_FILES_DIR` override the default locations. Persistent storage must be a separate directory marked for the same role, never the mixed host home. See [credential separation](../credentials.md).
 
-To save new or refreshed container logins, run `python3 ~/rc_files/.setup credentials --persistent-root /zyin --save`. Codex shares only `auth.json`; its preferences, instructions, plugins and sessions remain local. Native OS credential stores are not copied.
+To save new or refreshed container logins, run `python3 ~/rc_files/.setup credentials --vault-scope "$VAULT_SCOPE" --persistent-root /zyin --save`. Codex shares only `auth.json`; its preferences, instructions, plugins and sessions remain local. Native OS credential stores are not copied.
 
 Update `scripts` and `rc_files` together and rebuild development images so the
 Dockerfile, installed scripts, and startup command use the same paths. Default

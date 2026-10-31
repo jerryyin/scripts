@@ -21,6 +21,9 @@ class CommandTests(unittest.TestCase):
         self.checkout = self.root / "Someone's scripts/containers/docker"
         self.checkout.mkdir(parents=True)
         shutil.copytree(ROOT / 'bin', self.checkout / 'bin')
+        for name in ('session.py',):
+            if (ROOT / name).exists():
+                shutil.copyfile(ROOT / name, self.checkout / name)
         self.compose = self.checkout / 'docker-compose.yml'
         self.compose.write_text('services: {}\n')
         self.bin = self.root / 'home/.local/bin'
@@ -31,12 +34,22 @@ class CommandTests(unittest.TestCase):
         self.log = self.root / 'calls.jsonl'
         self.environment = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                                 USER='fixture', HOME=str(self.root / 'home'), CALL_LOG=str(self.log))
-        for name in ('COMPOSE_FILE', 'COMPOSE_PROJECT_NAME', 'FAIL_DOCKER_COMMAND', 'DOCKER_NAMES'):
+        for scope in ('work', 'homelab'):
+            vault = self.root / 'home' / f'vault-{scope}'
+            vault.mkdir()
+            (vault / '.vault-scope').write_text(scope + '\n')
+        self.rc = self.root / 'home/rc_files/.setup'
+        self.rc.mkdir(parents=True)
+        (self.rc / '__main__.py').write_text('')
+        for name in ('COMPOSE_FILE', 'COMPOSE_PROJECT_NAME', 'FAIL_DOCKER_COMMAND', 'DOCKER_NAMES',
+                     'VAULT_SCOPE', 'VAULT_DIR', 'DEVENV_ROLE_ROOT', 'RC_FILES_DIR', 'DOCKER_CONFIG'):
             self.environment.pop(name, None)
         self.executable('docker', '''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['CALL_LOG'], 'a') as stream:
     stream.write(json.dumps({'args': sys.argv[1:], 'project': os.environ.get('COMPOSE_PROJECT_NAME')}) + '\\n')
+with open(os.environ['CALL_LOG'] + '.env', 'w') as stream:
+    json.dump({name: os.environ.get(name) for name in ('VAULT_SCOPE', 'DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK')}, stream)
 if os.environ.get('FAIL_DOCKER_COMMAND') == sys.argv[1]:
     sys.exit(23)
 if sys.argv[1] == 'ps':
@@ -146,9 +159,37 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
             arguments = self.calls()[-1]['args']
             self.assertEqual(arguments[-4:], ['fixture:image', 'bash', '-c', 'echo two words'])
             self.assertIn('--device=/dev/kfd', arguments)
-            self.assertIn(str(self.root / 'home') + ':/zyin', arguments)
+            self.assertIn(str(self.root / 'home/.local/share/devenv/work') + ':/zyin', arguments)
+            self.assertNotIn(str(self.root / 'home') + ':/zyin', arguments)
             names.append(arguments[arguments.index('--name') + 1])
         self.assertNotEqual(names[0], names[1])
+
+    def test_build_and_run_use_only_the_selected_vault_and_docker_login(self) -> None:
+        for scope in ('work', 'homelab'):
+            self.environment['VAULT_SCOPE'] = scope
+            self.environment['SSH_AUTH_SOCK'] = '/host/agent'
+            for command in ('dbuild', 'drun'):
+                result = self.invoke(command, 'triton')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                env = json.loads(Path(str(self.log) + '.env').read_text())
+                root = self.root / 'home/.local/share/devenv' / scope
+                self.assertEqual(env['DEVENV_ROLE_ROOT'], str(root))
+                self.assertEqual(env['DEVENV_VAULT_DIR'], str(self.root / 'home' / f'vault-{scope}'))
+                self.assertEqual(env['DOCKER_CONFIG'], str(root / '.docker'))
+                self.assertIsNone(env['SSH_AUTH_SOCK'])
+
+    def test_wrong_vault_or_host_home_mount_is_rejected_before_docker(self) -> None:
+        self.environment['VAULT_DIR'] = str(self.root / 'home/vault-homelab')
+        result = self.invoke('drun', 'triton')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('scope', result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.environment.pop('VAULT_DIR')
+        self.environment['DEVENV_ROLE_ROOT'] = str(self.root / 'home')
+        result = self.invoke('drun', 'triton')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('home', result.stderr)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == '__main__':

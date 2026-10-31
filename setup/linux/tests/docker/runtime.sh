@@ -39,25 +39,27 @@ test -f "$HOME/.tmux/plugins/tpm/tpm"
 test ! -e "$HOME/.ssh/id_rsa"
 test ! -e "$HOME/.ssh/id_ed25519"
 test ! -e "$HOME/.codex/auth.json"
-test ! -e "$HOME/vault"
+test ! -e "$HOME/vault-work"
 test "$(readlink -f "$(getent passwd root | cut -d: -f7)")" = "$(readlink -f "$(command -v zsh)")"
 echo 'PASS installed tools, dotfiles, editor plugins, login shell, and absence of baked-in credentials'
 
 # All credentials below are generated test data. Network should be disabled by
 # the caller, so activation can only use the fixture storage.
-mkdir -p /zyin/.ssh /zyin/.codex /zyin/vault
+mkdir -p /zyin/.ssh /zyin/.codex /zyin/vault-work
+printf 'work\n' > /zyin/.vault-scope
+printf 'work\n' > /zyin/vault-work/.vault-scope
+export VAULT_SCOPE=work
 ssh-keygen -q -t ed25519 -N '' -f /zyin/.ssh/id_ed25519
 printf '{"test_only":true}\n' > /zyin/.codex/auth.json
-printf 'dummy-claude\n' > /zyin/vault/claude_key.txt
-printf 'test:dummy-docker' | base64 > /zyin/vault/docker_mkmhub_auth.txt
-printf 'dummy-github-personal\n' > /zyin/vault/gh_token_jerryyin.txt
-printf 'dummy-github-work\n' > /zyin/vault/gh_token_amdeng.txt
-printf 'dummy-artifactory\n' > /zyin/vault/atlartifactory_token.txt
+printf 'dummy-claude\n' > /zyin/vault-work/claude_key.txt
+printf 'test:dummy-docker' | base64 > /zyin/vault-work/docker_mkmhub_auth.txt
+printf 'dummy-github-work\n' > /zyin/vault-work/gh_token_amdeng.txt
+printf 'dummy-artifactory\n' > /zyin/vault-work/atlartifactory_token.txt
 printf '{"projects":{"fixture":{}},"machineID":"fixture"}\n' > "$HOME/.claude.json"
 sha256sum "$HOME/.claude.json" > /tmp/claude-state-checksum
 export DEVENV_PERSISTENT_ROOT=/zyin
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
-test "$(readlink "$HOME/vault")" = /zyin/vault
+test "$(readlink "$HOME/vault-work")" = /zyin/vault-work
 test ! -L "$HOME/.codex"
 test "$(readlink "$HOME/.codex/auth.json")" = /zyin/.codex/auth.json
 cmp "$HOME/.ssh/id_ed25519" /zyin/.ssh/id_ed25519
@@ -67,10 +69,10 @@ grep -q dummy-claude "$HOME/.claude/settings.json"
 test ! -L "$HOME/.claude/settings.json"
 test "$(stat -c %a "$HOME/.claude/settings.json")" = 600
 sha256sum --check /tmp/claude-state-checksum
-grep -q dummy-github-personal "$HOME/.config/gh/hosts.yml"
+! grep -q dummy-github-personal "$HOME/.config/gh/hosts.yml"
 grep -q dummy-github-work "$HOME/.config/gh/hosts.yml"
 grep -q dummy-artifactory "$HOME/.netrc"
-cmp "$HOME/.gist" /zyin/vault/gh_token_jerryyin.txt
+test ! -e "$HOME/.gist"
 python3 - <<'PY'
 import base64, json
 from pathlib import Path
@@ -80,19 +82,19 @@ PY
 echo 'PASS real activation: SSH, vault, OAuth symlinks, and all credential templates'
 
 sha256sum "$HOME/.claude.json" "$HOME/.claude/settings.json" "$HOME/.config/gh/hosts.yml" "$HOME/.netrc" \
-    "$HOME/.gist" "$HOME/.docker/config.json" > /tmp/credential-checksums
+    "$HOME/.docker/config.json" > /tmp/credential-checksums
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
 sha256sum --check /tmp/credential-checksums
 echo 'PASS repeated canonical activation preserves configuration'
 
 # Rotation and explicit opt-out must also work through the relocated helpers.
-printf 'dummy-github-rotated\n' > /zyin/vault/gh_token_jerryyin.txt
-printf 'dummy-claude-rotated\n' > /zyin/vault/claude_key.txt
+printf 'dummy-github-rotated\n' > /zyin/vault-work/gh_token_amdeng.txt
+printf 'dummy-claude-rotated\n' > /zyin/vault-work/claude_key.txt
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
 grep -q dummy-github-rotated "$HOME/.config/gh/hosts.yml"
 grep -q dummy-claude-rotated "$HOME/.claude/settings.json"
 sha256sum --check /tmp/claude-state-checksum
-cmp "$HOME/.gist" /zyin/vault/gh_token_jerryyin.txt
+test ! -e "$HOME/.gist"
 python3 "$HOME/rc_files/.setup" credentials --package codex
 echo 'PASS credential rotation and persistence opt-out'
 

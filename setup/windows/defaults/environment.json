@@ -1,7 +1,10 @@
 {
     "notesRepository": "https://github.com/jerryyin/notes.git",
     "rcRepository": "https://github.com/jerryyin/rc_files.git",
-    "vaultRepository": "https://github.com/jerryyin/vault.git",
+    "vaultRepositories": {
+        "homelab": "https://github.com/jerryyin/vault-homelab.git",
+        "work": "https://github.com/jerryyin/vault-work.git"
+    },
     "wsl": {
         "distribution": "Ubuntu"
     },

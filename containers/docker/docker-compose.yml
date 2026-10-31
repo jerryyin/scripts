@@ -9,9 +9,15 @@ x-base-service: &base-service
     - bash
     - -c
     - |
+      if ! test -f rc_files/.setup/vault.py || ! grep -q -- '--vault-scope' scripts/setup/linux/credentials/activate.sh; then
+        echo 'Rebuild this image with dbuild before using separated vaults.' >&2
+        exit 1
+      fi
       DEVENV_PERSISTENT_ROOT=/zyin bash scripts/setup/linux/credentials/activate.sh && exec /bin/zsh
   tty: true
   stdin_open: true
+  environment: &role-environment
+    VAULT_SCOPE: ${VAULT_SCOPE:-work}
   network_mode: host
   devices:
     - /dev/kfd
@@ -25,8 +31,8 @@ x-base-service: &base-service
   tmpfs:
     - "${HOME}/.vscode-server:exec"
   volumes:
-    - /data:/data
-    - $HOME:/zyin
+    - ${DEVENV_ROLE_ROOT:?Use dcompose, dbuild or drun}:/zyin
+    - ${DEVENV_VAULT_DIR:?Select a role vault}:/zyin/vault-${VAULT_SCOPE:-work}:ro
     # tools_volume:/usr/local intentionally omitted — testing whether
     # any service actually relies on tools-setup's /usr/local overlay.
     # If you need ctags or other packelf'd tools, re-add the mount AND
@@ -113,8 +119,8 @@ services:
     #
     # Note: Must duplicate base volumes since YAML merge replaces arrays entirely
     volumes:
-      - /data:/data
-      - $HOME:/zyin
+      - ${DEVENV_ROLE_ROOT:?Use dcompose, dbuild or drun}:/zyin
+      - ${DEVENV_VAULT_DIR:?Select a role vault}:/zyin/vault-${VAULT_SCOPE:-work}:ro
       - ${AM_FFM_DIR:-$HOME/rocdtif-7.13-am+ffmlite-mi400-r6.06}:/am-ffm
 
   # Real gfx1250 hardware (B0 / MI450 beta machine), NOT the simulator.
@@ -130,9 +136,10 @@ services:
     <<: *base-service
     shm_size: "16g"
     environment:
-      - HSA_ENABLE_SDMA=1
-      - HSA_USE_SVM=1
-      - HSA_XNACK=1
+      <<: *role-environment
+      HSA_ENABLE_SDMA: "1"
+      HSA_USE_SVM: "1"
+      HSA_XNACK: "1"
     build:
       context: .
       dockerfile: base.dockerfile

@@ -29,4 +29,4 @@ if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
         *) echo 'Select an existing project: dcompose -p <project> <command>, or set COMPOSE_PROJECT_NAME.' >&2; exit 2 ;;
     esac
 fi
-exec docker compose -f "$compose_file" "$@"
+exec python3 "$command_dir/../session.py" compose -f "$compose_file" "$@"

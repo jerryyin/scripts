@@ -16,7 +16,7 @@ Dockerfiles and Compose services live here. Commands in `bin/` are owned by this
 - `drun SERVICE` starts it in the background without building the image.
 - `dcompose ARGS...` forwards arguments to Docker Compose.
 - `dockrun [options...] IMAGE [command...]` runs an image directly with GPU access,
-  host networking, and the existing `/data` and home mounts. It retains the old
+  host networking, and the same selected role storage as Compose. It retains the old
   alias's `sudo` invocation and gives each launch a distinct name. It does not use Compose.
 
 Linux bootstrap links these commands into `~/.local/bin`, which the shell includes on `PATH`. They also work directly from `containers/docker/bin/`, without loading a shell profile. The Compose commands resolve their installed links to find this checkout's model; `COMPOSE_FILE` selects another file and relative overrides are interpreted from the caller's directory.
@@ -40,6 +40,14 @@ and [Docker regression tests](../../setup/linux/tests/docker/README.md) for buil
 and startup verification.
 
 Personal Docker configuration remains in `rc_files`; Docker command implementations and Compose locations stay here. Build contexts are this directory. Reload Zsh after updating an existing session to retire its old function definitions; newly opened shells discover the installed commands through `PATH`.
+
+## Credentials
+
+See [work and homelab credentials](../../setup/credentials.md). `dbuild`, `drun`, `dcompose` and `dockrun` default to `VAULT_SCOPE=work`; prefix a command with `VAULT_SCOPE=homelab` to select home credentials. Clone the corresponding private repository to `~/vault-work` or `~/vault-homelab`. `VAULT_DIR` can select another path with the matching `.vault-scope` marker.
+
+Persistent workspace and logins live in `~/.local/share/devenv/<scope>`, mounted at `/zyin`. `DEVENV_ROLE_ROOT` selects a different new directory. The old host-home and `/data` mounts are removed. Copy only selected project files and approved SSH keys into this role directory; never copy the entire host home. The selected vault is a separate read-only mount. Docker registry credentials use that role directory's `.docker`, so builds do not inherit the host's mixed Docker login file. No vault is available to image build steps.
+
+Rebuild older images with `dbuild` after updating scripts and rc_files. Their old credential startup is rejected. Stop and recreate existing containers to replace their mounts; changing these files cannot remove mounts from an already running container.
 
 ## Checks
 

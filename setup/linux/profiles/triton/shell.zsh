@@ -4,8 +4,8 @@
     export PYTHONPATH="$root/python${PYTHONPATH:+:$PYTHONPATH}"
   fi
   if [[ -z $TRITON_MI450_LLVM_DOWNLOAD_GITHUB_TOKEN \
-      && -r $HOME/vault/gh_token_amdeng.txt ]]; then
-    local token="$(<"$HOME/vault/gh_token_amdeng.txt")"
+      && -r $HOME/vault-work/gh_token_amdeng.txt ]]; then
+    local token="$(<"$HOME/vault-work/gh_token_amdeng.txt")"
     export TRITON_MI450_LLVM_DOWNLOAD_GITHUB_TOKEN="${token//[[:space:]]/}"
   fi
   [[ -z $_TRITON_MODEL_PKG ]] || return 0

@@ -36,8 +36,9 @@ class BootstrapTests(Fixture, unittest.TestCase):
         entry.write_text((ROOT / 'setup/linux/credentials/activate.sh').read_text())
         (self.home / '.ssh').mkdir()
         (self.home / '.ssh/id_ed25519').touch()
-        (self.home / 'vault').mkdir()
-        (self.home / 'vault/fixture').touch()
+        (self.home / 'vault-work').mkdir()
+        (self.home / 'vault-work/.vault-scope').write_text('work\n')
+        (self.home / '.ssh/private.conf').symlink_to(self.home / 'vault-work/ssh/config')
         setup = self.home / 'rc_files/.setup/__main__.py'
         setup.parent.mkdir(parents=True)
         setup.touch()
@@ -51,7 +52,7 @@ class BootstrapTests(Fixture, unittest.TestCase):
                 self.assertEqual(result.returncode, 23 if fail else 0, result.stderr)
                 calls = self.calls()
                 self.assertEqual(calls[0][2], str(self.home / 'rc_files/.setup') +
-                                 ' credentials --vault ' + str(self.home / 'vault'))
+                                 ' credentials --vault ' + str(self.home / 'vault-work') + ' --vault-scope work --exclude-package ssh')
                 self.assertEqual(len(calls), 1)
 
     def test_project_profiles_leave_the_shared_editor_language_server_to_rc_files(self):

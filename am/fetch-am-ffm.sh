@@ -12,7 +12,7 @@
 # Usage:
 #   fetch-am-ffm.sh [version]        # e.g. fetch-am-ffm.sh 7.13-am+ffmlite-mi400-r6.06
 #
-# Auth: reads the JFrog identity token from ~/vault/atlartifactory_token.txt
+# Auth: reads the JFrog identity token from ~/vault-work/atlartifactory_token.txt
 # and sends it as a bearer token.  Basic auth through ~/.netrc is rejected by
 # the current Artifactory deployment even when it carries the same token.
 set -euo pipefail
@@ -26,7 +26,7 @@ URL="${ARTIFACTORY_BASE}/${TARBALL_NAME}"
 DEST_DIR="${AM_FFM_DIR:-$HOME/rocdtif-${VERSION}}"
 CACHE_DIR="$HOME/.cache/am-ffm"
 TARBALL="$CACHE_DIR/${TARBALL_NAME}"
-TOKEN_FILE="${ARTIFACTORY_KEY_FILE:-$HOME/vault/atlartifactory_token.txt}"
+TOKEN_FILE="${ARTIFACTORY_KEY_FILE:-$HOME/vault-work/atlartifactory_token.txt}"
 
 if [ ! -s "$TOKEN_FILE" ]; then
     echo "❌ Artifactory token is missing or empty: $TOKEN_FILE" >&2
