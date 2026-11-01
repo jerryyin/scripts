@@ -20,7 +20,7 @@ pwsh -NoProfile -File .\tests\Test-SshSession.ps1
 
 `Test-Devenv.ps1` checks bootstrap behavior and simulated WSL outcomes without installing machine packages. Add `-Network` to exercise current upstream plugin and theme downloads. `Test-Credentials.ps1` uses fake credentials and key fixtures; it does not sign into real accounts.
 
-`Test-MachineSetup.ps1` substitutes the OS process-launch boundary to check one grouped elevation, zero elevation for unchanged or already-elevated callers, cancellation, failure propagation, the credential boundary and request cleanup. It also checks machine Python and launcher registration. Real UAC and first-time package installations still require the disposable VM acceptance below.
+`Test-MachineSetup.ps1` substitutes the OS process-launch boundary to check one grouped elevation, zero elevation for unchanged or already-elevated callers, cancellation, failure propagation, the credential boundary and request cleanup. It also checks machine Python and launcher registration, and the user-copy and settings removal that must precede PowerToys' machine installer. Real UAC and first-time package installations still require the disposable VM acceptance below.
 
 `Test-UserPackages.ps1` exercises bootstrap duplicate cleanup through the real `rc_files` helper with simulated WinGet and registry results. It verifies that missing system replacements preserve user apps and that Python's installer registration cannot be mistaken for a user interpreter. In `rc_files`, `.setup/tests/Test-UserDuplicates.ps1` covers current-user-only removal, reruns, failure propagation, npm prefixes and Store removal. Package installers and uninstallers are never run by these tests.
 

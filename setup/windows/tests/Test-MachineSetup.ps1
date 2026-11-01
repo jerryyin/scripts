@@ -30,6 +30,24 @@ try {
     try { Get-MissingPackages @($tool) } catch { $failed=$_.Exception.Message -like '*inventory failed*' }
     if (!$failed) { throw 'An inventory error must not be reported as a missing package.' }
     if (@((& $module { ,$script:PackageScopeCalls }) | Where-Object { $_ -notcontains '--scope' -or $_ -notcontains 'machine' }).Count) { throw 'All inventory and installation calls must explicitly select machine scope.' }
+    $blockedData = Join-Path $env:LOCALAPPDATA 'Fixture/Settings'
+    $blocked = @{id='Fixture.Blocked'; scope='machine'; removeUserCopyFirst=$true; userDataPaths=@('%LOCALAPPDATA%/Fixture/Settings')}
+    [void][IO.Directory]::CreateDirectory($blockedData)
+    & $module { $script:PackageScopeCalls=@(); foreach ($code in @(0, 0, -1978335212)) { $script:PackageScopeResults.Enqueue($code) } }
+    Remove-BlockingUserPackages @($tool, $blocked)
+    $calls = & $module { ,$script:PackageScopeCalls }
+    if ($calls.Count -ne 3 -or $calls[1][0] -ne 'uninstall' -or @($calls | Where-Object { $_ -notcontains 'user' }).Count) { throw 'A blocking user copy must be uninstalled in user scope before machine installation.' }
+    if (Test-Path -LiteralPath $blockedData) { throw 'Settings of a blocking user copy must be removed.' }
+    [void][IO.Directory]::CreateDirectory($blockedData)
+    & $module { $script:PackageScopeCalls=@(); $script:PackageScopeResults.Enqueue(-1978335212) }
+    Remove-BlockingUserPackages @($blocked)
+    if ((& $module { $script:PackageScopeCalls.Count }) -ne 1 -or (Test-Path -LiteralPath $blockedData)) { throw 'Leftover settings must be removed after the user copy is already gone.' }
+    $outside = Join-Path $fixture 'outside'
+    [void][IO.Directory]::CreateDirectory($outside)
+    $blocked.userDataPaths=@('%LOCALAPPDATA%/../outside')
+    $failed=$false
+    try { Remove-BlockingUserPackages @($blocked) } catch { $failed=$_.Exception.Message -like '*outside LOCALAPPDATA*' }
+    if (!$failed -or !(Test-Path -LiteralPath $outside) -or (& $module { $script:PackageScopeCalls.Count }) -ne 1) { throw 'User data removal must stay inside LOCALAPPDATA and stop before uninstalling.' }
     & $module {
         $script:PythonKey=$null
         $script:Launcher=$false
@@ -147,6 +165,8 @@ try {
     if ((Ensure-Wsl $manifest.wsl.distribution) -ne 'Existing' -or (& $module { $script:WslInventoryCalls }) -ne 1) { throw 'Existing default Ubuntu was not reused' }
     $python = @($manifest.packages | Where-Object id -eq 'Python.Python.3.14')[0]
     if ($python.scope -ne 'machine' -or $python.installerArguments -notmatch 'InstallAllUsers=1 InstallLauncherAllUsers=1') { throw 'Python and its launcher must both use the grouped machine installation' }
+    $powerToys = @($manifest.packages | Where-Object id -eq 'Microsoft.PowerToys')[0]
+    if (!$powerToys.removeUserCopyFirst -or @($powerToys.userDataPaths) -notcontains '%LOCALAPPDATA%/Microsoft/PowerToys') { throw 'PowerToys must clear a per-user copy and its settings before its machine installer runs' }
     $fresh = Join-Path $fixture 'fresh machine'
     [void][IO.Directory]::CreateDirectory($fresh)
     Copy-Item -LiteralPath (Join-Path $root 'machine.ps1') -Destination (Join-Path $fresh 'machine.ps1')
@@ -190,7 +210,7 @@ function Repair-SshLinks($RcRoot, $Arguments, [switch]$ExistingOnly) {
     if (!(Test-Path -LiteralPath (Join-Path $fresh 'ssh-shell-called'))) { throw 'The grouped machine helper did not configure the SSH shell.' }
     $steps = @(Get-Content -LiteralPath (Join-Path $fresh 'steps')) -join ';'
     if ($steps -ne 'repair-links;prerequisites --update;repair-links;--config-only --backup fixture') { throw "Machine setup must restore existing links, prepare tools, repair new aliases and deploy trusted configuration in order: $steps" }
-    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, quoted paths, account identity, failures and cleanup.'
+    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, blocking user copies, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal
     $resolved = [IO.Path]::GetFullPath($fixture)

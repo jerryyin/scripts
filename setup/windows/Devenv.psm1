@@ -199,6 +199,31 @@ function Remove-UserPackageDuplicates([object[]]$Packages, [string]$RcRoot) {
     }
 }
 
+# Pass only packages missing in machine scope: some machine installers refuse to run beside a user copy.
+function Remove-BlockingUserPackages([object[]]$Packages) {
+    $dataRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\') + '\'
+    foreach ($package in $Packages) {
+        if (!$package.Contains('removeUserCopyFirst') -or !$package.removeUserCopyFirst) { continue }
+        $patterns = if ($package.Contains('userDataPaths')) { $package.userDataPaths } else { @() }
+        $paths = @($patterns | ForEach-Object { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) })
+        foreach ($path in $paths) {
+            if (!$path.StartsWith($dataRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to remove user data outside LOCALAPPDATA: $path" }
+        }
+        & winget list --id $package.id --exact --scope user --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "REMOVE $($package.id) (user copy blocks machine installation)"
+            Invoke-Native winget @('uninstall', '--id', $package.id, '--exact', '--scope', 'user', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity')
+            & winget list --id $package.id --exact --scope user --source winget --accept-source-agreements --disable-interactivity | Out-Null
+            if ($LASTEXITCODE -ne -1978335212) { throw "Could not confirm removal of user package $($package.id) (exit $LASTEXITCODE)." }
+        } elseif ($LASTEXITCODE -ne -1978335212) { throw "User package inventory failed for $($package.id) (exit $LASTEXITCODE)." }
+        foreach ($path in $paths) {
+            if (!(Test-Path -LiteralPath $path)) { continue }
+            Remove-Item -LiteralPath $path -Recurse -Force
+            Write-Host "REMOVED $path (user settings of $($package.id))"
+        }
+    }
+}
+
 function Invoke-MachineSetup($Plan) {
     if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !($Plan.Contains('Fonts') -and $Plan.Fonts) -and !$Plan.SshAgent -and !($Plan.Contains('SshShell') -and $Plan.SshShell) -and !($Plan.Contains('SshLinks') -and $Plan.SshLinks)) { return $Plan.WslState }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'

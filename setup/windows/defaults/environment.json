@@ -24,7 +24,9 @@
         },
         {
             "id": "Microsoft.PowerToys",
-            "scope": "machine"
+            "scope": "machine",
+            "removeUserCopyFirst": true,
+            "userDataPaths": ["%LOCALAPPDATA%/Microsoft/PowerToys"]
         },
         {
             "id": "KDE.KDEConnect",

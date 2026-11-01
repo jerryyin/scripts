@@ -177,6 +177,7 @@ Update-ProcessPath
 $packages = if ($SkipPackages) { @() } else { @(Get-MissingPackages $manifest.packages) }
 # Git and Python are installed before rc_files is inspected in the machine phase.
 foreach ($package in $packages | Where-Object { $_.Contains('scope') -and $_.scope -eq 'user' }) { Install-WinGetPackage $package }
+Remove-BlockingUserPackages $packages
 if (Get-Command git -ErrorAction SilentlyContinue) { Ensure-Checkout $RcPath $manifest.rcRepository }
 $rcMachine = !$SkipPackages -and (!(Test-Path -LiteralPath (Join-Path $RcPath '.git')) -or @($packages | Where-Object id -like 'Python.Python.*').Count -gt 0)
 if (!$SkipPackages -and !$rcMachine) {
