@@ -39,6 +39,7 @@ try {
         }
         Invoke-RcSetup $request.RcPath $request.LinkArguments
     }
+    Repair-WinGetPackageAccess
     if ($request.Contains('Fonts') -and $request.Fonts) {
         & (Join-Path $request.RcPath 'terminal/.setup/font.ps1')
         if (!$?) { throw 'Machine font installation failed' }

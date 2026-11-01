@@ -48,6 +48,20 @@ try {
     $failed=$false
     try { Remove-BlockingUserPackages @($blocked) } catch { $failed=$_.Exception.Message -like '*outside LOCALAPPDATA*' }
     if (!$failed -or !(Test-Path -LiteralPath $outside) -or (& $module { $script:PackageScopeCalls.Count }) -ne 1) { throw 'User data removal must stay inside LOCALAPPDATA and stop before uninstalling.' }
+    $savedProgramFiles = $env:ProgramFiles
+    try {
+        $env:ProgramFiles = Join-Path $fixture 'Program Files'
+        & $module {
+            $script:NativeCalls=@()
+            function script:Invoke-Native { param($Program, $Arguments, [switch]$Capture) $script:NativeCalls += ,(@($Program) + $Arguments) }
+        }
+        Repair-WinGetPackageAccess
+        if ((& $module { $script:NativeCalls.Count }) -ne 0) { throw 'A machine without portable WinGet packages needs no access repair.' }
+        [void][IO.Directory]::CreateDirectory((Join-Path $env:ProgramFiles 'WinGet/Packages'))
+        Repair-WinGetPackageAccess
+        $call = & $module { ,$script:NativeCalls[0] }
+        if ($call[0] -ne 'icacls' -or $call[1] -ne (Join-Path $env:ProgramFiles 'WinGet\Packages') -or $call -notcontains '/reset' -or $call -notcontains '/T') { throw 'Portable WinGet packages must be reset to inherited Program Files access.' }
+    } finally { $env:ProgramFiles = $savedProgramFiles }
     & $module {
         $script:PythonKey=$null
         $script:Launcher=$false
@@ -190,6 +204,7 @@ function Ensure-Checkout($Path, $Repository) {
     [void][IO.Directory]::CreateDirectory((Join-Path $Path '.git'))
 }
 function Invoke-RcSetup($Path, $Arguments) { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'steps') -Value ($Arguments -join ' ') }
+function Repair-WinGetPackageAccess { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'steps') -Value 'package-access' }
 function Invoke-Native($Command, $Arguments) { }
 function Save-Json($Path, $Value, $Backup) { [IO.File]::WriteAllText($Path, (ConvertTo-Json $Value)) }
 '@ ''
@@ -209,8 +224,8 @@ function Repair-SshLinks($RcRoot, $Arguments, [switch]$ExistingOnly) {
     if ($LASTEXITCODE -ne 0 -or (Read-Json $freshResult).WslState -ne 'Existing') { throw 'The machine phase must refresh PATH after installing Git and before cloning rc_files.' }
     if (!(Test-Path -LiteralPath (Join-Path $fresh 'ssh-shell-called'))) { throw 'The grouped machine helper did not configure the SSH shell.' }
     $steps = @(Get-Content -LiteralPath (Join-Path $fresh 'steps')) -join ';'
-    if ($steps -ne 'repair-links;prerequisites --update;repair-links;--config-only --backup fixture') { throw "Machine setup must restore existing links, prepare tools, repair new aliases and deploy trusted configuration in order: $steps" }
-    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, blocking user copies, quoted paths, account identity, failures and cleanup.'
+    if ($steps -ne 'repair-links;prerequisites --update;repair-links;--config-only --backup fixture;package-access') { throw "Machine setup must restore existing links, prepare tools, repair new aliases, deploy trusted configuration and then open installed packages to every account in order: $steps" }
+    Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, blocking user copies, shared package access, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal
     $resolved = [IO.Path]::GetFullPath($fixture)

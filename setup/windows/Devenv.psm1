@@ -224,6 +224,14 @@ function Remove-BlockingUserPackages([object[]]$Packages) {
     }
 }
 
+# Portable packages extracted by one administrator can keep an ACL that hides them from other accounts and
+# unelevated sessions, which then see their WinGet command links as broken.
+function Repair-WinGetPackageAccess {
+    $packages = Join-Path $env:ProgramFiles 'WinGet\Packages'
+    if (!(Test-Path -LiteralPath $packages)) { return }
+    Invoke-Native icacls @($packages, '/reset', '/T', '/C', '/Q')
+}
+
 function Invoke-MachineSetup($Plan) {
     if (!$Plan.DeveloperMode -and !$Plan.Distribution -and !$Plan.Packages.Count -and !($Plan.Contains('RcMachine') -and $Plan.RcMachine) -and !($Plan.Contains('Fonts') -and $Plan.Fonts) -and !$Plan.SshAgent -and !($Plan.Contains('SshShell') -and $Plan.SshShell) -and !($Plan.Contains('SshLinks') -and $Plan.SshLinks)) { return $Plan.WslState }
     $stateRoot = Join-Path $env:LOCALAPPDATA 'PersonalDevenv'
