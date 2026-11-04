@@ -292,10 +292,9 @@ function Save-Json([string]$Path, $Value, [string]$BackupRoot) {
     Save-Text $Path ((ConvertTo-Json -InputObject $Value -Depth 100) + "`n") $BackupRoot
 }
 
-function Get-RcMissingPackages([string]$RcRoot, [string]$Scope = '', [switch]$Update) {
+function Get-RcMissingPackages([string]$RcRoot, [string]$Scope = '') {
     $arguments = @('prerequisites', '--json')
     if ($Scope) { $arguments += @('--scope', $Scope) }
-    if ($Update) { $arguments += '--update' }
     $priorGit = $env:GIT_CONFIG_GLOBAL
     try {
         # Inventory must work before an unreadable .gitconfig link is repaired.

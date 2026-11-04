@@ -60,7 +60,7 @@ if (!$Apply -and !$Check) {
     if (!$SkipCredentials) { Write-Output 'PLAN: SSH keys, vault over SSH, then GitHub CLI and Docker credentials from the vault via priv.ps1 before cloning private notes' }
     if (!$SkipWsl) { Write-Output "PLAN: install WSL and $($manifest.wsl.distribution) if missing; initialize Linux separately with scripts/setup/linux/bootstrap.sh" }
     Write-Output "PLAN: notes at $NotesPath; install or refresh the Obsidian plugins and theme chosen in the vault"
-    Write-Output 'PLAN: update existing scripts, rc_files, vault and notes checkouts (local edits are stashed and restored); replace differing settings files after backing them up; refresh plugins and the Codex ACP adapter'
+    Write-Output 'PLAN: update existing scripts, rc_files, vault and notes checkouts (local edits are stashed and restored); replace differing settings files after backing them up; refresh plugins'
     Write-Output 'Run with -Apply to provision, or -Check for a read-only inventory.'
     return
 }
@@ -181,7 +181,7 @@ Remove-BlockingUserPackages $packages
 if (Get-Command git -ErrorAction SilentlyContinue) { Ensure-Checkout $RcPath $manifest.rcRepository }
 $rcMachine = !$SkipPackages -and (!(Test-Path -LiteralPath (Join-Path $RcPath '.git')) -or @($packages | Where-Object id -like 'Python.Python.*').Count -gt 0)
 if (!$SkipPackages -and !$rcMachine) {
-    $rcMachine = @(Get-RcMissingPackages $RcPath 'machine' -Update).Count -gt 0
+    $rcMachine = @(Get-RcMissingPackages $RcPath 'machine').Count -gt 0
 }
 $fonts = !$SkipFonts -and (!(Test-Path -LiteralPath (Join-Path $RcPath 'terminal/.setup/font.ps1')) -or !(& (Join-Path $RcPath 'terminal/.setup/font.ps1') -Check))
 $wslState = if ($SkipWsl) { 'Skipped' } elseif (@(Get-WslDistributions).Count -gt 0) { 'Existing' } else { 'PendingInitialization' }

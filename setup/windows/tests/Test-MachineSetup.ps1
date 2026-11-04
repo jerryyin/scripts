@@ -224,7 +224,7 @@ function Repair-SshLinks($RcRoot, $Arguments, [switch]$ExistingOnly) {
     if ($LASTEXITCODE -ne 0 -or (Read-Json $freshResult).WslState -ne 'Existing') { throw 'The machine phase must refresh PATH after installing Git and before cloning rc_files.' }
     if (!(Test-Path -LiteralPath (Join-Path $fresh 'ssh-shell-called'))) { throw 'The grouped machine helper did not configure the SSH shell.' }
     $steps = @(Get-Content -LiteralPath (Join-Path $fresh 'steps')) -join ';'
-    if ($steps -ne 'repair-links;prerequisites --update;repair-links;--config-only --backup fixture;package-access') { throw "Machine setup must restore existing links, prepare tools, repair new aliases, deploy trusted configuration and then open installed packages to every account in order: $steps" }
+    if ($steps -ne 'repair-links;prerequisites;repair-links;--config-only --backup fixture;package-access') { throw "Machine setup must restore existing links, prepare tools, repair new aliases, deploy trusted configuration and then open installed packages to every account in order: $steps" }
     Write-Output 'PASS: grouped/unchanged/elevated/cancelled UAC, credential boundary, machine Python launcher, blocking user copies, shared package access, quoted paths, account identity, failures and cleanup.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal

@@ -26,14 +26,14 @@ try {
             Ensure-Checkout $request.RcPath $request.RcRepository
             Invoke-Native icacls @($request.RcPath, '/setowner', ('*' + $request.UserSid), '/T', '/Q')
         }
-        if (!$sshLinks -and $request.RcMachine) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine', '--update') }
+        if (!$sshLinks -and $request.RcMachine) { Invoke-RcSetup $request.RcPath @('prerequisites', '--scope', 'machine') }
     }
     if ($sshLinks) {
         Import-Module (Join-Path $PSScriptRoot 'SshSession.psm1') -Force -DisableNameChecking
         # Restore existing links before tools use them, then cover aliases made by installers.
         Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
         if ($request.InstallPrerequisites) {
-            Invoke-RcSetup $request.RcPath @('prerequisites', '--update')
+            Invoke-RcSetup $request.RcPath @('prerequisites')
             Update-ProcessPath
             Repair-SshLinks $request.RcPath $request.LinkPlanArguments -ExistingOnly
         }
