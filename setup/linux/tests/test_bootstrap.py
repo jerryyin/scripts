@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import shutil
 import unittest
 
 from support import Fixture, ROOT, executable, recorder
@@ -30,6 +31,43 @@ class BootstrapTests(Fixture, unittest.TestCase):
             stamps[command.name] = target.lstat().st_mtime_ns
         self.run_shell(installer, env=environment)
         self.assertEqual({name: (self.home / '.local/bin' / name).lstat().st_mtime_ns for name in stamps}, stamps)
+
+    def test_missing_compose_plugin_is_installed_for_the_docker_engine_package(self):
+        source = (ROOT / 'setup/linux/bootstrap.sh').read_text()
+        script = self.temp / 'bootstrap-tail.sh'
+        script.write_text('set -e\nSCRIPT_DIR="$FIXTURE_LINUX"\nwait_for_dpkg_lock() { :; }\n' +
+                          source[source.index('# rc_files owns application dependencies'):] +
+                          '\nprintf "continued|unused|\\n" >> "$CALL_LOG"\n')
+        privileged = self.temp / 'privileged'
+        recorder(privileged / 'sudo', 'sudo')
+        recorder(privileged / 'python3', 'rc_files')
+        engine = self.temp / 'engine'
+        executable(engine / 'docker', '[[ "$1 $2" != "compose version" ]] || exit "${COMPOSE_RESULT:-1}"')
+        executable(engine / 'dpkg-query', '[[ "${!#}" == "$ENGINE_PACKAGE" ]]\nprintf "install ok installed"')
+        minimal = self.temp / 'minimal'
+        minimal.mkdir()
+        for name in ('bash', 'basename', 'grep'):
+            (minimal / name).symlink_to(shutil.which(name))
+        with_engine = os.pathsep.join(map(str, (engine, privileged, minimal)))
+        without_engine = os.pathsep.join(map(str, (privileged, minimal)))
+        cases = {
+            'Ubuntu engine': (with_engine, dict(ENGINE_PACKAGE='docker.io'), 'docker-compose-v2'),
+            'Docker engine': (with_engine, dict(ENGINE_PACKAGE='docker-ce'), 'docker-compose-plugin'),
+            'Compose present': (with_engine, dict(ENGINE_PACKAGE='docker.io', COMPOSE_RESULT='0'), None),
+            'no Docker': (without_engine, dict(ENGINE_PACKAGE='docker.io'), None),
+            'install fails': (with_engine, dict(ENGINE_PACKAGE='docker.io', FAIL_STEP='sudo'), 'docker-compose-v2'),
+        }
+        for name, (path, extra, package) in cases.items():
+            with self.subTest(name):
+                self.clear_log()
+                result = self.run_shell(script, check=False, env=dict(
+                    self.env, PATH=path, FIXTURE_LINUX=str(ROOT / 'setup/linux'), **extra))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                installs = [row[2] for row in self.calls() if row[0] == 'sudo']
+                expected = [f'DEBIAN_FRONTEND=noninteractive apt-get install -y {package}'] if package else []
+                self.assertEqual(installs, expected)
+                self.assertEqual(self.calls()[-1][0], 'continued')
+                self.assertEqual('Install Docker Compose' in result.stderr, 'FAIL_STEP' in extra)
 
     def test_credential_refresh_cannot_install_applications_and_propagates_failure(self):
         entry = self.repo / 'setup/linux/credentials/activate.sh'

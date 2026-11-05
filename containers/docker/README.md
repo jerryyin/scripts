@@ -19,7 +19,7 @@ Dockerfiles and Compose services live here. Commands in `bin/` are owned by this
   host networking, and the same selected role storage as Compose. It retains the old
   alias's `sudo` invocation and gives each launch a distinct name. It does not use Compose.
 
-Linux bootstrap links these commands into `~/.local/bin`, which the shell includes on `PATH`. They also work directly from `containers/docker/bin/`, without loading a shell profile. The Compose commands resolve their installed links to find this checkout's model; `COMPOSE_FILE` selects another file and relative overrides are interpreted from the caller's directory.
+Linux bootstrap links these commands into `~/.local/bin`, which the shell includes on `PATH`, and installs the Docker Compose plugin when an installed Docker engine lacks it. They also work directly from `containers/docker/bin/`, without loading a shell profile. The Compose commands resolve their installed links to find this checkout's model; `COMPOSE_FILE` selects another file and relative overrides are interpreted from the caller's directory.
 
 `drun` validates the model and service before starting anything. It prints a distinct user/service/time/process project name, or preserves an explicit `COMPOSE_PROJECT_NAME`. It never deletes the legacy tools container. Reuse that project name for later commands; `dcompose` requires a project for lifecycle operations and never invents one. Put `-p NAME` first or export `COMPOSE_PROJECT_NAME`. `build`, `config`, `ls`, and `version` can run without selecting a project.
 

@@ -98,6 +98,18 @@ sudo apt-get install -y locales && sudo locale-gen en_US.UTF-8
 # settings replace differing local files, which are kept under ~/.dotfiles-backup.
 python3 "$HOME/rc_files/.setup" --replace-existing --update
 
+# The Docker commands below need the Compose plugin, which engine packages do not include.
+# Ubuntu's docker.io pairs with docker-compose-v2; Docker's docker-ce with docker-compose-plugin.
+if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+    compose_package=docker-compose-plugin
+    if dpkg-query -W -f='${Status}' docker.io 2>/dev/null | grep -q 'ok installed'; then
+        compose_package=docker-compose-v2
+    fi
+    wait_for_dpkg_lock
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$compose_package" ||
+        echo "Install Docker Compose before using dbuild, drun or dcompose." >&2
+fi
+
 # Expose this checkout's Docker commands through the existing link installer.
 for command_file in "$SCRIPT_DIR/../../containers/docker/bin/"*; do
     python3 "$HOME/rc_files/.setup" link --source "$command_file" \
