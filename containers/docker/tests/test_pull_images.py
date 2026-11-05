@@ -21,12 +21,17 @@ class PullImagesTests(unittest.TestCase):
         self.log = self.root / 'calls'
         docker = self.root / 'docker'
         docker.write_text('''#!/usr/bin/env python3
-import json, os, sys
+import json, os, re, sys
 with open(os.environ['CALL_LOG'], 'a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
 if os.environ.get('FAIL_COMMAND') in sys.argv[1:]:
     sys.exit(23)
 if 'config' in sys.argv:
+    with open(sys.argv[sys.argv.index('-f') + 1]) as model:
+        required = re.findall(r'\\$\\{(\\w+):\\?', model.read())
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        sys.exit(f'required variable {missing[0]} is missing a value')
     print(json.dumps({'services': {'triton': {'build': {'args': {'BASE_IMAGE': 'fixture:image'}}}}}))
 ''')
         docker.chmod(0o755)
@@ -44,6 +49,15 @@ if 'config' in sys.argv:
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertIn(['pull', 'fixture:image'], calls)
         self.assertTrue(any(str(self.compose) in call for call in calls))
+
+    def test_repository_model_renders_without_run_time_mount_variables(self) -> None:
+        shutil.copy2(ROOT / 'docker-compose.yml', self.compose)
+        for name in ('DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR'):
+            self.env.pop(name, None)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertIn(['pull', 'fixture:image'], calls)
 
     def test_failures_are_nonzero(self) -> None:
         self.env['COMPOSE_FILE'] = str(self.compose)
