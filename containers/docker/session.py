@@ -8,8 +8,7 @@ import subprocess
 import sys
 
 
-def prepare() -> dict[str, str]:
-    environment = dict(os.environ)
+def role_directory(environment: dict[str, str]) -> tuple[str, Path, Path]:
     scope = environment.get('VAULT_SCOPE', 'work')
     if scope not in ('work', 'homelab'):
         raise ValueError('VAULT_SCOPE must be work or homelab')
@@ -30,6 +29,13 @@ def prepare() -> dict[str, str]:
     root.chmod(0o700)
     if not marker.exists():
         marker.write_text(scope + '\n')
+    return scope, vault, root
+
+
+def prepare() -> dict[str, str]:
+    environment = dict(os.environ)
+    scope, vault, root = role_directory(environment)
+    home = Path.home().resolve()
     environment.update(VAULT_SCOPE=scope, DEVENV_ROLE_ROOT=str(root), DEVENV_VAULT_DIR=str(vault),
                        DOCKER_CONFIG=str(root / '.docker'))
     for name in ('SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'DOCKER_AUTH_CONFIG', 'DOCKER_AUTH_FILE'):
@@ -43,9 +49,30 @@ def prepare() -> dict[str, str]:
     return environment
 
 
+def seed_keys(names: list[str]) -> None:
+    _, _, root = role_directory(dict(os.environ))
+    source, target = Path.home() / '.ssh', root / '.ssh'
+    target.mkdir(mode=0o700, exist_ok=True)
+    target.chmod(0o700)
+    for name in names:
+        for file, mode in ((name, 0o600), (name + '.pub', 0o644)):
+            content = (source / file).read_bytes()
+            # Keys imported earlier may intentionally differ from the host's.
+            try:
+                descriptor = os.open(target / file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            except FileExistsError:
+                continue
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(content)
+            os.chmod(target / file, mode)
+
+
 def main() -> None:
-    environment = prepare()
     arguments = sys.argv[1:]
+    if arguments[:1] == ['seed-ssh']:
+        seed_keys(arguments[1:])
+        return
+    environment = prepare()
     if arguments[0] == 'run':
         boundary = arguments.index('--')
         options, caller = arguments[:boundary], arguments[boundary + 1:]

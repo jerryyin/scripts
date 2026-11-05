@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -177,6 +178,28 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
                 self.assertEqual(env['DEVENV_VAULT_DIR'], str(self.root / 'home' / f'vault-{scope}'))
                 self.assertEqual(env['DOCKER_CONFIG'], str(root / '.docker'))
                 self.assertIsNone(env['SSH_AUTH_SOCK'])
+
+    def test_seeded_keys_reach_the_role_directory_without_replacing_imports(self) -> None:
+        source = self.root / 'home/.ssh'
+        source.mkdir()
+        for name in ('id_rsa', 'id_enterprise'):
+            (source / name).write_text(f'{name} private\n')
+            (source / f'{name}.pub').write_text(f'{name} public\n')
+        seed = [sys.executable, str(self.checkout / 'session.py'), 'seed-ssh', 'id_rsa', 'id_enterprise']
+        result = self.invoke(*seed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = self.root / 'home/.local/share/devenv/work/.ssh'
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+        for name, mode in (('id_rsa', 0o600), ('id_rsa.pub', 0o644),
+                           ('id_enterprise', 0o600), ('id_enterprise.pub', 0o644)):
+            self.assertEqual((target / name).read_bytes(), (source / name).read_bytes())
+            self.assertEqual(stat.S_IMODE((target / name).stat().st_mode), mode)
+        (target / 'id_rsa').write_text('imported earlier\n')
+        result = self.invoke(*seed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((target / 'id_rsa').read_text(), 'imported earlier\n')
+        result = self.invoke('drun', 'triton')
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_wrong_vault_or_host_home_mount_is_rejected_before_docker(self) -> None:
         self.environment['VAULT_DIR'] = str(self.root / 'home/vault-homelab')

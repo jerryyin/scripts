@@ -161,6 +161,33 @@ exit 97
                 if standalone:
                     self.assertFalse(entry.exists())
 
+    def test_remote_helper_seeds_container_keys_after_credentials(self):
+        target = self.repo / 'setup/linux/remote/remote-provision-host.sh'
+        shutil.copy2(ROOT / 'setup/linux/remote/remote-provision-host.sh', target)
+        (self.home / 'scripts').symlink_to(self.repo, target_is_directory=True)
+        (self.repo / '.git').mkdir()
+        ssh = self.home / '.ssh'
+        ssh.mkdir()
+        for name in ('id_rsa', 'id_enterprise'):
+            (ssh / name).write_text('not a key')
+            (ssh / f'{name}.pub').write_text('not a key')
+        binaries = self.temp / 'bin'
+        recorder(binaries / 'git', 'git')
+        recorder(binaries / 'python3', 'python3')
+        for fail in ('', 'python3'):
+            with self.subTest(fail=fail):
+                self.clear_log()
+                result = self.run_shell(target, 'id_rsa', 'id_enterprise', check=False, env=dict(
+                    self.env, NO_BASE_PULL='1', FAIL_STEP=fail,
+                    PATH=str(binaries) + os.pathsep + self.env['PATH']))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.calls()
+                self.assertEqual([row[0] for row in calls],
+                                 ['git', 'bootstrap.sh', 'credentials/activate.sh', 'python3'])
+                self.assertEqual(calls[-1][2], str(self.home / 'scripts/containers/docker/session.py') +
+                                 ' seed-ssh id_rsa id_enterprise')
+                self.assertEqual('Could not seed container SSH keys' in result.stderr, bool(fail))
+
     def test_remote_optional_prefetch_failure_reports_warning_after_setup(self):
         target = self.repo / 'setup/linux/remote/remote-provision-host.sh'
         shutil.copy2(ROOT / 'setup/linux/remote/remote-provision-host.sh', target)

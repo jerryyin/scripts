@@ -7,8 +7,8 @@
 # chmod's the seeded keypair(s), bootstrap-clones just enough of `scripts`
 # to make setup/linux/bootstrap.sh invokable (bootstrap.sh itself clones rc_files, and
 # re-clones/no-ops scripts -- see below for why we don't just let it),
-# then runs setup/linux/bootstrap.sh and credentials/activate.sh --force, and pulls the base images
-# the dev services build FROM.
+# then runs setup/linux/bootstrap.sh and credentials/activate.sh --force, copies the keypair(s)
+# into the container role directory, and pulls the base images the dev services build FROM.
 #
 # Every step here is idempotent and safe to re-run against an
 # already-provisioned host: git clone-or-pull, bootstrap.sh/credentials/activate.sh are
@@ -61,6 +61,11 @@ bash "$HOME/scripts/setup/linux/bootstrap.sh"
 
 echo "🔧 Running credentials/activate.sh --force..."
 bash "$HOME/scripts/setup/linux/credentials/activate.sh" --force || echo "⚠️  credentials/activate.sh reported an issue (continuing)"
+
+# Containers import SSH keys from their role directory, never from the host's ~/.ssh.
+echo "🔑 Seeding container SSH keys..."
+python3 "$HOME/scripts/containers/docker/session.py" seed-ssh "$@" ||
+    echo '⚠️  Could not seed container SSH keys; drun containers will start without them.' >&2
 
 if [ -n "${NO_BASE_PULL:-}" ]; then
     echo "🐳 Base-image pulls skipped (-n)"
