@@ -9,11 +9,19 @@ true.
 agent/unattended/
 ├── README.md                        # this file
 ├── heartbeat.py                     # status file where every field carries its own vintage
-└── verdict_run_correspondence.py    # is this go/no-go verdict from the LATEST check, or an old one?
+├── verdict_run_correspondence.py    # is this go/no-go verdict from the LATEST check, or an old one?
+└── measurement_record.py            # write one provenance record (record.json) per measurement
 ```
 
 ## Files
 
+- `measurement_record.py begin|sample|finish RECORD ...` — one JSON record per measurement:
+  the exact commands, each repository's commit and cleanliness before and after, the tools used
+  (path, repository commit, SHA-256), the GPUs and their process snapshots before, during and
+  after (taken with `board/gpu-wait.py --snapshot`), the server stop record, and result paths
+  with hashes. The record is written into the run's own directory and belongs to that run; this
+  helper holds no campaign details. `measurement_record.py selftest` runs without a GPU (it
+  queries amd-smi's process list when amd-smi is present).
 - `heartbeat.py` — writes a JSON status file for a long run. Import it and call `write()`,
   or run it directly for a manual write.
 

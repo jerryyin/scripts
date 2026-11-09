@@ -1,4 +1,8 @@
-# GPU library benchmarks
+# Vendor-library baselines (hipBLASLt, MIOpen)
+
+Baselines from GPU vendor libraries, run beside IREE-generated kernels for comparison. IREE's own
+benchmark scripts (`bench_sdxl_*.sh`, `iree_bench.py`) stay at the `iree/` root. Moved here from the
+repository root `bench/` on 2026-11-09.
 
 | Script | Purpose |
 | --- | --- |
@@ -12,5 +16,5 @@ These tools belong together because they prepare or run GPU library benchmarks. 
 Example conversion:
 
 ```bash
-python3 bench/gen_miopen_config.py conv_2d_bfloat16_forward_16x192x128x32_nhwc_40x1x1x32_fhwc_nhwf_1x1s_0x0p_1x1d_1g
+python3 iree/thirdparty_bench/gen_miopen_config.py conv_2d_bfloat16_forward_16x192x128x32_nhwc_40x1x1x32_fhwc_nhwf_1x1s_0x0p_1x1d_1g
 ```

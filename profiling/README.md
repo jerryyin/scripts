@@ -11,11 +11,23 @@ profiling/
 ├── att.json              # default ATT config — 1.5 GiB buffer (0x60000000)
 ├── att-probe.json        # small-buffer ATT config — 256 MiB (0x10000000)
 ├── att_analyze.py        # reduce an ATT stats CSV to per-category latency/stall/idle
-└── test_att_analyze.py   # non-GPU unit tests for the reducer (pytest)
+├── test_att_analyze.py   # non-GPU unit tests for the reducer (pytest)
+├── analyze_trace.py      # per-step GPU time from PyTorch-profiler Chrome traces or rocprofv3 CSV
+└── graph_event_smoke.py  # does a timing event recorded in CUDA-graph capture become a timed node?
 ```
 
 ## Files
 
+- `analyze_trace.py --categories MAP.json --out DIR TRACE...` — splits a decode loop into steps
+  (by graph launches, or by GPU idle gaps) and attributes each step's kernel time to categories
+  given by an ordered regex map (a project supplies its own map, for example
+  `tokenspeed/step-timing/categories.json`). Stdlib only. On ROCm 7 with PyTorch 2.14, PyTorch's
+  profiler recorded no GPU kernels for TokenSpeed (kineto thread error) and `rocprofv3`
+  kernel tracing deadlocked multi-GPU servers; check both before relying on a trace.
+- `graph_event_smoke.py OUT.json` — on one idle GPU, checks that `torch.cuda.Event(enable_timing=True,
+  external=True)` recorded during stream capture becomes a timed event-record node, on the
+  capture stream and on a forked stream, and measures the per-node overhead. Run it before
+  instrumenting a captured graph with timing events.
 - `prof.sh trace <cmd>` — kernel trace, printed as per-kernel runtime, block size, register
   and scratch usage.
 - `prof.sh att <cmd>` — ATT capture. Resolves ROCm without requiring `/opt/rocm` to exist

@@ -1,4 +1,10 @@
-# Investigation records (historical)
+# Triton study records (historical)
+
+Records of Triton studies run from this repository: plans, ledgers and session notes. Unattended
+measurement campaigns with their own orders, evidence and archives live in the separate
+`triton-investigations` repository instead; this directory holds only the scripts-side studies.
+This directory was named `triton/investigations/` until 2026-11-09; paths quoted inside these
+records still use the old name and are deliberately not rewritten (see below).
 
 These are records of work that was done: plans, ledgers, and session notes. Many of them
 quote the exact command that produced a result, in the past tense.

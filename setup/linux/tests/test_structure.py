@@ -38,11 +38,14 @@ class StructureTests(unittest.TestCase):
         self.assertFalse((ROOT / 'gdb/print_lanes.py').exists())
         self.assertFalse((ROOT / 'kubernetes').exists())
         self.assertTrue((ROOT / 'containers/kubernetes').is_dir())
-        for name in ('am', 'profiling', 'board', 'tools', 'bench', 'numerics',
+        for name in ('am', 'profiling', 'board', 'tools', 'numerics',
                      'triton', 'iree', 'llvm', 'tokenspeed'):
             with self.subTest(subject=name):
                 self.assertTrue((ROOT / name).is_dir())
         self.assertFalse((ROOT / 'unattended').exists())
+        self.assertFalse((ROOT / 'bench').exists())
+        self.assertTrue((ROOT / 'iree/thirdparty_bench').is_dir())
+        self.assertTrue((ROOT / 'triton/studies').is_dir())
         for name in ('claude', 'cursor', 'unattended'):
             with self.subTest(agent=name):
                 self.assertTrue((ROOT / 'agent' / name).is_dir())

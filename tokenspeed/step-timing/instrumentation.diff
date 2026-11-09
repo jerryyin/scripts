@@ -1,0 +1,533 @@
+--- a/python/tokenspeed/runtime/execution/forward_step.py
++++ b/python/tokenspeed/runtime/execution/forward_step.py
+@@ -64,6 +64,7 @@
+     get_colorful_logger,
+ )
+ from tokenspeed.runtime.utils.nvtx import nvtx_range
++from tokenspeed.runtime.utils import step_timing as _st  # TS_STEP_TIMING test-only
+ from tokenspeed.runtime.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+ 
+ if TYPE_CHECKING:
+@@ -724,8 +725,10 @@
+             )
+         with observer:
+             # The kernel state captured launches need lives as long as the graph.
++            _st.capture_begin(graph)
+             with capture_session(graph), graph_capture:
+                 out = run_once()
++            _st.capture_end(graph, bs)
+             # The drafter's own graphs at this batch share the pool and the measure.
+             if self.drafter is not None and variant == CUDA_GRAPH_VARIANT_DEFAULT:
+                 self.drafter.capture_round_graphs(
+@@ -1256,7 +1259,9 @@
+                 if self.drafter is not None:
+                     self.drafter.replay_decode_graph(graph, bs=bs, graph_bs=padded_bs)
+                 else:
++                    _st_tok = _st.before_replay(graph, ctx, bs, padded_bs)
+                     graph.replay()
++                    _st.after_replay(_st_tok)
+             if self._expert_load_rows is not None:
+                 self._expert_load_rows.clear()
+ 
+@@ -1264,7 +1269,13 @@
+                 self.output_buffers[graph_key], bs, self.max_tokens_per_req
+             )
+         else:
++            _st_tok = (
++                _st.eager_begin(ctx, bs)
++                if _st.ENABLED and ctx.forward_mode.is_decode()
++                else None
++            )
+             result = self._forward_func(bs=bs, ctx=ctx, sampling_info=sampling_info)
++            _st.eager_end(_st_tok)
+ 
+         if use_graph and padded_bs != bs:
+             ctx.bs = bs
+--- a/python/tokenspeed/runtime/models/deepseek_v41.py
++++ b/python/tokenspeed/runtime/models/deepseek_v41.py
+@@ -190,6 +190,7 @@
+ )
+ from tokenspeed.runtime.utils import add_prefix
+ from tokenspeed.runtime.utils.cuda_stream import StreamFork
++from tokenspeed.runtime.utils import step_timing as _st  # TS_STEP_TIMING test-only
+ from tokenspeed.runtime.utils.env import global_server_args_dict
+ 
+ logger = logging.getLogger(__name__)
+@@ -1336,7 +1337,9 @@
+         with self.stream_fork.scope(enable=overlap, overlap=True) as fork:
+             # Submit the longer compressor/index branch first. Serial eager and
+             # captured decode execute these identical operations and dependency joins.
++            _st.mark("attn.fork", self.layer_id)
+             with fork.branch():
++                _st.mark("attn.kvidx.b", self.layer_id)
+                 self._write_global_kv(
+                     hidden_states,
+                     source_positions,
+@@ -1443,6 +1446,8 @@
+                             projected_partition=partition,
+                         )
+                         index_q = index_weights = None
++                _st.mark("attn.kvidx.e", self.layer_id)
++            _st.mark("attn.q", self.layer_id)
+             if q_input.shape[0]:
+                 q, _ = self.wq_b(
+                     q_input,
+@@ -1496,6 +1501,7 @@
+             and (current_platform().is_cdna4 or current_platform().is_cdna5)
+             else None
+         )
++        _st.mark("attn.core", self.layer_id)
+         out = backend.forward_v41(
+             q,
+             swa,
+@@ -1516,6 +1522,7 @@
+             out_rope_cache=out_rope_cache,
+             key_rows=query_gather,
+         )
++        _st.mark("attn.wo", self.layer_id)
+         if out.shape[0] == 0 and query_gather is not None:
+             return hidden_states.new_empty((0, self.wo_b.output_size))
+         out = out[:, : self.n_local_heads]
+@@ -1846,9 +1853,11 @@
+                 if rows.query_shard.total_rows == 0:
+                     captured = hidden_states[:, 0, :] if capture_input else None
+                     return hidden_states, pre_mix, None, captured
++            _st.mark("ffn", self.layer_id)
+             self._forward_ffn(
+                 hidden_states[:, 0, :], image_mask, ctx, defer_reduce=False
+             )
++            _st.mark("ffn.end", self.layer_id)
+             captured = hidden_states[:, 0, :] if capture_input else None
+             return hidden_states, pre_mix, None, captured
+         rows = _row_plan(self.layer_id, self.ced_decoder_start, ctx)
+@@ -1940,6 +1949,7 @@
+                     self.attn.mapping.attn.head_tp_group,
+                 )
+             )
++            _st.mark("attn", self.layer_id)
+             x = self.attn(
+                 positions,
+                 x,
+@@ -1948,6 +1958,7 @@
+                 hidden_codes=codes,
+                 hidden_scales=scales,
+             )
++            _st.mark("hc_ffn", self.layer_id)
+             attn_pre, post, comb = attn_mixes
+             if overlap:
+                 for tensor in (attn_pre, post, comb):
+@@ -2012,7 +2023,9 @@
+                         self.hc_eps,
+                         self.hc_sinkhorn_iters,
+                     )
++            _st.mark("ffn", self.layer_id)
+             x = self._forward_ffn(x, image_mask, ctx, defer_reduce=defer_moe)
++            _st.mark("ffn.end", self.layer_id)
+             ffn_pre, post, comb = ffn_mixes
+             if ffn_overlap:
+                 for tensor in (ffn_pre, post, comb):
+@@ -2329,6 +2342,7 @@
+                 pre_mix = torch.empty(
+                     (0, self.config.hc_mult), dtype=torch.float32, device=hidden.device
+                 )
++                _st.mark("model.begin", -1)
+                 for layer in self.layers:
+                     hidden, pre_mix, _, _ = layer(
+                         hidden,
+@@ -2340,12 +2354,14 @@
+                         allow_ffn_reduce_fusion=False,
+                         capture_input=False,
+                     )
++                _st.mark("model.end", -1)
+             return (
+                 self.embed_tokens.weight.new_empty((0, self.config.hidden_size)),
+                 None,
+             )
+         backend = ctx.attn_backend
+         backend.begin_indexer_forward()
++        _st.mark("model.begin", -1)
+         state = self.encoder_forward(
+             input_ids,
+             positions,
+@@ -2358,8 +2374,10 @@
+         )
+         state = self.narrowing_forward(state, ctx)
+         hidden, captured = self.decoder_forward(state, ctx)
++        _st.mark("final", -1)
+         output = self.finish_forward(hidden, captured, ctx)
+         backend.end_indexer_forward()
++        _st.mark("model.end", -1)
+         return output
+ 
+     def _run_layer(
+@@ -2375,6 +2393,7 @@
+         stage_end: int,
+     ) -> tuple[torch.Tensor, torch.Tensor, V41HCPost | None]:
+         """Finish an incoming post before Engram; capture the input after it."""
++        _st.mark("engram" if layer.engram is not None else "layer", layer.layer_id)
+         if layer.engram is not None:
+             if pending_post is not None:
+                 hidden = pending_post.finish(hidden)
+@@ -2389,6 +2408,8 @@
+                     else None
+                 ),
+             )
++        if layer.engram is not None:
++            _st.mark("layer", layer.layer_id)
+         hidden, pre_mix, pending_post, tap = layer(
+             hidden,
+             pre_mix,
+--- a/python/tokenspeed/runtime/models/deepseek_v41_moe.py
++++ b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
+@@ -50,6 +50,7 @@
+ from tokenspeed.runtime.utils.cuda_stream import StreamFork
+ from tokenspeed.runtime.utils.env import global_server_args_dict
+ from tokenspeed.runtime.utils.nvtx import nvtx_range
++from tokenspeed.runtime.utils import step_timing as _st  # TS_STEP_TIMING test-only
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -484,8 +485,10 @@
+         ctx: ForwardContext,
+         comm_manager: CommManager,
+     ) -> torch.Tensor:
++        _st.mark("moe.router", self.layer_index)
+         with nvtx_range("moe_select_experts"):
+             topk_output = self._compute_topk_output(hidden_states, input_ids)
++        _st.mark("moe.experts", self.layer_index)
+         if self.shared_expert_fused:
+             # The routed output already includes the shared expert.
+             with nvtx_range("moe_mega_experts"):
+@@ -507,11 +510,14 @@
+                     do_finalize=True,
+                 )
+             with fork.branch():
++                _st.mark("shared.b", self.layer_index)
+                 shared = self._forward_shared_experts(
+                     hidden_states,
+                     ctx=ctx,
+                     comm_manager=comm_manager,
+                 )
++                _st.mark("shared.e", self.layer_index)
++        _st.mark("moe.join", self.layer_index)
+         return routed + shared if shared is not None else routed
+ 
+     def forward_normal(
+@@ -528,8 +534,10 @@
+         """
+         if hidden_states.shape[0] == 0 and not self.use_gluon_petit:
+             return hidden_states if out is None else out.copy_(hidden_states)
++        _st.mark("moe.router", self.layer_index)
+         with nvtx_range("moe_select_experts"):
+             topk_output = self._compute_topk_output(hidden_states, input_ids)
++        _st.mark("moe.experts", self.layer_index)
+         deferred_finalize = (
+             hidden_states.dtype == torch.bfloat16
+             and self.experts.supports_deferred_cuda_finalize
+@@ -545,7 +553,10 @@
+                     do_finalize=not deferred_finalize,
+                 )
+             with fork.branch():
++                _st.mark("shared.b", self.layer_index)
+                 shared = self._forward_shared_experts(hidden_states)
++                _st.mark("shared.e", self.layer_index)
++        _st.mark("moe.join", self.layer_index)
+         if deferred_finalize:
+             # Reduce routed rows and add the shared expert in one finalize.
+             gemm2_out, expert_weights, expanded_idx = routed
+--- /dev/null
++++ b/python/tokenspeed/runtime/utils/step_timing.py
+@@ -0,0 +1,254 @@
++"""TEST-ONLY decode-step component timing (campaign instrumentation, not upstream).
++
++Off unless TS_STEP_TIMING=1. Records torch.cuda.Event(enable_timing=True,
++external=True) at component boundaries while a decode graph is captured, so the
++graph contains event-record nodes (hipEventRecordWithFlags(..., External)).
++After a sampled replay the next replay first reads all elapsed times relative
++to an ordinary event recorded just before graph.replay() and appends one JSON
++line per sampled step to $TS_STEP_TIMING_DIR/step-timing-r<rank>-p<pid>.jsonl.
++
++Env:
++  TS_STEP_TIMING=1                 enable
++  TS_STEP_TIMING_DIR=<dir>         output dir (required when enabled)
++  TS_STEP_TIMING_EVERY=<k>         harvest every k-th replay (default 4)
++  TS_STEP_TIMING_MAX_RECORDS=<n>   stop harvesting after n records (default 4000)
++  TS_STEP_TIMING_LAYER_STRIDE=<s>  only instrument layers with id % s == 0 (default 1)
++  TS_STEP_TIMING_EAGER=1           fallback: also time eager (no-graph) decode forwards
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import time
++
++import torch
++
++ENABLED = os.environ.get("TS_STEP_TIMING", "0") == "1"
++_DIR = os.environ.get("TS_STEP_TIMING_DIR", "")
++_EVERY = max(1, int(os.environ.get("TS_STEP_TIMING_EVERY", "4")))
++_MAX = int(os.environ.get("TS_STEP_TIMING_MAX_RECORDS", "4000"))
++_STRIDE = max(1, int(os.environ.get("TS_STEP_TIMING_LAYER_STRIDE", "1")))
++_EAGER = os.environ.get("TS_STEP_TIMING_EAGER", "0") == "1"
++
++
++class _Seq:
++    __slots__ = ("sid", "pool", "names", "streams", "main", "dropped", "written")
++
++    def __init__(self, sid, pool, main):
++        self.sid, self.pool, self.main = sid, pool, main
++        self.names, self.streams = [], []
++        self.dropped, self.written = 0, False
++
++
++class _State:
++    seqs: dict = {}
++    cur: _Seq | None = None
++    eager: _Seq | None = None
++    eager_active = False
++    eager_cursor = 0
++    cur_layer = -1
++    pool_hint = 1024
++    replays = 0
++    records = 0
++    pending = None
++    buf: list = []
++    path = None
++    next_sid = 0
++
++
++_S = _State
++
++
++def _rank():
++    try:
++        import torch.distributed as dist
++
++        if dist.is_available() and dist.is_initialized():
++            return dist.get_rank()
++    except Exception:
++        pass
++    return -1
++
++
++def _write(obj):
++    if _S.path is None:
++        os.makedirs(_DIR, exist_ok=True)
++        _S.path = os.path.join(_DIR, f"step-timing-r{_rank()}-p{os.getpid()}.jsonl")
++    _S.buf.append(json.dumps(obj, separators=(",", ":")))
++    if len(_S.buf) >= 16 or obj.get("type") != "step":
++        with open(_S.path, "a") as f:
++            f.write("\n".join(_S.buf) + "\n")
++        _S.buf = []
++
++
++def _new_seq(n):
++    stream = torch.cuda.current_stream()
++    pool = []
++    for _ in range(n):
++        ev = torch.cuda.Event(enable_timing=True, external=True)
++        ev.record(stream)  # creates the hipEvent outside capture
++        pool.append(ev)
++    sid = _S.next_sid
++    _S.next_sid += 1
++    # The main (capture) stream is the stream of the first mark, not this one.
++    return _Seq(sid, pool, None)
++
++
++def layer_on(layer_id: int) -> bool:
++    return ENABLED and layer_id % _STRIDE == 0
++
++
++def mark(name: str, layer: int | None = None) -> None:
++    """Record a boundary event on the current stream (no-op unless enabled).
++
++    layer=None uses the last layer id passed to mark (kernel-library hooks).
++    """
++    if not ENABLED:
++        return
++    if layer is None:
++        layer = _S.cur_layer
++    elif layer >= 0:
++        _S.cur_layer = layer
++    if layer >= 0 and layer % _STRIDE:
++        return
++    seq = _S.cur
++    if seq is None:
++        if not (_S.eager_active and _S.eager is not None):
++            return
++        seq = _S.eager
++    elif not torch.cuda.is_current_stream_capturing():
++        return
++    i = len(seq.names) if not (seq is _S.eager and seq.written) else _S.eager_cursor
++    if i >= len(seq.pool):
++        seq.dropped += 1
++        return
++    stream = torch.cuda.current_stream()
++    if seq.main is None:
++        seq.main = stream
++    seq.pool[i].record(stream)
++    if seq is _S.eager and seq.written:
++        _S.eager_cursor = i + 1
++        return
++    seq.names.append(f"{layer}:{name}")
++    seq.streams.append("main" if stream == seq.main else f"s{stream.stream_id}")
++
++
++def capture_begin(graph) -> None:
++    """Call immediately before the decode graph capture starts (outside capture)."""
++    if not ENABLED:
++        return
++    seq = _new_seq(_S.pool_hint)
++    _S.seqs[id(graph)] = seq
++    _S.cur = seq
++
++
++def capture_end(graph, bs=None) -> None:
++    if not ENABLED or _S.cur is None:
++        return
++    seq = _S.cur
++    _S.cur = None
++    _S.pool_hint = max(_S.pool_hint, len(seq.names) + 64)
++    _write({"type": "seq", "sid": seq.sid, "bs": bs, "names": seq.names,
++            "streams": seq.streams, "dropped": seq.dropped, "pid": os.getpid(),
++            "rank": _rank(), "stride": _STRIDE, "every": _EVERY})
++    seq.written = True
++
++
++def _harvest():
++    p = _S.pending
++    _S.pending = None
++    if p is None:
++        return
++    seq, begin, end, meta = p
++    h0 = time.perf_counter()
++    end.synchronize()
++    n = len(seq.names)
++    t = [round(begin.elapsed_time(seq.pool[i]), 5) for i in range(n)]
++    meta["graph_ms"] = round(begin.elapsed_time(end), 5)
++    meta["t"] = t
++    meta["harvest_ms"] = round((time.perf_counter() - h0) * 1e3, 4)
++    _write(meta)
++    _S.records += 1
++
++
++def before_replay(graph, ctx=None, bs=None, padded_bs=None):
++    """Call right before graph.replay(); returns a token for after_replay."""
++    if not ENABLED:
++        return None
++    _harvest()
++    _S.replays += 1
++    seq = _S.seqs.get(id(graph))
++    if seq is None or _S.records >= _MAX or _S.replays % _EVERY:
++        return None
++    begin = torch.cuda.Event(enable_timing=True)
++    begin.record()
++    gnt = getattr(ctx, "global_num_tokens", None) if ctx is not None else None
++    meta = {"type": "step", "sid": seq.sid, "replay": _S.replays,
++            "wall": time.time(), "bs": bs, "padded_bs": padded_bs,
++            "global_num_tokens": list(gnt) if gnt is not None else None,
++            "input_num_tokens": getattr(ctx, "input_num_tokens", None)}
++    return (seq, begin, meta)
++
++
++def after_replay(token) -> None:
++    if token is None:
++        return
++    seq, begin, meta = token
++    end = torch.cuda.Event(enable_timing=True)
++    end.record()
++    _S.pending = (seq, begin, end, meta)
++
++
++def eager_begin(ctx=None, bs=None):
++    """Fallback (TS_STEP_TIMING_EAGER=1): wrap an eager decode forward."""
++    if not (ENABLED and _EAGER):
++        return None
++    _harvest()
++    if _S.eager is None:
++        _S.eager = _new_seq(_S.pool_hint)
++    _S.eager_cursor = 0
++    _S.eager_active = True
++    _S.replays += 1
++    begin = torch.cuda.Event(enable_timing=True)
++    begin.record()
++    gnt = getattr(ctx, "global_num_tokens", None) if ctx is not None else None
++    meta = {"type": "step", "sid": _S.eager.sid, "replay": _S.replays, "eager": True,
++            "wall": time.time(), "bs": bs, "padded_bs": bs,
++            "global_num_tokens": list(gnt) if gnt is not None else None,
++            "input_num_tokens": getattr(ctx, "input_num_tokens", None)}
++    return (_S.eager, begin, meta)
++
++
++def eager_end(token) -> None:
++    if token is None:
++        return
++    seq, begin, meta = token
++    _S.eager_active = False
++    if not seq.written:
++        _write({"type": "seq", "sid": seq.sid, "bs": None, "eager": True,
++                "names": seq.names, "streams": seq.streams, "dropped": seq.dropped,
++                "pid": os.getpid(), "rank": _rank(), "stride": _STRIDE, "every": 1})
++        seq.written = True
++    elif _S.eager_cursor != len(seq.names):
++        meta["marker_mismatch"] = _S.eager_cursor
++    if _S.records >= _MAX:
++        return
++    end = torch.cuda.Event(enable_timing=True)
++    end.record()
++    _S.pending = (seq, begin, end, meta)
++
++
++def flush() -> None:
++    if ENABLED and _S.buf and _S.path:
++        with open(_S.path, "a") as f:
++            f.write("\n".join(_S.buf) + "\n")
++        _S.buf = []
++
++
++if ENABLED:
++    import atexit
++
++    if not _DIR:
++        raise RuntimeError("TS_STEP_TIMING=1 requires TS_STEP_TIMING_DIR")
++    atexit.register(flush)
+--- a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
++++ b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
+@@ -200,7 +200,12 @@
+         import torch
+         from lib.streams import native_stream
+ 
++        import sys as _sys  # TS_STEP_TIMING test-only
++
++        _st = _sys.modules.get("tokenspeed.runtime.utils.step_timing")
++        _mk = _st.mark if _st is not None and _st.ENABLED else (lambda _n: None)
+         with torch.cuda.stream(native_stream(p.stream, p.workspace.device)):
++            _mk("petit.s1")
+             MegaMoEStage1[(C.kNumSMs,)](
+                 p.w13,
+                 p.scales_w13,
+@@ -215,6 +220,7 @@
+                 num_warps=stage1.kNumWarps,
+                 enable_fp_fusion=False,
+             )
++            _mk("petit.s2")
+             MegaMoEStage2[(stage2.kStage2GridBlocks,)](
+                 p.w2,
+                 p.scales_w2,
+@@ -225,6 +231,7 @@
+                 num_warps=stage2.kNumWarps,
+                 enable_fp_fusion=False,
+             )
++            _mk("petit.comb")
+             MegaMoECombine[(combine.kNumSMs,)](
+                 p.out,
+                 p.num_tokens,
+@@ -235,6 +242,7 @@
+                 num_warps=combine.kNumWarps,
+                 enable_fp_fusion=False,
+             )
++            _mk("petit.post")
+         return 0
+ 
+ 

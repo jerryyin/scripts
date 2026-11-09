@@ -1,0 +1,71 @@
+{
+ "_doc": "Ordered list; first matching regex (Python re.search, case-insensitive) wins. Kernel names in torch/kineto traces are the HIP symbol names (Triton/Gluon kernels keep their Python function name, possibly with suffixes). Citations are TokenSpeed @0dd8d477 paths relative to /zyin/dsv41/tokenspeed. TK=tokenspeed-kernel/python/tokenspeed_kernel, TKA=tokenspeed-kernel-amd/python/tokenspeed_kernel_amd, PET=TK/thirdparty/gluon_petit/lib/moe/rocm.",
+ "categories": [
+  {
+   "category": "memcpy_h2d",
+   "regex": "Memcpy ?HtoD|CopyHostToDevice|hipMemcpy.*H2D|memcpy.*h2d",
+   "cite": "kineto/roctracer memcpy activity names (cat gpu_memcpy); rocprofv3 memory-copy trace"
+  },
+  {
+   "category": "memcpy_d2h",
+   "regex": "Memcpy ?DtoH|CopyDeviceToHost|hipMemcpy.*D2H|memcpy.*d2h",
+   "cite": "kineto gpu_memcpy; decode output token copy to host"
+  },
+  {
+   "category": "memcpy_d2d_memset",
+   "regex": "Memcpy ?DtoD|CopyDeviceToDevice|Memset|fillBuffer|__amd_rocclr_copyBuffer|__amd_rocclr_fillBuffer",
+   "cite": "HIP runtime blit kernels (ROCclr) used for D2D copies/memsets"
+  },
+  {
+   "category": "moe_dispatch",
+   "regex": "MegaMoEStage1|_stage1\\b|WaitForPayloadBlocks|MegaMoEQuantizeMxFp4|_pack_channel_shards_for_a2a|dispatch",
+   "cite": "PET/mega_moe/mega_moe_two_stage_kernel.py:138 (WaitForPayloadBlocks), :560 (_stage1), :611 (MegaMoEStage1 = dispatch receive + gate/up GEMM fused); PET/mega_moe.py:258 (MegaMoEQuantizeMxFp4Kernel); TK/ops/communication/triton.py:35. NOTE: Petit fuses dispatch wait with stage-1 expert GEMM, so this bucket includes expert GEMM time + cross-rank wait"
+  },
+  {
+   "category": "moe_combine",
+   "regex": "MegaMoECombine|_combine\\b|combine",
+   "cite": "PET/mega_moe/mega_moe_two_stage_kernel.py:597 (_combine), :692 (MegaMoECombine)"
+  },
+  {
+   "category": "moe_expert_gemm",
+   "regex": "MegaMoEStage2|_stage2\\b|mxfp4_moe|moe_stage|a16w4|situ|moe_sorting|route_(descriptors|pack|tiles)|expert_mesh|_mesh|fused_moe|HotLoop|bitmatrix|ragged_tensor",
+   "cite": "PET/mega_moe/mega_moe_two_stage_kernel.py:592,660 (MegaMoEStage2 down GEMM); TKA/ops/gfx950/moe/mxfp4/{decode_stage2.py:484,situ_decode.py:206,moe_sorting.py:100-614,expert_mesh.py:30-128}; TKA/ops/gfx950/moe/_common.py:471-1128"
+  },
+  {
+   "category": "moe_router",
+   "regex": "router|sqrt_softplus_topk|_topk_forward|streaming_topk",
+   "cite": "TKA/ops/gfx950/moe/router_gemv.py:34; TKA/ops/gfx950/moe/sqrt_softplus_topk.py:34; TKA/ops/gfx950/moe/_common.py:666,723"
+  },
+  {
+   "category": "engram",
+   "regex": "engram|ngram|_host_(uint8|mxfp8)_row_gather",
+   "cite": "TK/ops/metadata/ngram.py:78 (_engram_remainder), :88 (_engram_hash_values); python/tokenspeed/runtime/models/deepseek_v41_engram.py:22-45 (host table gathered through UVA; sharded layout keeps lookup all-reduce); tokenspeed-kernel/python/tokenspeed_kernel/ops/embedding/triton_host_gather.py:36 (_host_uint8_row_gather_kernel), :60 (_host_mxfp8_row_gather_kernel), called from deepseek_v41_engram.py:697,740-743 (UVA host-row gather, bound by address translation, :531-534)"
+  },
+  {
+   "category": "collective_comm",
+   "regex": "rccl|nccl|ncclDevKernel|ncclKernel|AllReduce|AllGather|ReduceScatter|all_reduce|allreduce|all_gather|allgather|reduce_scatter|iris_|lamport|barrier|custom_ar|cross_device_reduce",
+   "cite": "TK/ops/communication/_iris/all_reduce.py:572-715, _iris/all_gather.py:211-525; PET/comm/barrier.py; RCCL kernels (ncclDevKernel_*)"
+  },
+  {
+   "category": "attention",
+   "regex": "mla|dsa|sparse|multi_cta|decode_row|_physical_slots|indexer|compressor|_compress|qsa|attn|attention|paged|kv_cache|kvcache|_csa|_qtile|_score_token|topk_key|histogram|_select_bins|flash|fmha|set_kv|store_kv|rope_quant",
+   "cite": "TKA/ops/gfx950/attention/dsa/sparse_mla.py:144-860; TKA/ops/gfx950/attention/dsv41/indexer.py:64-552; TK/ops/attention/dsv41/triton.py:564 (_compressor_tail_scatter_kernel), :1329 (_compressor_pool)"
+  },
+  {
+   "category": "sampling_logits",
+   "regex": "argmax|sampl|softmax|logit|top_?p|top_?k_?renorm|penalt|eagle4|candidate",
+   "cite": "TKA/ops/gfx950/sampling/argmax.py:91,115,184; python/tokenspeed/runtime/sampling/backends/triton_full.py"
+  },
+  {
+   "category": "norm_rope_elementwise",
+   "regex": "rms_?norm|layer_?norm|norm|rope|rotary|swiglu|silu|gelu|act_and_mul|elementwise|vectorized_elementwise|unrolled_elementwise|reduce_kernel|cat_|index_select|gather|scatter|copy_kernel|fill_kernel|quantiz|quant_|mxfp8|fp8|_downcast|clamp|add_kernel|mul_kernel",
+   "cite": "TKA/ops/gfx950/quantization.py:49 (gluon_quantize_fp8_group32_ue8m0_gfx950); TKA/ops/gfx950/moe/mxfp4/mxfp8_quantize.py:40-123; PyTorch ATen elementwise kernel names"
+  },
+  {
+   "category": "shared_expert_and_dense_gemm",
+   "regex": "gemm|gemv|matmul|_mm\\b|mm_|Cijk_|hipblaslt|rocblas|ck_tile|wvSplitK|LLGemm|kernel_gemm|dot",
+   "cite": "TKA/ops/gfx950/gemm/fp16/mm.py; hipBLASLt/Tensile kernels named Cijk_*; PET/../gemm/rocm/cdna4_ops.py"
+  }
+ ],
+ "default": "other"
+}

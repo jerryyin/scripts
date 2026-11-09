@@ -11,12 +11,24 @@ Development setup, execution infrastructure, and GPU engineering tools.
 | [profiling](profiling/README.md) | Hardware trace capture, analysis, and event replay |
 | [am](am/README.md) | AM/FFM simulator execution, downloads, and instruction trace analysis |
 | [board](board/README.md) | GPU access coordination and board preparation |
-| `triton`, `iree`, `llvm`, `tokenspeed` | Project experiments, reproducers, analysis, build configuration |
-| `bench`, `numerics` | Benchmarks and numerical analysis |
+| `triton`, `iree`, `llvm`, `tokenspeed` | Project experiments, reproducers, analysis, build configuration, and project-specific benchmarks (for example [tokenspeed](tokenspeed/README.md), `iree/thirdparty_bench/`) |
+| [numerics](numerics/README.md) | Numerical comparison and test-data generation |
 | `archive` | Historical workflows |
 
 ## Placement rules
 
+- **Category first, project second.** If a tool does what a cross-project subject owns
+  (`profiling/` for traces and kernel timing, `numerics/` for comparing numbers, `board/` for GPU
+  access, `agent/unattended/` for generic looped-execution infrastructure, `am/` for the simulator),
+  it goes there even when one project is its first caller. A project directory holds only what
+  depends on that project: its server, its source, its log and dump formats. A tool that mixes
+  both is split: the generic core in the subject directory, a thin project wrapper or a
+  project-specific input file in the project directory. Records of a particular run (results,
+  provenance) stay with the investigation that produced them, never here.
+- **Extend before adding.** Before writing a tool, search the subject READMEs and `git grep` for
+  one that already does the job. If one exists, use it; if it falls short, change it (a new flag,
+  mode or importable function) rather than adding a sibling that does nearly the same thing. A new
+  file is for a job nothing here does; a shared helper that two tools need lives once, with its owner.
 - Group files by subject, and keep frequently used subjects directly accessible
   from the root. Add a parent directory when it helps navigation: `containers/`
   groups Docker and Kubernetes; `agent/` groups coding-agent sessions and unattended work.

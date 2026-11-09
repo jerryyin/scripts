@@ -21,8 +21,8 @@ change. Existing development images need rebuilding for the migrated startup com
 
 `setup/` owns Linux and Windows provisioning. Docker utilities and Kubernetes
 workflows live under `containers/`. Frequently used `am/`, `board/`, `profiling/`,
-and `gdb/` directories remain at the root, alongside project directories,
-`bench/`, and `numerics/`. Agent utilities live under `agent/`. There is no
+and `gdb/` directories remain at the root, alongside project directories and
+`numerics/`. Agent utilities live under `agent/`. There is no
 `tools/` bucket or compatibility directory.
 
 These checks include the latest upstream Claude settings changes. The credential
