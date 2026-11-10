@@ -5,6 +5,7 @@ usage: gpu-queue add DIR [--name NAME] (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
        gpu-queue serve DIR --count N [--container NAME] [--poll 30] [--confirm 2]
                        [--max-vram-mb 1024] [--idle-by usage|process] [--log FILE] [--once]
+                       [--reclaim-after SECONDS [--reclaim-grace 30]]
 
 On a shared host, GPUs a finished job releases are taken by other users' queues before a
 person can start the next job, and idle GPUs reserve nothing because other launches do not
@@ -13,18 +14,29 @@ empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`, de
 --idle-by usage), then runs every pending job on those GPUs, oldest first, starting each the
 moment the previous one exits, including jobs added while earlier ones run. It releases the
 GPUs when the queue is empty and goes back to waiting (or exits, with --once). It never runs
-placeholder load and never signals another process.
+placeholder load, and signals no process unless --reclaim-after is given.
+
+--reclaim-after (host serve with --container only; every GPU process on the machine must be
+yours): when a pending job has waited that many seconds without a claim, `serve` stops every
+process on the host that has /dev/kfd open, except those in --container (SIGTERM, then SIGKILL
+after --reclaim-grace seconds), logs each, and waits again. Listing and signalling go through
+`sudo -n` unless `serve` runs as root. A serve inside the container cannot see other containers'
+processes, so it cannot reclaim.
 
 DIR holds pending/, running/, done/ and failed/. A job is an executable script; it runs with
 HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set, and its output and exit status land
-beside it as <job>.log and <job>.exit. With --container, `serve` runs on the host (where
+beside it as <job>.log and <job>.exit. Without --container everything runs locally, which inside
+a container is the simple setup. With --container, `serve` runs on the host (where
 amd-smi sees every tenant) and reaches DIR and the job through `docker exec`, so DIR is a path
 inside the container; `add` and `status` run wherever DIR is a local path, normally inside the
 container. A job left in running/ by a crashed `serve` moves to failed/ with exit
 `interrupted` when `serve` starts again.
 
-All jobs in a queue use the same GPU count. Every claim, job start and exit status is
-appended to --log (default ~/.local/state/gpu-queue/<container or host>.log).
+All jobs in a queue use the same GPU count. Every claim, job start, exit status and GPU poll
+(with the busy GPUs) is appended to --log: by default DIR/serve.log for a serve without
+--container, else ~/.local/state/gpu-queue/<container>.log on the host. `status` shows how long
+each pending or running job has waited and, from DIR/serve.log, serve's last line, and flags the
+log as STALE when jobs are queued but nothing was written for 10 minutes.
 """
 from __future__ import annotations
 
@@ -41,6 +53,7 @@ from pathlib import Path
 
 GPU_WAIT = Path(__file__).resolve().with_name('gpu-wait.py')
 STATES = ('pending', 'running', 'done', 'failed')
+SERVE_LOG = 'serve.log'  # default --log of a serve without --container, inside DIR
 JOB_RE = re.compile(r'^[0-9TZ-]+-[A-Za-z0-9._-]+\.sh$')
 NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 NO_TIME_LIMIT = str(10 ** 9)  # seconds; gpu-wait.py has no "wait forever" value
@@ -91,16 +104,95 @@ def note(log: Path, message: str) -> None:
     print(line, flush=True)
 
 
-def wait_for_gpus(args: argparse.Namespace, log: Path) -> str:
-    """HIP ids of args.count idle GPUs, from gpu-wait.py (no time limit)."""
+def wait_for_gpus(args: argparse.Namespace, log: Path) -> str | None:
+    """HIP ids of args.count idle GPUs from gpu-wait.py; None if args.reclaim_after passes first."""
+    timeout = str(args.reclaim_after) if args.reclaim_after else NO_TIME_LIMIT
     cmd = [sys.executable, str(GPU_WAIT), str(args.count), '--hip', '--idle-by', args.idle_by,
            '--max-vram-mb', str(args.max_vram_mb), '--poll', str(args.poll),
-           '--confirm', str(args.confirm), '--timeout', NO_TIME_LIMIT, '--log', str(log)]
+           '--confirm', str(args.confirm), '--timeout', timeout, '--log', str(log)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     hip = result.stdout.strip()
+    if result.returncode == 1 and not hip and args.reclaim_after:
+        return None
     if result.returncode != 0 or not hip:
         raise SystemExit(f'gpu-wait.py failed ({result.returncode}): {result.stderr.strip()}')
     return hip
+
+
+# Run inside the named container: PID and command line of each process with /dev/kfd open,
+# except PID 1 (stopping it would stop the container).
+KFD_HOLDERS = r'''for d in /proc/[0-9]*; do
+  p=${d#/proc/}; [ "$p" = 1 ] && continue
+  for f in "$d"/fd/*; do
+    if [ "$(readlink "$f" 2>/dev/null)" = /dev/kfd ]; then
+      printf '%s\t%s\n' "$p" "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"; break
+    fi
+  done
+done'''
+
+
+def parse_holders(text: str) -> list[tuple[int, str]]:
+    holders = []
+    for line in text.splitlines():
+        pid, _, cmd = line.partition('\t')
+        if pid.isdigit() and int(pid) != 1:
+            holders.append((int(pid), cmd.strip()))
+    return holders
+
+
+def as_root(argv: list[str]) -> list[str]:
+    return argv if os.geteuid() == 0 else ['sudo', '-n', *argv]
+
+
+def container_id(name: str) -> str:
+    result = subprocess.run(['docker', 'inspect', '-f', '{{.Id}}', name], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise SystemExit(f'cannot resolve container {name!r}: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def kfd_holders(spare: str | None = None) -> list[tuple[int, str]]:
+    """/dev/kfd holders visible here, minus processes whose cgroup names container id `spare`."""
+    result = subprocess.run(as_root(['sh', '-c', KFD_HOLDERS]), capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'cannot list GPU processes: {result.stderr.strip()}')
+    holders = parse_holders(result.stdout)
+    if spare:
+        holders = [(pid, cmd) for pid, cmd in holders if spare not in _cgroup(pid)]
+    return holders
+
+
+def _cgroup(pid: int) -> str:
+    try:
+        return Path(f'/proc/{pid}/cgroup').read_text()
+    except OSError:
+        return ''
+
+
+def reclaim(spare: str | None, grace: int, log: Path) -> None:
+    """Stop every /dev/kfd holder outside container id `spare` (SIGTERM, SIGKILL after `grace` s)."""
+    try:
+        holders = kfd_holders(spare)
+    except RuntimeError as error:
+        note(log, f'reclaim: {error}; nothing signalled')
+        return
+    if not holders:
+        note(log, 'reclaim: no other process has /dev/kfd open')
+        return
+    for pid, cmd in holders:
+        note(log, f'reclaim: SIGTERM pid {pid} ({cmd[:200]})')
+    subprocess.run(as_root(['kill', '-TERM', *(str(pid) for pid, _ in holders)]), capture_output=True)
+    deadline = time.monotonic() + grace
+    left = {pid for pid, _ in holders}
+    while time.monotonic() < deadline:
+        left &= {pid for pid, _ in kfd_holders(spare)}
+        if not left:
+            note(log, f'reclaim: all {len(holders)} process(es) exited')
+            return
+        time.sleep(1)
+    for pid in sorted(left):
+        note(log, f'reclaim: SIGKILL pid {pid} (still running after {grace}s)')
+    subprocess.run(as_root(['kill', '-KILL', *map(str, sorted(left))]), capture_output=True)
 
 
 def recover(store: Store, log: Path) -> None:
@@ -115,6 +207,7 @@ def drain(store: Store, hip: str, log: Path) -> None:
     while pending := store.jobs('pending'):
         job = pending[0]
         store.move(job, 'pending', 'running')
+        store.sh('touch "$1/running/$2"', job)  # its mtime is the start time `status` reports
         note(log, f'{job}: start on HIP {hip}')
         status = store.run(job, hip)
         state = 'done' if status == 0 else 'failed'
@@ -123,10 +216,12 @@ def drain(store: Store, hip: str, log: Path) -> None:
         note(log, f'{job}: exit={status} -> {state}/')
 
 
-def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus) -> int:
+def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
+          reclaim=reclaim) -> int:
     store.init()
     recover(store, log)
     note(log, f'serving {store.root} ({args.container or "local"}), {args.count} GPUs per claim')
+    spare = container_id(args.container) if args.reclaim_after and args.container else None
     while True:
         if not store.jobs('pending'):
             if args.once:
@@ -135,7 +230,9 @@ def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus)
             time.sleep(args.poll)
             continue
         note(log, f'{len(store.jobs("pending"))} job(s) pending; waiting for {args.count} idle GPUs')
-        hip = wait(args, log)
+        while (hip := wait(args, log)) is None:
+            note(log, f'no claim after {args.reclaim_after}s; reclaiming')
+            reclaim(spare, args.reclaim_grace, log)
         note(log, f'claimed HIP {hip}')
         drain(store, hip, log)
         note(log, f'queue empty; released HIP {hip}')
@@ -168,15 +265,40 @@ def add(args: argparse.Namespace) -> int:
     return 0
 
 
-def status(args: argparse.Namespace) -> int:
+STALE_LOG_SECONDS = 600  # far above serve's poll; a silent log with work queued means no serve
+
+
+def _age(seconds: float) -> str:
+    return f'{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m' if seconds >= 3600 else f'{int(seconds // 60)}m'
+
+
+def status(args: argparse.Namespace, now: float | None = None) -> int:
+    """Jobs by state, how long pending and running jobs have waited, and serve's last log line."""
     queue = Path(args.dir)
+    now = time.time() if now is None else now
     for state in STATES:
         names = sorted(p.name for p in (queue / state).glob('*.sh')) if (queue / state).is_dir() else []
         print(f'{state}: {len(names)}')
         for name in names:
             exit_file = queue / state / f'{name}.exit'
             suffix = f'  exit={exit_file.read_text().strip()}' if exit_file.exists() else ''
+            if state in ('pending', 'running'):
+                since = (queue / state / name).stat().st_mtime if state == 'running' else \
+                    dt.datetime.strptime(name.split('-', 1)[0], '%Y%m%dT%H%M%S%fZ').replace(
+                        tzinfo=dt.timezone.utc).timestamp()
+                suffix = f'  {"queued" if state == "pending" else "started"} {_age(now - since)} ago'
             print(f'  {name}{suffix}')
+    log = queue / SERVE_LOG
+    if log.exists():
+        lines = log.read_text().splitlines()
+        silent = now - log.stat().st_mtime
+        print(f'serve log ({log}): last write {_age(silent)} ago')
+        if lines:
+            print(f'  {lines[-1][:300]}')
+        busy = any((queue / s).is_dir() and any((queue / s).glob('*.sh')) for s in ('pending', 'running'))
+        if busy and silent > STALE_LOG_SECONDS:
+            print('  STALE: jobs are queued but serve has written nothing for '
+                  f'{_age(silent)}; it is probably not running')
     return 0
 
 
@@ -199,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
     p.add_argument('--log', type=Path)
     p.add_argument('--once', action='store_true', help='exit when the queue is empty')
+    p.add_argument('--reclaim-after', type=int, metavar='SECONDS',
+                   help='host serve only: stop GPU processes outside --container after a job '
+                        'waits this long')
+    p.add_argument('--reclaim-grace', type=int, default=30,
+                   help='seconds between SIGTERM and SIGKILL')
     argv = sys.argv[1:] if argv is None else argv
     # Everything after "--" is the job's command, never options of gpu-queue.
     command = argv[argv.index('--') + 1:] if '--' in argv else []
@@ -208,7 +335,15 @@ def main(argv: list[str] | None = None) -> int:
         return add(args)
     if args.cmd == 'status':
         return status(args)
-    log = args.log or Path.home() / '.local/state/gpu-queue' / f'{args.container or "host"}.log'
+    if args.reclaim_after is not None and not args.container:
+        parser.error('--reclaim-after needs --container: a serve inside a container cannot see '
+                     "other containers' processes")
+    if args.log:
+        log = args.log
+    elif args.container:
+        log = Path.home() / '.local/state/gpu-queue' / f'{args.container}.log'
+    else:  # local serve: keep the log beside the jobs, where `status` reads it
+        log = Path(args.dir) / SERVE_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
     return serve(args, Store(args.dir, args.container), log)
 

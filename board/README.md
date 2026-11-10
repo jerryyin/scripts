@@ -42,16 +42,27 @@ board/
   runs on the host and holds no GPU while the queue is empty. When a job is pending it waits for
   N idle GPUs (`gpu-wait.py N --hip --idle-by usage`), then runs every pending job on those GPUs
   oldest first, each starting the moment the previous one exits, including jobs queued while
-  earlier ones run; it releases when the queue is empty. It never runs placeholder load and never
-  signals another process. `gpu-queue add DIR [--name NAME] -- COMMAND` (or `--file SCRIPT`) and
+  earlier ones run; it releases when the queue is empty. It never runs placeholder load.
+  `--reclaim-after SECONDS` (host serve with `--container` only, and only where every GPU process
+  is yours): when a pending job has waited that long, `serve` stops every `/dev/kfd` holder on the
+  host outside `--container` (SIGTERM, SIGKILL after `--reclaim-grace`, through `sudo -n` unless
+  root), logs each, and waits again. `gpu-queue add DIR [--name NAME] -- COMMAND` (or `--file SCRIPT`) and
   `gpu-queue status DIR` run where DIR is local, normally inside the container. Jobs get
   `HIP_VISIBLE_DEVICES`; their output and exit status land in `DIR/done/` or `DIR/failed/`.
   Tests: `test_gpu_queue.py`.
 
+  The simplest setup runs everything inside the container: amd-smi there sees every GPU, so
+  the idle check and HIP numbering work, and the log lands in `DIR/serve.log` where `status`
+  reads it. A container cannot see other containers' processes, so `--reclaim-after` needs a
+  serve on the host.
+
   ```bash
-  # host, once (survives logout):
+  # inside the container (no reclaim):
+  setsid --fork board/gpu-queue serve /path/queue --count 4 > /dev/null 2>&1 < /dev/null
+  board/gpu-queue status /path/queue   # waits per job, serve's last line, STALE if serve died
+  # or on the host, once (survives logout), with reclaim:
   nohup setsid board/gpu-queue serve /path/in/container/queue --count 4 --container <name> \
-      > /dev/null 2>&1 < /dev/null &
+      [--reclaim-after 1800] > /dev/null 2>&1 < /dev/null &
   tail -f ~/.local/state/gpu-queue/<name>.log
   # inside the container, any time:
   board/gpu-queue add /path/in/container/queue --name numerics -- 'cd /work && ./run-numerics.sh'
