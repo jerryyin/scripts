@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Wait until N GPUs are idle (gpu-wait.py), then run a real job on them inside a container.
+
+usage: gpu-claim --count N --container NAME [--poll 30] [--confirm 2] [--max-vram-mb 1024]
+                 [--idle-by usage|process] [--log FILE] [--dry-run] -- COMMAND...
+
+Run on the HOST: amd-smi there sees every tenant's GPU use. gpu-claim calls
+`gpu-wait.py N --hip` (default --idle-by usage, because amd-smi's process listing on the
+MI350X host attributes every process to every GPU) and waits without a time limit. It then
+runs
+
+    docker exec -e HIP_VISIBLE_DEVICES=<hip ids> -e GPU_CLAIM_HIP=<hip ids> NAME bash -lc COMMAND
+
+in the foreground and exits with the job's status. One COMMAND argument is used as a shell
+command line; several are quoted as an argv. The job holds the GPUs only while it runs:
+gpu-claim starts no placeholder load and never signals another process.
+
+The log (default ~/.local/state/gpu-claim/<container>-<time>.log) has gpu-wait's poll lines,
+the amd-smi-to-HIP mapping it picked, the job's output, and a final `claim: exit=<status>`.
+"""
+import argparse
+import datetime as dt
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+GPU_WAIT = Path(__file__).resolve().with_name('gpu-wait.py')
+NO_TIME_LIMIT = str(10 ** 9)  # seconds; gpu-wait.py has no "wait forever" value
+
+
+def note(log: Path, message: str) -> None:
+    line = f'{dt.datetime.now().astimezone():%Y-%m-%dT%H:%M:%S%z} {message}'
+    with log.open('a') as fh:
+        fh.write(line + '\n')
+    print(line, flush=True)
+
+
+def wait_for_gpus(args: argparse.Namespace, log: Path) -> str:
+    """HIP ids of `count` idle GPUs, from gpu-wait.py."""
+    cmd = [sys.executable, str(GPU_WAIT), str(args.count), '--hip', '--idle-by', args.idle_by,
+           '--max-vram-mb', str(args.max_vram_mb), '--poll', str(args.poll),
+           '--confirm', str(args.confirm), '--timeout', NO_TIME_LIMIT, '--log', str(log)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f'gpu-wait.py failed ({result.returncode}): {result.stderr.strip()}')
+    hip = result.stdout.strip()
+    if not hip:
+        raise SystemExit('gpu-wait.py succeeded but printed no GPU ids')
+    return hip
+
+
+def run_job(args: argparse.Namespace, hip: str, log: Path) -> int:
+    command = args.command[0] if len(args.command) == 1 else shlex.join(args.command)
+    docker = ['docker', 'exec', '-e', f'HIP_VISIBLE_DEVICES={hip}', '-e', f'GPU_CLAIM_HIP={hip}',
+              args.container, 'bash', '-lc', command]
+    note(log, f'running in {args.container} on HIP {hip}: {command}')
+    if args.dry_run:
+        note(log, f'dry run: {shlex.join(docker)}')
+        return 0
+    with log.open('a') as fh, subprocess.Popen(docker, stdout=fh, stderr=subprocess.STDOUT) as job:
+        status = job.wait()
+    note(log, f'claim: exit={status}')
+    return status
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--count', type=int, required=True)
+    parser.add_argument('--container', required=True)
+    parser.add_argument('--poll', type=int, default=30)
+    parser.add_argument('--confirm', type=int, default=2)
+    parser.add_argument('--max-vram-mb', type=int, default=1024)
+    parser.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
+    parser.add_argument('--log', type=Path)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if args.command[:1] == ['--']:
+        args.command = args.command[1:]
+    if not args.command:
+        parser.error('give the job after --')
+    stamp = dt.datetime.now().strftime('%Y%m%dT%H%M%S')
+    log = args.log or Path.home() / '.local/state/gpu-claim' / f'{args.container}-{stamp}.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    note(log, f'waiting for {args.count} idle GPUs (log {log})')
+    return run_job(args, wait_for_gpus(args, log), log)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
