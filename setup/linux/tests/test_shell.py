@@ -109,7 +109,7 @@ print(json.dumps(values))'''
         self.assertNotIn(str(triton), self.activate()['PYTHONPATH'].split(':'))
 
     def test_triton_token_is_loaded_only_for_triton_profile(self):
-        vault = self.home / 'vault'
+        vault = self.home / 'vault-work'
         vault.mkdir()
         (vault / 'gh_token_amdeng.txt').write_text(' fixture-token \n')
         self.assertIsNone(self.activate()['TRITON_MI450_LLVM_DOWNLOAD_GITHUB_TOKEN'])

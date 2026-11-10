@@ -24,6 +24,8 @@ profiling/
   `tokenspeed/step-timing/categories.json`). Stdlib only. On ROCm 7 with PyTorch 2.14, PyTorch's
   profiler recorded no GPU kernels for TokenSpeed (kineto thread error) and `rocprofv3`
   kernel tracing deadlocked multi-GPU servers; check both before relying on a trace.
+  For a per-kernel-symbol summary without steps, amd-tracking has
+  `skills/inference_engine/kernel-profile/scripts/summarize_trace.py`.
 - `graph_event_smoke.py OUT.json` — on one idle GPU, checks that `torch.cuda.Event(enable_timing=True,
   external=True)` recorded during stream capture becomes a timed event-record node, on the
   capture stream and on a forked stream, and measures the per-node overhead. Run it before

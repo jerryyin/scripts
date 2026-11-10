@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Compare two greedy-output files written by greedy_client.py, prompt by prompt.
 
-usage: compare_outputs.py A.jsonl B.jsonl [--label-a A] [--label-b B] [--out report.md]
+usage: compare_outputs.py A.jsonl B.jsonl [--label-a A] [--label-b B] [--out report.md] [--cache-free]
+       compare_outputs.py --pair LABEL_A=A.jsonl,LABEL_B=B.jsonl [--pair ...] [--cache-free]
 
 For each prompt index: exact match of the generated text (reasoning + content for chat), the first
 token where the re-encoded outputs differ, the common token prefix, finish reasons, completion
-token counts and prefix-cache hits. Prints a summary line and, with --out, writes a Markdown table.
-Exits 0 whether or not the outputs match; deciding what a mismatch means is the caller's job.
+token counts and prefix-cache hits. Prints a summary line per pair (exact, token-identical, differing
+at token 0, median and minimum first differing token, total common prefix, mean / min / max
+acceptance length of each side) and, with --out, writes a Markdown table. --cache-free adds the
+same counts over the prompts with no prefix-cache hit on either side. Exits 0 whether or not the
+outputs match; deciding what a mismatch means is the caller's job.
 """
 import argparse
 import json
@@ -52,23 +56,53 @@ def compare(a, b):
     return rows
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("a"); ap.add_argument("b")
-    ap.add_argument("--label-a", default="A"); ap.add_argument("--label-b", default="B")
-    ap.add_argument("--out")
-    args = ap.parse_args(argv)
-    rows = compare(load(args.a), load(args.b))
+def acceptance(outputs):
+    v = [r["acc_len"] for r in outputs.values() if r.get("acc_len") is not None]
+    return {"n": len(v), "mean": statistics.mean(v), "min": min(v), "max": max(v)} if v else None
+
+
+def summarize(rows, label):
     diffs = [r["first_diff_token"] for r in rows if r["first_diff_token"] is not None]
-    summary = {
-        "pair": f"{args.label_a} vs {args.label_b}",
+    return {
+        "pair": label,
         "exact": sum(r["exact"] for r in rows), "prompts": len(rows),
         "token_identical": sum(r["first_diff_token"] is None for r in rows),
         "differ_at_token_0": sum(d == 0 for d in diffs),
         "median_first_diff": statistics.median(diffs) if diffs else None,
+        "min_first_diff": min(diffs) if diffs else None,
+        "total_common_prefix": sum(r["common_prefix"] for r in rows),
         "mismatching_idx": [r["idx"] for r in rows if not r["exact"]],
     }
-    print(json.dumps(summary))
+
+
+def cache_free(rows):
+    return [r for r in rows if not any(int(c or 0) for c in r["cache_tokens"])]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("a", nargs="?"); ap.add_argument("b", nargs="?")
+    ap.add_argument("--label-a", default="A"); ap.add_argument("--label-b", default="B")
+    ap.add_argument("--pair", action="append", default=[], help="LABEL_A=A.jsonl,LABEL_B=B.jsonl (repeatable)")
+    ap.add_argument("--cache-free", action="store_true")
+    ap.add_argument("--out")
+    args = ap.parse_args(argv)
+    pairs = [tuple(tuple(side.split("=", 1)) for side in p.split(",")) for p in args.pair]
+    if args.a and args.b:
+        pairs.insert(0, ((args.label_a, args.a), (args.label_b, args.b)))
+    if not pairs:
+        ap.error("give A.jsonl B.jsonl or --pair")
+    if args.out and len(pairs) > 1:
+        ap.error("--out writes one pair's table")
+    for (la, pa), (lb, pb) in pairs:
+        A, B = load(pa), load(pb)
+        rows = compare(A, B)
+        summary = summarize(rows, f"{la} vs {lb}")
+        summary["acceptance"] = {la: acceptance(A), lb: acceptance(B)}
+        if args.cache_free:
+            free = cache_free(rows)
+            summary["cache_free"] = {**summarize(free, summary["pair"]), "idx": [r["idx"] for r in free]}
+        print(json.dumps(summary))
     if args.out:
         lines = [f"# {summary['pair']}: exact {summary['exact']}/{summary['prompts']}, token-identical "
                  f"{summary['token_identical']}/{summary['prompts']}\n",

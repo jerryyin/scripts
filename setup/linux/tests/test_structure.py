@@ -6,9 +6,12 @@ from support import ROOT
 
 class StructureTests(unittest.TestCase):
     def test_setup_root_contains_only_platforms_and_documentation(self):
-        self.assertEqual({entry.name for entry in (ROOT / 'setup').iterdir()
-                          if not entry.name.startswith('.')},
-                         {'README.md', 'linux', 'windows'})
+        entries = [entry for entry in (ROOT / 'setup').iterdir()
+                   if not entry.name.startswith('.')]
+        self.assertEqual({entry.name for entry in entries if entry.suffix != '.md'},
+                         {'linux', 'windows'})
+        self.assertIn('README.md', {entry.name for entry in entries})
+        self.assertTrue(all(entry.is_file() for entry in entries if entry.suffix == '.md'))
 
     def test_setup_and_docker_have_one_canonical_location(self):
         self.assertFalse((ROOT / 'devenv').exists())

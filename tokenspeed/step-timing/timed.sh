@@ -8,8 +8,8 @@
 # TS_STEP_TIMING_* variables that copy reads, writes per-rank dumps to DUMP_DIR, and execs COMMAND.
 # STRIDE times one layer in STRIDE; EVERY harvests every EVERY-th graph replay; EAGER=1 also times
 # eager decode steps (pass --enforce-eager to ts serve yourself). For the uninstrumented reference,
-# run the same command without this wrapper. Compose with ../serving/server.sh:
-#   server.sh start OUT -- timed.sh OUT/step-timing -- ts serve "${args[@]}"
+# run the same command without this wrapper. Compose with ../serving/dsv41_serve.sh:
+#   DSV41_WRAP="timed.sh OUT/step-timing --" (see ../serving/README.md)
 set -euo pipefail
 dump=${1:?usage: timed.sh DUMP_DIR -- COMMAND...}; shift
 [[ "${1:-}" == "--" ]] || { echo "usage: timed.sh DUMP_DIR -- COMMAND..." >&2; exit 2; }; shift

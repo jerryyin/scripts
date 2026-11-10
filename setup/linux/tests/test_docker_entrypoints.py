@@ -104,7 +104,17 @@ fi
         self.assertEqual(result.returncode, 23)
         self.assertNotIn('profiles/triton/workspace.sh', [row[0] for row in self.calls()])
 
-    def startup(self, command, **overrides):
+    def startup(self, command, rc_vault=True, **overrides):
+        # The startup command refuses images built before separated vaults: it needs rc_files'
+        # vault helper beside the scripts checkout and an activate.sh that takes --vault-scope
+        # (the fixture's activate.sh is a recorder, so it gets the marker here).
+        if rc_vault:
+            helper = self.repo.parent / 'rc_files/.setup/vault.py'
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.touch()
+            activate = self.repo / 'setup/linux/credentials/activate.sh'
+            if activate.exists():
+                activate.write_text(activate.read_text() + '# accepts --vault-scope\n')
         command = command.replace('$$', '$').replace('/bin/zsh', shlex.quote(str(self.binaries / 'zsh')))
         return self.run_shell('-c', command, cwd=self.repo.parent,
                               env=dict(self.env, **overrides), check=False)
@@ -116,6 +126,13 @@ fi
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[0], ['credentials/activate.sh', '/zyin', ''])
         self.assertEqual(self.calls()[-1][0], 'shell')
+
+    def test_image_without_separated_vaults_refuses_startup(self):
+        (self.repo.parent / 'scripts').symlink_to(self.repo, target_is_directory=True)
+        result = self.startup(self.compose['services']['triton']['command'][2], rc_vault=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Rebuild this image with dbuild', result.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_activation_failure_prevents_shell_startup(self):
         (self.repo.parent / 'scripts').symlink_to(self.repo, target_is_directory=True)

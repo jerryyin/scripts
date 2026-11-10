@@ -6,14 +6,18 @@ Usage:
   analyze_sustained.py --server-log LOG [--t0 ISO --t1 ISO]           # server-log only
 Window: --t0/--t1 if given, else the MEASURE_BEGIN/END markers written by run_sustained.sh (evalscope 1.11.1
 db times are time.perf_counter(), not epoch; used only for client durations), else the whole log.
---steady A:B adds a 'server_steady' pass over [first batch line + A, first batch line + B].
+--steady A:B adds a 'server_steady' pass over [first batch line + A, first batch line + B] and a
+client 'steady' block over requests completed A..B seconds after the first request started
+(anchors: first batch line, first request start; evalscope_db.py reads the database).
+--instances FILE adds conversations started / completed all turns (salt per conversation).
 Server lines are parsed with ../batch_log.py: "Prefill|Mix|Decode batch." lines and
 "Finish! RequestStats(...)".
 """
-import argparse, bisect, datetime as dt, glob, json, math, os, sqlite3, sys
+import argparse, bisect, datetime as dt, glob, json, math, os, sys
 from collections import Counter, defaultdict
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path[:0] = [os.path.dirname(os.path.abspath(__file__)), os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
 from batch_log import parse_line  # noqa: E402
+from evalscope_db import parse_steady, read_results, salt_of, steady_bounds  # noqa: E402
 
 
 def iso(t):
@@ -64,26 +68,51 @@ def hist(vals, ws, binw=1.0):
     return {('%g' % k): round(v / tot, 5) for k, v in sorted(h.items())}
 
 
-def client_metrics(run_dir):
-    dbs = sorted(glob.glob(os.path.join(run_dir, 'collected', '*.db'))) or \
-        sorted(glob.glob(os.path.join(run_dir, 'evalscope', '**', '*.db'), recursive=True))
-    if not dbs: return None, None
-    con = sqlite3.connect(dbs[0])
-    rows = con.execute('select start_time, completed_time, success, latency, first_chunk_latency, prompt_tokens, '
-                       'completion_tokens from result').fetchall()
-    ok = [r for r in rows if r[2]]
-    t0 = min(r[0] for r in rows); t1 = max(r[1] for r in rows if r[1])
-    win = t1 - t0
+def client_block(ok, win):
+    """Client rates and latency percentiles of successful requests (start, completed, success, latency,
+    first_chunk_latency, prompt_tokens, completion_tokens) over a window of win seconds."""
     ttft = [r[4] for r in ok if r[4] is not None]
     tpot = [(r[3] - r[4]) / (r[6] - 1) for r in ok if r[3] is not None and r[4] is not None and r[6] and r[6] > 1]
     out_tok = sum(r[6] or 0 for r in ok); in_tok = sum(r[5] or 0 for r in ok)
-    res = dict(db=dbs[0], requests_total=len(rows), requests_ok=len(ok), requests_failed=len(rows) - len(ok),
-               window_start=iso(t0), window_end=iso(t1), window_s=round(win, 3),
-               output_tokens=out_tok, input_tokens_reported=in_tok,
-               output_tok_per_s=round(out_tok / win, 2) if win > 0 else None,
-               requests_per_s=round(len(ok) / win, 4) if win > 0 else None,
-               ttft_s=pct(ttft), tpot_per_request_s=pct(tpot),
-               completion_tokens=pct([r[6] for r in ok]), prompt_tokens=pct([r[5] for r in ok]))
+    return dict(requests_ok=len(ok), window_s=round(win, 3), output_tokens=out_tok, input_tokens_reported=in_tok,
+                output_tok_per_s=round(out_tok / win, 2) if win > 0 else None,
+                total_tok_per_s=round((out_tok + in_tok) / win, 2) if win > 0 else None,
+                requests_per_s=round(len(ok) / win, 4) if win > 0 else None,
+                ttft_s=pct(ttft), tpot_per_request_s=pct(tpot),
+                completion_tokens=pct([r[6] for r in ok]), prompt_tokens=pct([r[5] for r in ok]))
+
+
+def client_metrics(run_dir, steady=None, instances=None):
+    """Client metrics over the whole run and, with steady=(A, B), over requests completed in
+    [first request start + A, min(first request start + B, last completion)]. instances is the
+    workload's instances.json (salt and turn count per conversation), for conversation counts."""
+    dbs = sorted(glob.glob(os.path.join(run_dir, 'collected', '*.db'))) or \
+        sorted(glob.glob(os.path.join(run_dir, 'evalscope', '**', '*.db'), recursive=True))
+    if not dbs: return None, None
+    keys = ('start_time', 'completed_time', 'success', 'latency', 'first_chunk_latency', 'prompt_tokens',
+            'completion_tokens', 'request')
+    rows = [tuple(r[k] for k in keys) for r in read_results(dbs[0])]
+    ok = [r for r in rows if r[2]]
+    t0 = min(r[0] for r in rows); t1 = max(r[1] for r in rows if r[1])
+    res = dict(db=dbs[0], requests_total=len(rows), requests_failed=len(rows) - len(ok),
+               window_start=iso(t0), window_end=iso(t1), **client_block(ok, t1 - t0))
+    if steady:
+        s0, s1 = steady_bounds(t0, steady, t1)
+        res['steady'] = dict(definition=f'requests completed in [first start + {steady[0]:g} s, '
+                                        f'min(first start + {steady[1]:g} s, last completion)]',
+                             **client_block([r for r in ok if r[1] and s0 <= r[1] <= s1], s1 - s0))
+    if instances:
+        turns = {d['salt'][len('[session '):-1] if d['salt'].startswith('[session ') else d['salt']: d['turns']
+                 for d in json.load(open(instances))}
+        sent, done = Counter(), Counter()
+        for r in rows:
+            k = salt_of(r[7])
+            sent[k] += 1; done[k] += 1 if r[2] else 0
+        started = [k for k in sent if k is not None]
+        res['conversations'] = dict(started=len(started),
+                                    completed_all_turns=sum(1 for k in started if k in turns and done[k] >= turns[k]),
+                                    unsalted_requests=sent.get(None, 0),
+                                    unknown_salts=sum(1 for k in started if k not in turns))
     return res, (t0, t1)
 
 
@@ -181,12 +210,14 @@ def main():
     ap.add_argument('--log-interval', type=int, default=10); ap.add_argument('--json')
     ap.add_argument('--grid-dt', type=float, default=0.5); ap.add_argument('--stale-s', type=float, default=5.0)
     ap.add_argument('--steady', default='120:900', help='A:B seconds after window start for an extra steady-state '
-                    'server pass (excludes the cold-start ramp and the soft-exit drain); "" disables')
+                    'server and client pass (excludes the cold-start ramp and the soft-exit drain); "" disables')
+    ap.add_argument('--instances', help="the workload's instances.json, for conversations started and completed")
     a = ap.parse_args()
     res = dict(tool='analyze_sustained.py')
     win = None
+    steady = parse_steady(a.steady)
     if a.run_dir:
-        cm, win = client_metrics(a.run_dir); res['client'] = cm
+        cm, win = client_metrics(a.run_dir, steady, a.instances); res['client'] = cm
         if win is not None and win[0] < 1e9:
             # evalscope 1.11.1 stores start/completed times from time.perf_counter() (monotonic, not epoch):
             # use them for client durations only; the server window comes from the run_sustained markers.
@@ -200,8 +231,7 @@ def main():
     log = a.server_log or (os.path.join(a.run_dir, 'server-slice.log') if a.run_dir else None)
     if log and os.path.exists(log):
         res['server'] = server_metrics(log, win[0] if win else None, win[1] if win else None, a.log_interval, a.grid_dt, a.stale_s)
-        if a.steady and win and win[0] is not None:
-            sa, sb = (float(x) for x in a.steady.split(':'))
+        if steady and win and win[0] is not None:
             base = win[0]
             try:  # steady window is relative to the first server batch line in the window (first request), not the marker
                 with open(log, errors='replace') as f:
@@ -210,7 +240,7 @@ def main():
                             e = parse_line(line)
                             if e and e['ts'] and e['ts'] >= win[0]: base = e['ts']; break
             except OSError: pass
-            s0 = base + sa; s1 = base + sb if win[1] is None else min(base + sb, win[1])
+            s0, s1 = steady_bounds(base, steady, win[1])
             if s1 > s0:
                 res['server_steady'] = server_metrics(log, s0, s1, a.log_interval, a.grid_dt, a.stale_s)
                 res['server_steady']['steady_spec_s'] = a.steady

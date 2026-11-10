@@ -3,7 +3,7 @@
 # triton-investigations campaign tokenspeed-dsv41-ep4-decode.
 #
 # usage: mapfile -d '' args < <(MODEL=... dsv41_args.sh CONFIG [PORT] [DIST_PORT])
-#        server.sh start OUT -- ts serve "${args[@]}"
+#        (dsv41_serve.sh runs it under amd-tracking's manage_server.py)
 #   CONFIG: ep4 | ep4-dspark | ep8 | tp4 | tp4-dspark
 # EP configurations need TokenSpeed with Gluon Petit EP4 support for ep4*. GPUs: HIP_VISIBLE_DEVICES.
 set -euo pipefail

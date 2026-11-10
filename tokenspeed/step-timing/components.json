@@ -1,0 +1,28 @@
+{
+ "_doc": "Requested components of a DeepSeek V4.1 decode step, as sums of analyze_step_timing.py categories. 'markers' are the start-marker names (from instrumentation.diff) inside the component, used for the per-marker overhead correction. Categories not listed here are reported as 'other: <category>'; 'aux' categories run overlapped on the aux stream and are shown but not summed.",
+ "components": [
+  {"name": "embed/prep (+graph.pre)", "categories": ["embed+prep", "graph.pre(before model.begin)"], "markers": ["model.begin"]},
+  {"name": "Engram", "categories": ["engram"], "markers": ["engram"]},
+  {"name": "norms/mHC pre-attn", "categories": ["mhc+norm(pre-attn)"], "markers": ["layer"]},
+  {"name": "attn: qkv_a projection", "categories": ["attn.qkv_a"], "markers": ["attn"]},
+  {"name": "attn: compressor+KV write+indexer (main-stream part: fork gap + serial + after)", "categories": ["attn.main_fork_gap", "attn.compressor+indexer(serial)", "attn.after_kvidx"], "markers": ["attn.fork", "attn.kvidx.b", "attn.kvidx.e"]},
+  {"name": "attn: q proj+rope (+join wait on aux compressor)", "categories": ["attn.q_proj+rope+join_wait"], "markers": ["attn.q"]},
+  {"name": "attn: sparse-MLA core", "categories": ["attn.sparse_mla_core"], "markers": ["attn.core"]},
+  {"name": "attn: output proj (+TP4 attn all-reduce)", "categories": ["attn.out_proj(+attn allreduce)"], "markers": ["attn.wo"]},
+  {"name": "norms/mHC pre-ffn", "categories": ["mhc+norm(pre-ffn)"], "markers": ["hc_ffn"]},
+  {"name": "ffn.pre_comm", "categories": ["ffn.pre_comm"], "markers": ["ffn"]},
+  {"name": "MoE router/top-k", "categories": ["moe.router_gate_topk"], "markers": ["moe.router"]},
+  {"name": "MoE prep (EP: quant/prep; TP4: whole routed MoE)", "categories": ["moe.prep(quant/non-petit experts)"], "markers": ["moe.experts"]},
+  {"name": "Petit Stage1 (dispatch wait + gate/up)", "categories": ["petit.stage1(dispatch_wait+gate_up)"], "markers": ["petit.s1"]},
+  {"name": "Petit Stage2 (down)", "categories": ["petit.stage2(down)"], "markers": ["petit.s2"]},
+  {"name": "Petit Combine", "categories": ["petit.combine"], "markers": ["petit.comb"]},
+  {"name": "Petit post (petit.post->next; analyzer label moe.shared_join_wait)", "categories": ["moe.shared_join_wait"], "markers": ["petit.post"]},
+  {"name": "shared expert (serial on main stream)", "categories": ["other:shared.b"], "markers": ["shared.b"]},
+  {"name": "shared.e->moe.join (shared add/join)", "categories": ["other:shared.e"], "markers": ["shared.e"]},
+  {"name": "add/post-comm (TP4 all-reduce)", "categories": ["ffn.add+post_comm(allreduce)"], "markers": ["moe.join"]},
+  {"name": "layer tail (ffn.end->next layer)", "categories": ["layer_tail"], "markers": ["ffn.end"]},
+  {"name": "final norm", "categories": ["final_norm"], "markers": ["final"]},
+  {"name": "lm_head+sampling+outputs", "categories": ["lm_head+sampling+outputs"], "markers": ["model.end"]}
+ ],
+ "aux": ["aux.attn.compressor+indexer", "aux.shared_expert"]
+}

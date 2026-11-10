@@ -10,6 +10,7 @@ board/
 ├── gpu-lock               # run a command under an exclusive flock on the shared lock file
 ├── gpu-contention.sh      # who else holds /dev/kfd right now, from the HOST namespaces
 ├── gpu-wait.py            # wait until N GPUs have no process on them; or snapshot who is on them
+├── test_gpu_wait.py       # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -26,6 +27,11 @@ board/
   wait for idle GPUs rather than share them. `gpu-wait.py --snapshot [--gpus ...]` prints the
   current process list (PID and memory per GPU) as JSON; it is the one amd-smi parser here, used
   by `agent/unattended/measurement_record.py`.
+  While another process holds the host-wide lock (`gpu-lock`'s file, `--host-lock`) every GPU
+  counts as busy. On a host with an amd-tracking checkout, `--amd-tracking DIR [--lease-dir DIR]`
+  takes ownership from amd-tracking's `apps/shared/gpu_admission.py` (KFD queue and VRAM owners,
+  per-GPU leases) instead of amd-smi; inside amd-tracking runs, its `manage_server.py start` makes
+  that check itself (with `--host-lock` for this lock). Tests: `test_gpu_wait.py`.
 - `gpu-lock` — wraps a command in an exclusive `flock` on a shared lock file so only one
   wrapped application runs at a time. Cooperative, not a security boundary: anything
   launched without the wrapper bypasses it. That gap is what `lock-guard/` closes.

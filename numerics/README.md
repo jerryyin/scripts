@@ -12,6 +12,8 @@ numerics/
 │                       #   same bytes? Pure standard library, no device, no numpy
 ├── genRandInput.py     # generate random binary inputs of a given shape/dtype, or a
 │                       #   buffer of special values; also dumps
+├── range_compare.py    # repeated measurements: median [min,max] per group, and ratios
+│                       #   between configurations with a range-overlap verdict
 ├── sensitivity_classify.py  # does a difference matter, and which of two arms is wrong
 └── ulp_magnitudes.py   # bfloat16 difference in ULPs, absolute and relative; no verdict
 ```
@@ -25,9 +27,25 @@ to it, but needs neither.
 `ulp_magnitudes.py` when you want the magnitude of a difference with no verdict attached.
 `sensitivity_classify.py` when you need to know whether a difference matters.
 `distinct_hashes.py` when the question is not "is it right" but "is it the same every
-time".
+time". `range_compare.py` when the numbers are repeated measurements (throughput, latency) of
+several configurations and the question is which is faster.
 
 ## Files
+
+- `range_compare.py` — standard library only. `summarize` groups rows of CSV or JSON tables by
+  key columns and writes `<metric>_median/_min/_max/_n` (dotted names reach into nested JSON,
+  `--where NAME~REGEX` filters). `compare` joins such summary tables on their keys and, for each
+  `--ratio A/B`, prints the ratio of medians, its conservative bounds `[A_min/B_max, A_max/B_min]`
+  (`--bounds`) and `higher`/`lower` only when the two [min,max] ranges are disjoint, else
+  `overlap`. `LABEL=a.csv+b.csv` (or `--pool` for one table) pools several rows of a key; otherwise a table with
+  two rows for one key is refused. `--alias`, `--where`,
+  `--key-divide` and `--scale` align tables whose keys differ (for example per-rank batch and
+  per-GPU throughput across rank counts). Tests: `test_range_compare.py`.
+
+  ```bash
+  python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \
+      --table EP4=ep4/summary.csv --table TP4=tp4/summary.csv --ratio EP4/TP4
+  ```
 
 - `genRandInput.py` — writes a random binary buffer of a given shape and dtype, and with
   `--dump` prints an existing one in readable form. With `--special` it writes the values

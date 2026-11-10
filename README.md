@@ -29,6 +29,9 @@ Development setup, execution infrastructure, and GPU engineering tools.
   one that already does the job. If one exists, use it; if it falls short, change it (a new flag,
   mode or importable function) rather than adding a sibling that does nearly the same thing. A new
   file is for a job nothing here does; a shared helper that two tools need lives once, with its owner.
+- **Analysis is a tool too.** A script that turns measurements into a reported number lands here (or
+  in the team repository whose format it reads) before the result is admitted; the full rule is
+  "Tools behind a result" in triton-investigations' `orchestration/local/prompts/worker.md`.
 - Group files by subject, and keep frequently used subjects directly accessible
   from the root. Add a parent directory when it helps navigation: `containers/`
   groups Docker and Kubernetes; `agent/` groups coding-agent sessions and unattended work.

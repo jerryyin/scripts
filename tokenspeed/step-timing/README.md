@@ -12,16 +12,19 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
+| `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), and the instrumentation overhead per point (`overhead`); tests in `test_step_breakdown.py` |
 
 Make the patched copy (checks that the patch still applies) and serve from it:
 
 ```bash
 git -C "$TS_SRC" worktree add --detach "$INSTR" 0dd8d477
 git -C "$INSTR" apply --check instrumentation.diff && git -C "$INSTR" apply instrumentation.diff
-mapfile -d '' args < <(../serving/dsv41_args.sh ep4)
-../serving/server.sh start out -- ./timed.sh out/step-timing -- ts serve "${args[@]}"
-# ... drive decode with ../serving/decode/, then: ../serving/server.sh stop out done
+DSV41_CONFIG=ep4 DSV41_WRAP="$PWD/timed.sh $PWD/out/step-timing --" \
+  python3 $AT/skills/inference_engine/benchmark/scripts/manage_server.py start \
+  --command-file ../serving/dsv41_serve.sh $MS_START_ARGS        # see ../serving/README.md
+# ... drive decode with ../serving/decode/, then: manage_server.py stop --state-file ... --execute
 python3 analyze_step_timing.py --dir out/step-timing --out out/breakdown
+python3 step_breakdown.py table out/breakdown out/step-timing --label "EP4 B=1" --clean-ms 15.55 --json ep4.json
 ```
 
 To port the patch to a newer TokenSpeed, apply it in a worktree at that commit, fix the rejected

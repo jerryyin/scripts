@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Natural-prose prompt source for fbdw_client.py (--prompt-source natural).
 
+Reproduces the natural-prose corpus of the tokenspeed-dsv41-ep4-decode campaign's fixed-batch rows.
+For new prompts use amd-tracking's real-token bank (prepare_token_corpus.py) and its prompt fitting
+(run_evalscope_matrix.build_token_prompts): this file's window fitting is an older variant of it,
+kept because changing it would change the recorded prompt bytes.
+
 Corpus (fixed, sorted path order):
   1. git-tracked *.md/*.rst/*.txt of the --git-root checkout, excluding CMakeLists.txt and
      requirements*.txt (not prose);
