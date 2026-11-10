@@ -11,7 +11,8 @@ board/
 ├── gpu-contention.sh      # who else holds /dev/kfd right now, from the HOST namespaces
 ├── gpu-wait.py            # wait until N GPUs have no process on them; or snapshot who is on them
 ├── test_gpu_wait.py       # its tests (no GPU needed)
-├── gpu-claim              # wait (gpu-wait.py), then run a real job on the GPUs inside a container
+├── gpu-queue              # claim GPUs once on a shared host, run queued jobs back to back
+├── test_gpu_queue.py      # its tests (no GPU or docker needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -35,13 +36,30 @@ board/
   that check itself (with `--host-lock` for this lock). Tests: `test_gpu_wait.py`.
   `--idle-by usage` decides from VRAM use and graphics activity instead of the process list, and
   `--hip` prints HIP device ids instead of amd-smi indices (see below for why both exist).
-- `gpu-claim --count N --container NAME -- COMMAND` — runs on the host: waits with
-  `gpu-wait.py N --hip --idle-by usage` (no time limit), then `docker exec`s COMMAND in the
-  container with `HIP_VISIBLE_DEVICES` set to the idle GPUs, and exits with its status. The job
-  holds the GPUs only while it runs; nothing placeholder, nothing signalled. For a shared host with
-  no scheduler, where idle GPUs are taken again within minutes. Log:
-  `~/.local/state/gpu-claim/<container>-<time>.log`, ending `claim: exit=<status>`.
+- `gpu-queue` — a job queue for a shared host with no scheduler, where GPUs a job releases are
+  taken by other users' queues before anyone can start the next job, and idle GPUs reserve
+  nothing because other launches do not check. `gpu-queue serve DIR --count N --container NAME`
+  runs on the host and holds no GPU while the queue is empty. When a job is pending it waits for
+  N idle GPUs (`gpu-wait.py N --hip --idle-by usage`), then runs every pending job on those GPUs
+  oldest first, each starting the moment the previous one exits, including jobs queued while
+  earlier ones run; it releases when the queue is empty. It never runs placeholder load and never
+  signals another process. `gpu-queue add DIR [--name NAME] -- COMMAND` (or `--file SCRIPT`) and
+  `gpu-queue status DIR` run where DIR is local, normally inside the container. Jobs get
+  `HIP_VISIBLE_DEVICES`; their output and exit status land in `DIR/done/` or `DIR/failed/`.
+  Tests: `test_gpu_queue.py`.
 
+  ```bash
+  # host, once (survives logout):
+  nohup setsid board/gpu-queue serve /path/in/container/queue --count 4 --container <name> \
+      > /dev/null 2>&1 < /dev/null &
+  tail -f ~/.local/state/gpu-queue/<name>.log
+  # inside the container, any time:
+  board/gpu-queue add /path/in/container/queue --name numerics -- 'cd /work && ./run-numerics.sh'
+  board/gpu-queue status /path/in/container/queue
+  ```
+
+  To keep the GPUs across a sequence of experiments, queue the next job before the current one
+  finishes; a job queued after the queue empties waits for a fresh claim.
 - `gpu-lock` — wraps a command in an exclusive `flock` on a shared lock file so only one
   wrapped application runs at a time. Cooperative, not a security boundary: anything
   launched without the wrapper bypasses it. That gap is what `lock-guard/` closes.
@@ -60,12 +78,6 @@ board/
   same *sets* {0-3} and {4-7}, which hides the mismatch until a job asks for a subset. Passing
   amd-smi indices to `HIP_VISIBLE_DEVICES` puts the job on someone else's GPUs. `--hip` maps by PCI
   bus address; checked against torch's `pci_bus_id` for all eight devices.
-
-```bash
-nohup setsid board/gpu-claim --count 4 --container <name> -- /path/in/container/job.sh \
-    > /dev/null 2>&1 &
-tail -f ~/.local/state/gpu-claim/<name>-*.log
-```
 
 ## The contention probe must run in the HOST pid namespace
 

@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""A GPU job queue for a shared host with no scheduler: claim GPUs once, run queued jobs back to back.
+
+usage: gpu-queue add DIR [--name NAME] (--file SCRIPT | -- COMMAND...)
+       gpu-queue status DIR
+       gpu-queue serve DIR --count N [--container NAME] [--poll 30] [--confirm 2]
+                       [--max-vram-mb 1024] [--idle-by usage|process] [--log FILE] [--once]
+
+On a shared host, GPUs a finished job releases are taken by other users' queues before a
+person can start the next job, and idle GPUs reserve nothing because other launches do not
+check. So one claim must cover a sequence of jobs. `serve` holds no GPU while the queue is
+empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`, default
+--idle-by usage), then runs every pending job on those GPUs, oldest first, starting each the
+moment the previous one exits, including jobs added while earlier ones run. It releases the
+GPUs when the queue is empty and goes back to waiting (or exits, with --once). It never runs
+placeholder load and never signals another process.
+
+DIR holds pending/, running/, done/ and failed/. A job is an executable script; it runs with
+HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set, and its output and exit status land
+beside it as <job>.log and <job>.exit. With --container, `serve` runs on the host (where
+amd-smi sees every tenant) and reaches DIR and the job through `docker exec`, so DIR is a path
+inside the container; `add` and `status` run wherever DIR is a local path, normally inside the
+container. A job left in running/ by a crashed `serve` moves to failed/ with exit
+`interrupted` when `serve` starts again.
+
+All jobs in a queue use the same GPU count. Every claim, job start and exit status is
+appended to --log (default ~/.local/state/gpu-queue/<container or host>.log).
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+GPU_WAIT = Path(__file__).resolve().with_name('gpu-wait.py')
+STATES = ('pending', 'running', 'done', 'failed')
+JOB_RE = re.compile(r'^[0-9TZ-]+-[A-Za-z0-9._-]+\.sh$')
+NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+NO_TIME_LIMIT = str(10 ** 9)  # seconds; gpu-wait.py has no "wait forever" value
+
+
+@dataclasses.dataclass(frozen=True)
+class Store:
+    """Queue directory operations, run locally or inside a container through docker exec."""
+    root: str
+    container: str | None = None
+
+    def sh(self, script: str, *args: str, check: bool = True,
+           env: dict[str, str] | None = None, capture: bool = True) -> subprocess.CompletedProcess:
+        env = env or {}
+        if self.container:
+            prefix = ['docker', 'exec', *[f'-e{k}={v}' for k, v in env.items()], self.container]
+            child_env = None
+        else:
+            prefix, child_env = [], {**os.environ, **env}
+        return subprocess.run([*prefix, 'sh', '-c', script, 'gpu-queue', self.root, *args],
+                              capture_output=capture, text=True, check=check, env=child_env)
+
+    def init(self) -> None:
+        self.sh('cd "$1" 2>/dev/null || mkdir -p "$1"; mkdir -p "$1/pending" "$1/running" "$1/done" "$1/failed"')
+
+    def jobs(self, state: str) -> list[str]:
+        out = self.sh('ls -1 "$1/$2" 2>/dev/null || true', state).stdout.split()
+        return sorted(name for name in out if JOB_RE.match(name))
+
+    def move(self, job: str, src: str, dst: str) -> None:
+        self.sh('mv "$1/$2/$4" "$1/$3/$4" && { [ ! -e "$1/$2/$4.log" ] || mv "$1/$2/$4.log" "$1/$3/"; }',
+                src, dst, job)
+
+    def write_exit(self, job: str, state: str, value: str) -> None:
+        self.sh('printf "%s\\n" "$4" > "$1/$2/$3.exit"', state, job, value)
+
+    def run(self, job: str, hip: str) -> int:
+        env = {'HIP_VISIBLE_DEVICES': hip, 'GPU_QUEUE_HIP': hip, 'GPU_QUEUE_JOB': job}
+        result = self.sh('cd "$1/running" && exec bash -lc \'exec "./$0" > "./$0.log" 2>&1\' "$2"',
+                         job, check=False, env=env, capture=False)
+        return result.returncode
+
+
+def note(log: Path, message: str) -> None:
+    line = f'{dt.datetime.now().astimezone():%Y-%m-%dT%H:%M:%S%z} {message}'
+    with log.open('a') as fh:
+        fh.write(line + '\n')
+    print(line, flush=True)
+
+
+def wait_for_gpus(args: argparse.Namespace, log: Path) -> str:
+    """HIP ids of args.count idle GPUs, from gpu-wait.py (no time limit)."""
+    cmd = [sys.executable, str(GPU_WAIT), str(args.count), '--hip', '--idle-by', args.idle_by,
+           '--max-vram-mb', str(args.max_vram_mb), '--poll', str(args.poll),
+           '--confirm', str(args.confirm), '--timeout', NO_TIME_LIMIT, '--log', str(log)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    hip = result.stdout.strip()
+    if result.returncode != 0 or not hip:
+        raise SystemExit(f'gpu-wait.py failed ({result.returncode}): {result.stderr.strip()}')
+    return hip
+
+
+def recover(store: Store, log: Path) -> None:
+    for job in store.jobs('running'):
+        store.move(job, 'running', 'failed')
+        store.write_exit(job, 'failed', 'interrupted')
+        note(log, f'{job}: found in running/ at start, moved to failed/ (interrupted)')
+
+
+def drain(store: Store, hip: str, log: Path) -> None:
+    """Run pending jobs on `hip`, oldest first, until none is left."""
+    while pending := store.jobs('pending'):
+        job = pending[0]
+        store.move(job, 'pending', 'running')
+        note(log, f'{job}: start on HIP {hip}')
+        status = store.run(job, hip)
+        state = 'done' if status == 0 else 'failed'
+        store.move(job, 'running', state)
+        store.write_exit(job, state, str(status))
+        note(log, f'{job}: exit={status} -> {state}/')
+
+
+def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus) -> int:
+    store.init()
+    recover(store, log)
+    note(log, f'serving {store.root} ({args.container or "local"}), {args.count} GPUs per claim')
+    while True:
+        if not store.jobs('pending'):
+            if args.once:
+                note(log, 'queue empty; --once, exiting')
+                return 0
+            time.sleep(args.poll)
+            continue
+        note(log, f'{len(store.jobs("pending"))} job(s) pending; waiting for {args.count} idle GPUs')
+        hip = wait(args, log)
+        note(log, f'claimed HIP {hip}')
+        drain(store, hip, log)
+        note(log, f'queue empty; released HIP {hip}')
+
+
+def add(args: argparse.Namespace) -> int:
+    if args.file and args.command:
+        raise SystemExit('give --file or a command, not both')
+    if args.file:
+        body = Path(args.file).read_text()
+        name = args.name or Path(args.file).stem
+    else:
+        command = args.command[0] if len(args.command) == 1 else shlex.join(args.command)
+        if not command:
+            raise SystemExit('give --file SCRIPT or -- COMMAND')
+        body = f'#!/usr/bin/env bash\n{command}\n'
+        name = args.name or 'job'
+    if not NAME_RE.match(name):
+        raise SystemExit(f'job name {name!r} may use only letters, digits, ".", "_" and "-"')
+    queue = Path(args.dir)
+    for state in STATES:
+        (queue / state).mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    job = queue / 'pending' / f'{stamp}-{name}.sh'
+    tmp = queue / 'pending' / f'.{job.name}.tmp'
+    tmp.write_text(body)
+    tmp.chmod(0o755)
+    os.replace(tmp, job)  # atomic: serve never sees a half-written job
+    print(job)
+    return 0
+
+
+def status(args: argparse.Namespace) -> int:
+    queue = Path(args.dir)
+    for state in STATES:
+        names = sorted(p.name for p in (queue / state).glob('*.sh')) if (queue / state).is_dir() else []
+        print(f'{state}: {len(names)}')
+        for name in names:
+            exit_file = queue / state / f'{name}.exit'
+            suffix = f'  exit={exit_file.read_text().strip()}' if exit_file.exists() else ''
+            print(f'  {name}{suffix}')
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('add', help='queue a job (run where DIR is local)')
+    p.add_argument('dir')
+    p.add_argument('--name')
+    p.add_argument('--file')
+    p = sub.add_parser('status', help='list jobs by state (run where DIR is local)')
+    p.add_argument('dir')
+    p = sub.add_parser('serve', help='claim GPUs and run queued jobs (run on the host)')
+    p.add_argument('dir')
+    p.add_argument('--count', type=int, required=True)
+    p.add_argument('--container')
+    p.add_argument('--poll', type=int, default=30)
+    p.add_argument('--confirm', type=int, default=2)
+    p.add_argument('--max-vram-mb', type=int, default=1024)
+    p.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
+    p.add_argument('--log', type=Path)
+    p.add_argument('--once', action='store_true', help='exit when the queue is empty')
+    argv = sys.argv[1:] if argv is None else argv
+    # Everything after "--" is the job's command, never options of gpu-queue.
+    command = argv[argv.index('--') + 1:] if '--' in argv else []
+    args = parser.parse_args(argv[:argv.index('--')] if '--' in argv else argv)
+    if args.cmd == 'add':
+        args.command = command
+        return add(args)
+    if args.cmd == 'status':
+        return status(args)
+    log = args.log or Path.home() / '.local/state/gpu-queue' / f'{args.container or "host"}.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    return serve(args, Store(args.dir, args.container), log)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
