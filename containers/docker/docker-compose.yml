@@ -92,6 +92,8 @@ services:
 
   triton:
     <<: *base-service
+    # RCCL keeps a 41 MB proxy pool per GPU process in /dev/shm; Docker's 64 MB default fits one.
+    shm_size: "16g"
     build:
       context: .
       dockerfile: base.dockerfile
