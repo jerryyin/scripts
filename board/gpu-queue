@@ -3,18 +3,18 @@
 
 usage: gpu-queue add DIR [--name NAME] (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
-       gpu-queue serve DIR --count N [--container NAME] [--poll 30] [--confirm 2]
-                       [--max-vram-mb 1024] [--idle-by usage|process] [--log FILE] [--once]
+       gpu-queue serve DIR --count N [--container NAME] [--poll 30] [--confirm 4]
+                       [--idle-by usage|process] [--log FILE] [--once]
                        [--reclaim-after SECONDS [--reclaim-grace 30]]
 
 On a shared host, GPUs a finished job releases are taken by other users' queues before a
 person can start the next job, and idle GPUs reserve nothing because other launches do not
 check. So one claim must cover a sequence of jobs. `serve` holds no GPU while the queue is
-empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`, default
---idle-by usage), then runs every pending job on those GPUs, oldest first, starting each the
-moment the previous one exits, including jobs added while earlier ones run. It releases the
-GPUs when the queue is empty and goes back to waiting (or exits, with --once). It never runs
-placeholder load, and signals no process unless --reclaim-after is given.
+empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`), then runs every
+pending job on those GPUs, oldest first, starting each the moment the previous one exits,
+including jobs added while earlier ones run. It releases the GPUs when the queue is empty and
+goes back to waiting (or exits, with --once). It never runs placeholder load, and signals no
+process unless --reclaim-after is given.
 
 --reclaim-after (host serve with --container only; every GPU process on the machine must be
 yours): when a pending job has waited that many seconds without a claim, `serve` stops every
@@ -108,8 +108,8 @@ def wait_for_gpus(args: argparse.Namespace, log: Path) -> str | None:
     """HIP ids of args.count idle GPUs from gpu-wait.py; None if args.reclaim_after passes first."""
     timeout = str(args.reclaim_after) if args.reclaim_after else NO_TIME_LIMIT
     cmd = [sys.executable, str(GPU_WAIT), str(args.count), '--hip', '--idle-by', args.idle_by,
-           '--max-vram-mb', str(args.max_vram_mb), '--poll', str(args.poll),
-           '--confirm', str(args.confirm), '--timeout', timeout, '--log', str(log)]
+           '--poll', str(args.poll), '--confirm', str(args.confirm), '--timeout', timeout,
+           '--log', str(log)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     hip = result.stdout.strip()
     if result.returncode == 1 and not hip and args.reclaim_after:
@@ -316,8 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument('--count', type=int, required=True)
     p.add_argument('--container')
     p.add_argument('--poll', type=int, default=30)
-    p.add_argument('--confirm', type=int, default=2)
-    p.add_argument('--max-vram-mb', type=int, default=1024)
+    p.add_argument('--confirm', type=int, default=4)  # a loaded server reads 0% between requests
     p.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
     p.add_argument('--log', type=Path)
     p.add_argument('--once', action='store_true', help='exit when the queue is empty')

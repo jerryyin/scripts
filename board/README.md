@@ -9,7 +9,7 @@ board/
 ├── README.md              # this file
 ├── gpu-lock               # run a command under an exclusive flock on the shared lock file
 ├── gpu-contention.sh      # who else holds /dev/kfd right now, from the HOST namespaces
-├── gpu-wait.py            # wait until N GPUs have no process on them; or snapshot who is on them
+├── gpu-wait.py            # wait until N GPUs are idle; or snapshot who is on them
 ├── test_gpu_wait.py       # its tests (no GPU needed)
 ├── gpu-queue              # claim GPUs once on a shared host, run queued jobs back to back
 ├── test_gpu_queue.py      # its tests (no GPU or docker needed)
@@ -22,25 +22,18 @@ board/
 
 ## Files
 
-- `gpu-wait.py N` — polls `amd-smi process --json` until N GPUs have had no process on
-  `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Logs each
-  poll with the busy GPUs' PIDs (host namespace; identify owners with `gpu-contention.sh` on the
-  host). Never signals anything. For shared machines without a lock, where measurements must
-  wait for idle GPUs rather than share them. `gpu-wait.py --snapshot [--gpus ...]` prints the
-  current process list (PID and memory per GPU) as JSON; it is the one amd-smi parser here, used
-  by `agent/unattended/measurement_record.py`.
-  While another process holds the host-wide lock (`gpu-lock`'s file, `--host-lock`) every GPU
-  counts as busy. On a host with an amd-tracking checkout, `--amd-tracking DIR [--lease-dir DIR]`
-  takes ownership from amd-tracking's `apps/shared/gpu_admission.py` (KFD queue and VRAM owners,
-  per-GPU leases) instead of amd-smi; inside amd-tracking runs, its `manage_server.py start` makes
-  that check itself (with `--host-lock` for this lock). Tests: `test_gpu_wait.py`.
-  `--idle-by usage` decides from VRAM use and graphics activity instead of the process list, and
-  `--hip` prints HIP device ids instead of amd-smi indices (see below for why both exist).
+- `gpu-wait.py N` — polls `amd-smi metric` until N GPUs show 0% graphics activity on
+  `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Memory
+  other processes hold does not count; on a pick it logs who holds memory there (host PIDs,
+  from KFD, also inside a container). Never signals anything. `--idle-by process` waits for
+  no process in `amd-smi process` instead. `--snapshot` prints amd-smi's process list as JSON
+  (used by `agent/unattended/measurement_record.py`). A held host-wide lock (`--host-lock`)
+  makes every GPU busy; `--hip` prints HIP ids (see below). Tests: `test_gpu_wait.py`.
 - `gpu-queue` — a job queue for a shared host with no scheduler, where GPUs a job releases are
   taken by other users' queues before anyone can start the next job, and idle GPUs reserve
   nothing because other launches do not check. `gpu-queue serve DIR --count N --container NAME`
   runs on the host and holds no GPU while the queue is empty. When a job is pending it waits for
-  N idle GPUs (`gpu-wait.py N --hip --idle-by usage`), then runs every pending job on those GPUs
+  N idle GPUs (`gpu-wait.py N --hip`), then runs every pending job on those GPUs
   oldest first, each starting the moment the previous one exits, including jobs queued while
   earlier ones run; it releases when the queue is empty. It never runs placeholder load.
   `--reclaim-after SECONDS` (host serve with `--container` only, and only where every GPU process
@@ -82,8 +75,8 @@ board/
 
 - `amd-smi process` there lists every process on every GPU (all eight show the same thirteen
   PIDs, including one 246 GB holder), so `--idle-by process` never sees a free GPU while anyone
-  runs anything. `--idle-by usage` reads `amd-smi metric` instead: below `--max-vram-mb` (an idle
-  MI350X shows ~284 MB) and 0% activity, on `--confirm` consecutive polls.
+  runs anything. The default reads activity from `amd-smi metric` and memory holders from KFD's
+  `/sys/class/kfd/kfd/proc/<pid>/vram_<gpu_id>`.
 - HIP enumerates GPUs in KFD topology order (`/sys/class/kfd/kfd/topology/nodes`, CPU nodes
   skipped). There HIP 0..7 are amd-smi 3, 0, 2, 1, 7, 4, 6, 5: different for every device, but the
   same *sets* {0-3} and {4-7}, which hides the mismatch until a job asks for a subset. Passing
