@@ -3,7 +3,7 @@
 
 usage: gpu-queue add DIR [--name NAME] (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
-       gpu-queue serve DIR --count N [--container NAME] [--poll 30] [--confirm 4]
+       gpu-queue serve DIR --count N [--container NAME] [--poll 5] [--confirm 4]
                        [--idle-by usage|process] [--log FILE] [--once]
                        [--reclaim-after SECONDS [--reclaim-grace 30]]
 
@@ -315,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument('dir')
     p.add_argument('--count', type=int, required=True)
     p.add_argument('--container')
-    p.add_argument('--poll', type=int, default=30)
+    p.add_argument('--poll', type=int, default=5)  # other launchers take freed GPUs within seconds
     p.add_argument('--confirm', type=int, default=4)  # a loaded server reads 0% between requests
     p.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
     p.add_argument('--log', type=Path)
