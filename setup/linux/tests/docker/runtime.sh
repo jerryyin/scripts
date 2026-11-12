@@ -56,7 +56,7 @@ printf 'test:dummy-docker' | base64 > /zyin/vault-work/docker_mkmhub_auth.txt
 printf 'dummy-github-work\n' > /zyin/vault-work/gh_token_amdeng.txt
 printf 'dummy-artifactory\n' > /zyin/vault-work/atlartifactory_token.txt
 printf '{"projects":{"fixture":{}},"machineID":"fixture"}\n' > "$HOME/.claude.json"
-sha256sum "$HOME/.claude.json" > /tmp/claude-state-checksum
+mkdir -p "$HOME/fixture-checkout/.git"
 export DEVENV_PERSISTENT_ROOT=/zyin
 bash "$HOME/scripts/setup/linux/credentials/activate.sh"
 test "$(readlink "$HOME/vault-work")" = /zyin/vault-work
@@ -68,7 +68,21 @@ test "$(stat -c %a "$HOME/.ssh/id_ed25519.pub")" = 644
 grep -q dummy-claude "$HOME/.claude/settings.json"
 test ! -L "$HOME/.claude/settings.json"
 test "$(stat -c %a "$HOME/.claude/settings.json")" = 600
-sha256sum --check /tmp/claude-state-checksum
+# Activation answers Claude's first-run questions and keeps Claude's own state.
+python3 - <<'PY'
+import json
+from pathlib import Path
+home = Path.home().resolve()
+state = json.loads((home/'.claude.json').read_text())
+assert state['machineID'] == 'fixture' and state['projects']['fixture'] == {}, state
+assert state['hasCompletedOnboarding'] is True and state['hasSeenAutoDefaultNudge'] is True, state
+assert 'dummy' in state['customApiKeyResponses']['approved'], state
+assert state['projects'][home.as_posix()]['hasTrustDialogAccepted'] is True, state
+assert (home/'fixture-checkout').as_posix() not in state['projects'], state
+PY
+test "$(stat -c %a "$HOME/.claude.json")" = 600
+rm -r "$HOME/fixture-checkout"
+sha256sum "$HOME/.claude.json" > /tmp/claude-state-checksum
 ! grep -q dummy-github-personal "$HOME/.config/gh/hosts.yml"
 grep -q dummy-github-work "$HOME/.config/gh/hosts.yml"
 grep -q dummy-artifactory "$HOME/.netrc"
