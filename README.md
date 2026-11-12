@@ -25,10 +25,14 @@ Development setup, execution infrastructure, and GPU engineering tools.
   both is split: the generic core in the subject directory, a thin project wrapper or a
   project-specific input file in the project directory. Records of a particular run (results,
   provenance) stay with the investigation that produced them, never here.
-- **Extend before adding.** Before writing a tool, search the subject READMEs and `git grep` for
-  one that already does the job. If one exists, use it; if it falls short, change it (a new flag,
-  mode or importable function) rather than adding a sibling that does nearly the same thing. A new
-  file is for a job nothing here does; a shared helper that two tools need lives once, with its owner.
+- **One owner per job.** Before writing a tool, search the subject READMEs and `git grep` here, and
+  the team repositories the work already uses (for example a benchmark repository whose harness
+  runs the same measurement), for one that already does the job. If one exists, use it; if it falls
+  short, change it (a new flag, mode or importable function) rather than adding a sibling that does
+  nearly the same thing. When the owner is a team repository, the change goes there, on a branch
+  through its review, not into a tool here. Configuration an owner defines, such as a server's
+  flags, is part of its job. A new file here is for a job nothing here or in those repositories
+  does; a shared helper that two tools need lives once, with its owner.
 - **Analysis is a tool too.** A script that turns measurements into a reported number lands here (or
   in the team repository whose format it reads) before the result is admitted; the full rule is
   "Tools behind a result" in triton-investigations' `orchestration/local/prompts/worker.md`.
