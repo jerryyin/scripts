@@ -122,7 +122,29 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call['args'] for call in self.calls()], [
             ['compose', '-f', str(self.compose), '--profile', 'triton', 'config', '--services'],
+            ['ps', '-a', '--format', '{{.Names}} {{.Label "com.docker.compose.project"}}'],
             ['compose', '-f', str(self.compose), 'up', '-d', '--no-build', 'triton']])
+
+    def test_run_names_are_short_unique_and_take_an_optional_label(self) -> None:
+        self.environment['DOCKER_NAMES'] = 'fixture-triton-1010-1234\nfixture-triton-1010-1234-2'
+        result = self.invoke('drun', 'triton')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]['project'], 'fixture-triton-1010-1234-3')
+        result = self.invoke('drun', 'triton', 'dsv41')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]['project'], 'fixture-triton-1010-1234-dsv41')
+        self.assertEqual(self.calls()[-1]['args'][-1], 'triton')
+
+    def test_invalid_label_never_launches_docker(self) -> None:
+        for arguments in (('triton', 'Not valid'), ('triton', '-x'), ('triton', 'one', 'two')):
+            with self.subTest(arguments=arguments):
+                result = self.invoke('drun', *arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('Usage:', result.stderr)
+        self.environment['COMPOSE_PROJECT_NAME'] = 'chosen-project'
+        result = self.invoke('drun', 'triton', 'dsv41')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.calls(), [])
 
     def test_unknown_service_never_starts_or_removes_a_container(self) -> None:
         result = self.invoke('drun', 'unknown')
