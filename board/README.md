@@ -39,10 +39,13 @@ board/
   `--reclaim-after SECONDS` (host serve with `--container` only, and only where every GPU process
   is yours): when a pending job has waited that long, `serve` stops every `/dev/kfd` holder on the
   host outside `--container` (SIGTERM, SIGKILL after `--reclaim-grace`, through `sudo -n` unless
-  root), logs each, and waits again. `gpu-queue add DIR [--name NAME] -- COMMAND` (or `--file SCRIPT`) and
-  `gpu-queue status DIR` run where DIR is local, normally inside the container. Jobs get
-  `HIP_VISIBLE_DEVICES`; their output and exit status land in `DIR/done/` or `DIR/failed/`.
-  Tests: `test_gpu_queue.py`.
+  root), logs each, and waits again. `gpu-queue add DIR [--name NAME] [--count N] -- COMMAND` (or
+  `--file SCRIPT`) and `gpu-queue status DIR` run where DIR is local, normally inside the container.
+  One serve runs per DIR (it holds `DIR/serve.lock`), and `add --count N` starts one for N GPUs
+  when none runs; it exits when the queue empties. Serves of different DIRs do not see each other's
+  claims, so share one DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
+  not the caller's, so a job script sets up its own directory and environment; output and exit
+  status land in `DIR/done/` or `DIR/failed/`. Tests: `test_gpu_queue.py`.
 
   The simplest setup runs everything inside the container: amd-smi there sees every GPU, so
   the idle check and HIP numbering work, and the log lands in `DIR/serve.log` where `status`
@@ -50,9 +53,9 @@ board/
   serve on the host.
 
   ```bash
-  # inside the container (no reclaim):
-  setsid --fork board/gpu-queue serve /path/queue --count 4 > /dev/null 2>&1 < /dev/null
-  board/gpu-queue status /path/queue   # waits per job, serve's last line, STALE if serve died
+  # inside the container (no reclaim); starts a serve for 4 GPUs unless one runs:
+  board/gpu-queue add /path/queue --count 4 --name numerics -- 'cd /work && ./run-numerics.sh'
+  board/gpu-queue status /path/queue   # waits per job, the serve, its last line, STALE if none
   # or on the host, once (survives logout), with reclaim:
   nohup setsid board/gpu-queue serve /path/in/container/queue --count 4 --container <name> \
       [--reclaim-after 1800] > /dev/null 2>&1 < /dev/null &

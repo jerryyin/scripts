@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A GPU job queue for a shared host with no scheduler: claim GPUs once, run queued jobs back to back.
 
-usage: gpu-queue add DIR [--name NAME] (--file SCRIPT | -- COMMAND...)
+usage: gpu-queue add DIR [--name NAME] [--count N] (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
        gpu-queue serve DIR --count N [--container NAME] [--poll 5] [--confirm 4]
                        [--idle-by usage|process] [--log FILE] [--once]
@@ -15,6 +15,12 @@ pending job on those GPUs, oldest first, starting each the moment the previous o
 including jobs added while earlier ones run. It releases the GPUs when the queue is empty and
 goes back to waiting (or exits, with --once). It never runs placeholder load, and signals no
 process unless --reclaim-after is given.
+
+One serve runs per DIR: it holds an flock on DIR/serve.lock, which records its --count, and exits
+if another serve holds it. `add --count N` starts `serve DIR --count N --once` in the background
+when no serve holds the lock, and refuses a job that needs more GPUs than the running serve
+claims; without --count it refuses to queue into an unserved DIR. Serves of different DIRs do not
+see each other's claims, so share one DIR per host.
 
 --reclaim-after (host serve with --container only; every GPU process on the machine must be
 yours): when a pending job has waited that many seconds without a claim, `serve` stops every
@@ -35,14 +41,15 @@ container. A job left in running/ by a crashed `serve` moves to failed/ with exi
 All jobs in a queue use the same GPU count. Every claim, job start, exit status and GPU poll
 (with the busy GPUs) is appended to --log: by default DIR/serve.log for a serve without
 --container, else ~/.local/state/gpu-queue/<container>.log on the host. `status` shows how long
-each pending or running job has waited and, from DIR/serve.log, serve's last line, and flags the
-log as STALE when jobs are queued but nothing was written for 10 minutes.
+each pending or running job has waited, whether a serve holds DIR, and serve's last line from
+DIR/serve.log; it flags STALE when jobs are queued or running and no serve holds DIR.
 """
 from __future__ import annotations
 
 import argparse
 import dataclasses
 import datetime as dt
+import fcntl
 import os
 import re
 import shlex
@@ -54,6 +61,10 @@ from pathlib import Path
 GPU_WAIT = Path(__file__).resolve().with_name('gpu-wait.py')
 STATES = ('pending', 'running', 'done', 'failed')
 SERVE_LOG = 'serve.log'  # default --log of a serve without --container, inside DIR
+LOCK = 'serve.lock'  # flock of DIR's one serve; holds its --count
+LOCK_TRIES = 10  # 0.1 s apart, to ride out an add or status probing the lock
+# Run inside the container: hold an flock on $1 until stdin closes, which the host serve's exit does.
+HOLD_LOCK = 'exec 9>>"$1" && flock -n 9 && printf "%s\\n" "$2" > "$1" && echo locked && exec cat > /dev/null'
 JOB_RE = re.compile(r'^[0-9TZ-]+-[A-Za-z0-9._-]+\.sh$')
 NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 NO_TIME_LIMIT = str(10 ** 9)  # seconds; gpu-wait.py has no "wait forever" value
@@ -95,6 +106,76 @@ class Store:
         result = self.sh('cd "$1/running" && exec bash -lc \'exec "./$0" > "./$0.log" 2>&1\' "$2"',
                          job, check=False, env=env, capture=False)
         return result.returncode
+
+
+class ServeLock:
+    """DIR's serve lock, held by this process or, with --container, by a `docker exec` child."""
+
+    def __init__(self, store: Store, count: int):
+        self.path, self.container, self.count = f'{store.root}/{LOCK}', store.container, count
+        self.holder = None
+
+    def _try(self):
+        if self.container:
+            child = subprocess.Popen(['docker', 'exec', '-i', self.container, 'sh', '-c', HOLD_LOCK,
+                                      'gpu-queue', self.path, str(self.count)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            if child.stdout.readline().strip() == 'locked':
+                return child
+            child.wait()
+            return None
+        fh = open(self.path, 'a+')
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.close()
+            return None
+        fh.truncate(0)
+        fh.write(f'{self.count}\n')
+        fh.flush()
+        return fh
+
+    def acquire(self) -> bool:
+        for attempt in range(LOCK_TRIES):
+            if attempt:
+                time.sleep(0.1)
+            self.holder = self._try()
+            if self.holder:
+                return True
+        return False
+
+    def release(self) -> None:
+        if self.container:
+            self.holder.stdin.close()
+            self.holder.wait()
+        else:
+            self.holder.close()
+        self.holder = None
+
+
+def serving(queue: Path) -> int | None:
+    """--count of the serve holding local DIR `queue` (0 if unreadable), or None if none does."""
+    path = queue / LOCK
+    if not path.exists():
+        return None
+    with path.open('a+') as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.seek(0)
+            text = fh.read().strip()
+            return int(text) if text.isdigit() else 0
+    return None
+
+
+def start_serve(queue: Path, count: int) -> int:
+    """Start `serve DIR --count N --once` detached, its errors appended to DIR/serve.log; its PID."""
+    with (queue / SERVE_LOG).open('a') as log:
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve',
+                                  str(queue.resolve()), '--count', str(count), '--once'],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+                                 start_new_session=True)
+    return child.pid
 
 
 def note(log: Path, message: str) -> None:
@@ -217,16 +298,27 @@ def drain(store: Store, hip: str, log: Path) -> None:
 
 
 def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
-          reclaim=reclaim) -> int:
+          reclaim=reclaim, lock: ServeLock | None = None) -> int:
     store.init()
+    lock = lock or ServeLock(store, args.count)
+    if not lock.acquire():
+        note(log, f'another serve holds {store.root}/{LOCK}; exiting')
+        return 1
     recover(store, log)
     note(log, f'serving {store.root} ({args.container or "local"}), {args.count} GPUs per claim')
     spare = container_id(args.container) if args.reclaim_after and args.container else None
     while True:
         if not store.jobs('pending'):
             if args.once:
-                note(log, 'queue empty; --once, exiting')
-                return 0
+                lock.release()
+                # Look again: an add that probed just before the release saw a serve and started none.
+                if not store.jobs('pending'):
+                    note(log, 'queue empty; --once, exiting')
+                    return 0
+                if not lock.acquire():
+                    note(log, 'a job arrived as this serve stopped; another serve has the queue')
+                    return 0
+                continue
             time.sleep(args.poll)
             continue
         note(log, f'{len(store.jobs("pending"))} job(s) pending; waiting for {args.count} idle GPUs')
@@ -238,7 +330,7 @@ def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
         note(log, f'queue empty; released HIP {hip}')
 
 
-def add(args: argparse.Namespace) -> int:
+def add(args: argparse.Namespace, spawn=start_serve) -> int:
     if args.file and args.command:
         raise SystemExit('give --file or a command, not both')
     if args.file:
@@ -253,6 +345,11 @@ def add(args: argparse.Namespace) -> int:
     if not NAME_RE.match(name):
         raise SystemExit(f'job name {name!r} may use only letters, digits, ".", "_" and "-"')
     queue = Path(args.dir)
+    count = serving(queue)
+    if count is None and not args.count:
+        raise SystemExit(f'no serve is running for {queue}; pass --count N to start one')
+    if count and args.count and args.count > count:
+        raise SystemExit(f'the serve for {queue} claims {count} GPUs; this job needs {args.count}')
     for state in STATES:
         (queue / state).mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -262,10 +359,14 @@ def add(args: argparse.Namespace) -> int:
     tmp.chmod(0o755)
     os.replace(tmp, job)  # atomic: serve never sees a half-written job
     print(job)
+    if serving(queue) is None:  # also a --once serve that stopped after the check above
+        if args.count:
+            pid = spawn(queue, args.count)
+            print(f'started serve {pid} for {args.count} GPUs; log: {queue / SERVE_LOG}', file=sys.stderr)
+        else:
+            print(f'warning: no serve holds {queue} now; if the job stays pending, run '
+                  f'`gpu-queue serve {queue} --count N`', file=sys.stderr)
     return 0
-
-
-STALE_LOG_SECONDS = 600  # far above serve's poll; a silent log with work queued means no serve
 
 
 def _age(seconds: float) -> str:
@@ -273,7 +374,7 @@ def _age(seconds: float) -> str:
 
 
 def status(args: argparse.Namespace, now: float | None = None) -> int:
-    """Jobs by state, how long pending and running jobs have waited, and serve's last log line."""
+    """Jobs by state, how long pending and running jobs have waited, the serve, its last log line."""
     queue = Path(args.dir)
     now = time.time() if now is None else now
     for state in STATES:
@@ -288,27 +389,29 @@ def status(args: argparse.Namespace, now: float | None = None) -> int:
                         tzinfo=dt.timezone.utc).timestamp()
                 suffix = f'  {"queued" if state == "pending" else "started"} {_age(now - since)} ago'
             print(f'  {name}{suffix}')
+    count = serving(queue)
+    print('serve: none' if count is None else f'serve: running, {count or "?"} GPUs per claim')
     log = queue / SERVE_LOG
     if log.exists():
         lines = log.read_text().splitlines()
-        silent = now - log.stat().st_mtime
-        print(f'serve log ({log}): last write {_age(silent)} ago')
+        print(f'serve log ({log}): last write {_age(now - log.stat().st_mtime)} ago')
         if lines:
             print(f'  {lines[-1][:300]}')
-        busy = any((queue / s).is_dir() and any((queue / s).glob('*.sh')) for s in ('pending', 'running'))
-        if busy and silent > STALE_LOG_SECONDS:
-            print('  STALE: jobs are queued but serve has written nothing for '
-                  f'{_age(silent)}; it is probably not running')
+    busy = any((queue / s).is_dir() and any((queue / s).glob('*.sh')) for s in ('pending', 'running'))
+    if busy and count is None:
+        print(f'STALE: jobs are queued or running but no serve holds {queue}; '
+              f'run `gpu-queue serve {queue} --count N`')
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def parse(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('add', help='queue a job (run where DIR is local)')
     p.add_argument('dir')
     p.add_argument('--name')
     p.add_argument('--file')
+    p.add_argument('--count', type=int, help='GPUs the job needs; starts a serve for that many if none runs')
     p = sub.add_parser('status', help='list jobs by state (run where DIR is local)')
     p.add_argument('dir')
     p = sub.add_parser('serve', help='claim GPUs and run queued jobs (run on the host)')
@@ -329,14 +432,19 @@ def main(argv: list[str] | None = None) -> int:
     # Everything after "--" is the job's command, never options of gpu-queue.
     command = argv[argv.index('--') + 1:] if '--' in argv else []
     args = parser.parse_args(argv[:argv.index('--')] if '--' in argv else argv)
+    args.command = command
+    if args.cmd == 'serve' and args.reclaim_after is not None and not args.container:
+        parser.error('--reclaim-after needs --container: a serve inside a container cannot see '
+                     "other containers' processes")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse(argv)
     if args.cmd == 'add':
-        args.command = command
         return add(args)
     if args.cmd == 'status':
         return status(args)
-    if args.reclaim_after is not None and not args.container:
-        parser.error('--reclaim-after needs --container: a serve inside a container cannot see '
-                     "other containers' processes")
     if args.log:
         log = args.log
     elif args.container:
