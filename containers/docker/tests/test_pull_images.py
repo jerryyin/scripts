@@ -52,7 +52,7 @@ if 'config' in sys.argv:
 
     def test_repository_model_renders_without_run_time_mount_variables(self) -> None:
         shutil.copy2(ROOT / 'docker-compose.yml', self.compose)
-        for name in ('DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR'):
+        for name in ('DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DEVENV_MODELS_DIR'):
             self.env.pop(name, None)
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)

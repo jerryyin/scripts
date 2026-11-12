@@ -16,6 +16,7 @@ for service in "$@"; do profile_flags+=(--profile "$service"); done
 # Rendering several profiles requires bypassing their shared container-name check.
 # Compose requires the run-time mount variables even though only build arguments are read here.
 config=$(DEVENV_ROLE_ROOT="${DEVENV_ROLE_ROOT:-/unused}" DEVENV_VAULT_DIR="${DEVENV_VAULT_DIR:-/unused}" \
+    DEVENV_MODELS_DIR="${DEVENV_MODELS_DIR:-/unused}" \
     docker compose -f "$compose_file" "${profile_flags[@]}" config --no-consistency --format json)
 for service in "$@"; do
     image=$(printf '%s' "$config" | python3 -c '

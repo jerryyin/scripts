@@ -43,14 +43,15 @@ class CommandTests(unittest.TestCase):
         self.rc.mkdir(parents=True)
         (self.rc / '__main__.py').write_text('')
         for name in ('COMPOSE_FILE', 'COMPOSE_PROJECT_NAME', 'FAIL_DOCKER_COMMAND', 'DOCKER_NAMES',
-                     'VAULT_SCOPE', 'VAULT_DIR', 'DEVENV_ROLE_ROOT', 'RC_FILES_DIR', 'DOCKER_CONFIG'):
+                     'VAULT_SCOPE', 'VAULT_DIR', 'DEVENV_ROLE_ROOT', 'DEVENV_MODELS_DIR', 'RC_FILES_DIR',
+                     'DOCKER_CONFIG'):
             self.environment.pop(name, None)
         self.executable('docker', '''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['CALL_LOG'], 'a') as stream:
     stream.write(json.dumps({'args': sys.argv[1:], 'project': os.environ.get('COMPOSE_PROJECT_NAME')}) + '\\n')
 with open(os.environ['CALL_LOG'] + '.env', 'w') as stream:
-    json.dump({name: os.environ.get(name) for name in ('VAULT_SCOPE', 'DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK')}, stream)
+    json.dump({name: os.environ.get(name) for name in ('VAULT_SCOPE', 'DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DEVENV_MODELS_DIR', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK')}, stream)
 if os.environ.get('FAIL_DOCKER_COMMAND') == sys.argv[1]:
     sys.exit(23)
 if sys.argv[1] == 'ps':
@@ -183,6 +184,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
             self.assertEqual(arguments[-4:], ['fixture:image', 'bash', '-c', 'echo two words'])
             self.assertIn('--device=/dev/kfd', arguments)
             self.assertIn(str(self.root / 'home/.local/share/devenv/work') + ':/zyin', arguments)
+            self.assertIn(str(self.root / 'home/.local/share/devenv/models') + ':/models:ro', arguments)
             self.assertNotIn(str(self.root / 'home') + ':/zyin', arguments)
             names.append(arguments[arguments.index('--name') + 1])
         self.assertNotEqual(names[0], names[1])
@@ -199,7 +201,26 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
                 self.assertEqual(env['DEVENV_ROLE_ROOT'], str(root))
                 self.assertEqual(env['DEVENV_VAULT_DIR'], str(self.root / 'home' / f'vault-{scope}'))
                 self.assertEqual(env['DOCKER_CONFIG'], str(root / '.docker'))
+                self.assertEqual(env['DEVENV_MODELS_DIR'], str(self.root / 'home/.local/share/devenv/models'))
                 self.assertIsNone(env['SSH_AUTH_SOCK'])
+
+    def test_models_directory_follows_a_link_and_never_exposes_the_home(self) -> None:
+        disk = self.root / 'raid/models'
+        disk.mkdir(parents=True)
+        link = self.root / 'home/.local/share/devenv/models'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(disk)
+        result = self.invoke('drun', 'triton')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(str(self.log) + '.env').read_text())['DEVENV_MODELS_DIR'], str(disk))
+        calls = len(self.calls())
+        for models in (self.root / 'home', self.root / 'home/.local/share/devenv', self.root):
+            with self.subTest(models=models):
+                self.environment['DEVENV_MODELS_DIR'] = str(models)
+                result = self.invoke('drun', 'triton')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('models directory', result.stderr)
+                self.assertEqual(len(self.calls()), calls)
 
     def test_seeded_keys_reach_the_role_directory_without_replacing_imports(self) -> None:
         source = self.root / 'home/.ssh'

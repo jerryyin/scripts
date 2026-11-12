@@ -33,6 +33,7 @@ x-base-service: &base-service
   volumes:
     - ${DEVENV_ROLE_ROOT:?Use dcompose, dbuild or drun}:/zyin
     - ${DEVENV_VAULT_DIR:?Select a role vault}:/zyin/vault-${VAULT_SCOPE:-work}:ro
+    - ${DEVENV_MODELS_DIR:?Use dcompose, dbuild or drun}:/models:ro
     # tools_volume:/usr/local intentionally omitted — testing whether
     # any service actually relies on tools-setup's /usr/local overlay.
     # If you need ctags or other packelf'd tools, re-add the mount AND
@@ -123,6 +124,7 @@ services:
     volumes:
       - ${DEVENV_ROLE_ROOT:?Use dcompose, dbuild or drun}:/zyin
       - ${DEVENV_VAULT_DIR:?Select a role vault}:/zyin/vault-${VAULT_SCOPE:-work}:ro
+      - ${DEVENV_MODELS_DIR:?Use dcompose, dbuild or drun}:/models:ro
       - ${AM_FFM_DIR:-$HOME/rocdtif-7.13-am+ffmlite-mi400-r6.06}:/am-ffm
 
   # Real gfx1250 hardware (B0 / MI450 beta machine), NOT the simulator.

@@ -32,11 +32,21 @@ def role_directory(environment: dict[str, str]) -> tuple[str, Path, Path]:
     return scope, vault, root
 
 
+def models_directory(environment: dict[str, str], vault: Path, root: Path) -> Path:
+    home = Path.home().resolve()
+    models = Path(environment.get('DEVENV_MODELS_DIR', str(home / '.local/share/devenv/models'))).expanduser().resolve()
+    if any(path.is_relative_to(models) for path in (home, vault, root)):
+        raise ValueError('The models directory cannot contain the host home, a vault or the role directory')
+    models.mkdir(parents=True, exist_ok=True)
+    return models
+
+
 def prepare() -> dict[str, str]:
     environment = dict(os.environ)
     scope, vault, root = role_directory(environment)
     home = Path.home().resolve()
     environment.update(VAULT_SCOPE=scope, DEVENV_ROLE_ROOT=str(root), DEVENV_VAULT_DIR=str(vault),
+                       DEVENV_MODELS_DIR=str(models_directory(environment, vault, root)),
                        DOCKER_CONFIG=str(root / '.docker'))
     for name in ('SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'DOCKER_AUTH_CONFIG', 'DOCKER_AUTH_FILE'):
         environment.pop(name, None)
@@ -79,6 +89,7 @@ def main() -> None:
         arguments = ['sudo', 'docker', '--config', environment['DOCKER_CONFIG'], *options,
                      '-v', environment['DEVENV_ROLE_ROOT'] + ':/zyin',
                      '-v', environment['DEVENV_VAULT_DIR'] + ':/zyin/vault-' + environment['VAULT_SCOPE'] + ':ro',
+                     '-v', environment['DEVENV_MODELS_DIR'] + ':/models:ro',
                      '-e', 'VAULT_SCOPE=' + environment['VAULT_SCOPE'],
                      '-e', 'DEVENV_PERSISTENT_ROOT=/zyin', *caller]
     else:
