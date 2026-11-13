@@ -13,7 +13,9 @@ profiling/
 ├── att_analyze.py        # reduce an ATT stats CSV to per-category latency/stall/idle
 ├── test_att_analyze.py   # non-GPU unit tests for the reducer (pytest)
 ├── analyze_trace.py      # per-step GPU time from PyTorch-profiler Chrome traces or rocprofv3 CSV
-└── graph_event_smoke.py  # does a timing event recorded in CUDA-graph capture become a timed node?
+├── graph_event_smoke.py  # does a timing event recorded in CUDA-graph capture become a timed node?
+├── dist_timing.py        # per-call event timing of a call every torch.distributed rank makes together
+└── test_dist_timing.py   # non-GPU unit tests for its statistics and argument helpers (pytest)
 ```
 
 ## Files
@@ -30,6 +32,16 @@ profiling/
   external=True)` recorded during stream capture becomes a timed event-record node, on the
   capture stream and on a forked stream, and measures the per-node overhead. Run it before
   instrumenting a captured graph with timing events.
+- `dist_timing.py` — importable core for timing one collective call (a layer with a token
+  exchange, a collective) on every rank of a `torchrun` job, eager or as CUDA-graph replay (pass
+  `graph.replay`): `time_calls` puts timing events around each call after a device sync and a
+  barrier; `reduce_repetition` takes the per-rank median and, per call, the max over ranks (the
+  step waits for the slowest rank); `aggregate` gives median/min/max over repetitions;
+  `first_call` reports the host time of the first call and the files it added to
+  `TRITON_CACHE_DIR` (a JIT compile, to be excluded by warmup); `gpu_context` records
+  `HIP_VISIBLE_DEVICES`, the matching amd-smi indices and the GPU processes there, through
+  `board/gpu-wait.py`; `appeared` lists the PIDs (host PIDs) that showed up between two snapshots. Run alone it prints `gpu_context()`. Project wrappers supply the call and
+  its correctness check, for example `tokenspeed/petit-layer/petit_layer.py`.
 - `prof.sh trace <cmd>` — kernel trace, printed as per-kernel runtime, block size, register
   and scratch usage.
 - `prof.sh att <cmd>` — ATT capture. Resolves ROCm without requiring `/opt/rocm` to exist
@@ -90,5 +102,5 @@ grep -q -- "$FLAG" <<<"$out"
 ## Tests
 
 ```bash
-cd profiling && python3 -m pytest test_att_analyze.py -q    # no GPU required
+cd profiling && python3 -m pytest test_att_analyze.py test_dist_timing.py -q    # no GPU required
 ```
