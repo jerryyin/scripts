@@ -9,6 +9,8 @@ usage:
                                [--gpus 0,1,2,3] [--tool PATH ...]
   measurement_record.py sample RECORD --phase during
   measurement_record.py finish RECORD [--result PATH ...] [--stop-file PATH] [--note TEXT]
+                               [--admission VERDICT.json] [--load-admission VERDICT.json]
+                               [--server-capacity CAPACITY.json]
   measurement_record.py selftest
 
 begin  records the commands, each repository's commit and clean/dirty state, the GPUs used, the
@@ -17,6 +19,18 @@ begin  records the commands, each repository's commit and clean/dirty state, the
 sample adds another GPU process snapshot (for example while the server is up).
 finish adds an "after" snapshot, the stop record of the server (path and last line), result paths
        with SHA-256 and size, and re-checks every repository's commit and cleanliness.
+--admission embeds the admissibility verdict of the measurement window (verdict.json written by the GPU
+admission sampler, amd-tracking apps/shared/gpu_admission.py `window start/stop`): the rule it applied,
+window start/end, sample count, interval and largest gap, own and resident processes, the activity
+source, every violating sample, and the SHA-256 of the verdict and of its samples file. The record's
+top-level "admissible" is the verdict's, false when the window did not cover every GPU of the record,
+and null (not proven) when no verdict was given.
+--load-admission embeds, as "load_admission", the verdict of the window that covered the server's load
+(spawn to readiness), which sizes the server's memory pools: a foreign tenant arriving during the load
+makes every measurement of that server not admissible. With it, "admissible" is true only when both the
+measurement window and the load window are admissible (null when either verdict is missing).
+--server-capacity embeds a JSON file describing the measured server's capacity (for example its KV token
+capacity per rank, parsed from its start log) as "server_capacity".
 GPU snapshots come from `board/gpu-wait.py --snapshot` (amd-smi's process list); when amd-smi is
 unavailable the snapshot records that, rather than failing, so the record still says what was and
 was not observed.
@@ -118,7 +132,26 @@ def finish(a):
         rec["server_stop"] = {"path": os.path.abspath(a.stop_file), "last_line": lines[-1] if lines else ""}
     if a.note:
         rec["note"] = a.note
+    rec["admission"], rec["admissible"] = admission(a.admission, rec["gpus"])
+    if a.load_admission:
+        rec["load_admission"], load_ok = admission(a.load_admission, rec["gpus"])
+        rec["admissible"] = None if rec["admissible"] is None else (rec["admissible"] and load_ok)
+    if a.server_capacity:
+        rec["server_capacity"] = {"path": os.path.abspath(a.server_capacity), "sha256": sha256(a.server_capacity),
+                                  "capacity": load(a.server_capacity)}
     save(a.record, rec)
+
+
+def admission(path, gpus):
+    """(embedded verdict, admissible) from a window verdict file; admissible is None without one."""
+    if not path:
+        return {"missing": "no admission verdict given (finish --admission)"}, None
+    verdict = load(path)
+    entry = {"path": os.path.abspath(path), "sha256": sha256(path), "verdict": verdict}
+    uncovered = sorted(set(gpus) - set(verdict.get("gpus", [])))
+    if uncovered:
+        entry["uncovered_gpus"] = uncovered
+    return entry, bool(verdict.get("admissible")) and not uncovered
 
 
 def selftest():
@@ -138,13 +171,31 @@ def selftest():
         main(["begin", rec, "--label", "selftest", "--cmd", "client=tool.sh --x 1", "--repo", f"repo={repo}",
               "--gpus", "0", "--tool", tool])
         main(["sample", rec, "--phase", "during"])
-        main(["finish", rec, "--result", result, "--stop-file", stop])
+        verdict = os.path.join(d, "verdict.json")
+        open(verdict, "w").write(json.dumps({"admissible": True, "gpus": [0, 1], "violations": []}))
+        main(["finish", rec, "--result", result, "--stop-file", stop, "--admission", verdict])
         r = load(rec)
+        assert r["admissible"] is True and r["admission"]["sha256"] == sha256(verdict)
+        assert admission(verdict, [0, 2])[1] is False and admission(verdict, [0, 2])[0]["uncovered_gpus"] == [2]
+        assert admission(None, [0]) == ({"missing": "no admission verdict given (finish --admission)"}, None)
         assert r["repos"]["repo"]["clean"] and r["repos_after"]["repo"]["clean"]
         assert r["tools"][0]["sha256"] == sha256(tool) and r["tools"][0]["repo"]["commit"]
         assert r["results"][0]["sha256"] == sha256(result)
         assert r["server_stop"]["last_line"] == "remaining=0"
         assert set(r["gpu_snapshots"]) == {"before", "during", "after"}
+        bad = os.path.join(d, "load-bad.json")
+        open(bad, "w").write(json.dumps({"admissible": False, "gpus": [0], "violations": [{"kind": "foreign-appeared"}]}))
+        capacity = os.path.join(d, "capacity.json")
+        open(capacity, "w").write(json.dumps({"token_capacity_per_rank": [142067712], "token_capacity_total": 142067712}))
+        for load_verdict, expected in ((verdict, True), (bad, False)):
+            main(["begin", rec, "--label", "load", "--gpus", "0"])
+            main(["finish", rec, "--admission", verdict, "--load-admission", load_verdict, "--server-capacity", capacity])
+            r = load(rec)
+            assert r["admissible"] is expected and r["load_admission"]["sha256"] == sha256(load_verdict)
+            assert r["server_capacity"]["capacity"]["token_capacity_total"] == 142067712
+        main(["begin", rec, "--label", "load", "--gpus", "0"])
+        main(["finish", rec, "--load-admission", verdict])
+        assert load(rec)["admissible"] is None
     print("SELFTEST PASS")
 
 
@@ -157,6 +208,9 @@ def main(argv=None):
     s = sub.add_parser("sample"); s.add_argument("record"); s.add_argument("--phase", required=True)
     f = sub.add_parser("finish"); f.add_argument("record"); f.add_argument("--result", action="append")
     f.add_argument("--stop-file"); f.add_argument("--note")
+    f.add_argument("--admission", help="verdict.json of the measurement window (gpu_admission.py window stop)")
+    f.add_argument("--load-admission", help="verdict.json of the window covering the server's load (spawn to readiness)")
+    f.add_argument("--server-capacity", help="JSON describing the measured server's capacity (embedded as server_capacity)")
     sub.add_parser("selftest")
     a = ap.parse_args(argv)
     if a.action == "selftest":

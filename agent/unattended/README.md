@@ -19,7 +19,12 @@ agent/unattended/
   the exact commands, each repository's commit and cleanliness before and after, the tools used
   (path, repository commit, SHA-256), the GPUs and their process snapshots before, during and
   after (taken with `board/gpu-wait.py --snapshot`), the server stop record, and result paths
-  with hashes. The record is written into the run's own directory and belongs to that run; this
+  with hashes. `finish --admission VERDICT.json` embeds the admissibility verdict of the
+  measurement window (written by amd-tracking `apps/shared/gpu_admission.py window stop`, the one
+  sampler of KFD/DRM state over the window) with its SHA-256 and sets the record's top-level
+  `admissible` (null, i.e. not proven, without a verdict). `--load-admission VERDICT.json` adds the
+  verdict of the window over the server's load (spawn to readiness); `admissible` then needs both.
+  `--server-capacity FILE.json` embeds the server's capacity (e.g. KV token capacity per rank). The record is written into the run's own directory and belongs to that run; this
   helper holds no campaign details. `measurement_record.py selftest` runs without a GPU (it
   queries amd-smi's process list when amd-smi is present).
 - `heartbeat.py` — writes a JSON status file for a long run. Import it and call `write()`,
