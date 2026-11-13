@@ -31,27 +31,68 @@ def test_only_our_kfd_users_that_can_see_the_held_gpus_count(tmp=None):
     assert gh.own_gpu_users({0, 1, 2, 3}, exclude={14}, proc_root=proc) == [10, 12]
 
 
-def test_holds_yields_to_our_process_and_holds_again(tmp=None):
-    def sleeper(_gpu):
-        return subprocess.Popen(['sleep', '60'])
+class FakeChild:
+    """A holder child: records signals, dies on kill."""
+    count = 0
 
-    holder = gh.Holder([0, 1], None, spawn=sleeper)
-    # what the process table shows on each pass: nothing, our server for two passes, nothing
-    script = [[], [], [99], [99], [], []]
-    seen, children = [], []
+    def __init__(self):
+        FakeChild.count += 1
+        self.pid, self.signals, self.dead = 1000 + FakeChild.count, [], False
 
-    def users(exclude):
-        seen.append(set(exclude))
-        children.append(list(holder.children))
-        return script[len(seen) - 1]
+    def send_signal(self, sig):
+        self.signals.append(sig)
 
-    gh.watch(holder, users, lambda: len(seen) == len(script), 0, None)
-    held = [bool(c) for c in children]
-    assert held == [False, True, True, False, False, True], held
-    first, second = children[1], children[5]
-    assert len(first) == 2 and all(c.poll() is not None for c in first), 'yield ends every child'
-    assert seen[1] == {c.pid for c in first}, "the holder's own children never count as users"
-    assert all(c.poll() is not None for c in second) and not holder.children, 'stop releases'
+    def kill(self):
+        self.dead = True
+
+    def wait(self):
+        return 0
+
+    def poll(self):
+        return 0 if self.dead else None
+
+
+def run_script(script, tmp, memory=lambda step: 0):
+    """Drive watch() one pass per script entry (the own GPU users seen); returns the states written."""
+    tmp = Path(tmp)
+    ready, state = tmp / 'ready', tmp / 'state'
+    holder = gh.Holder([0, 1], None, spawn=lambda gpu: FakeChild())
+    step, states = [-1], []  # stop() runs before every pass and advances to the next entry
+
+    def users(_exclude):
+        current = script[step[0]]
+        if current == 'ready':
+            ready.touch()
+            current = [99]
+        return current
+
+    def stop():
+        if state.exists() and (not states or states[-1] != state.read_text().strip()):
+            states.append(state.read_text().strip())
+        step[0] += 1
+        return step[0] >= len(script)
+
+    gh.watch(holder, users, lambda pids: memory(step[0]), stop, 0, None, ready, state,
+             clock=lambda: step[0] * 10.0)
+    return holder, states, ready
+
+
+def test_busy_while_our_server_starts_then_step_aside_when_ready(tmp=None):
+    tmp = tmp or tempfile.mkdtemp()
+    script = [[], [], [99], [99], 'ready', [99], [], []]
+    holder, states, ready = run_script(script, tmp)
+    assert states == ['hold', 'busy', 'yielded', 'hold'], states
+    assert not ready.exists(), 'holding again clears the ready file for the next start'
+    assert not holder.children, 'stop releases'
+
+
+def test_busy_ends_when_our_memory_settles(tmp=None):
+    big = 2 * gh.vram_total() // 2 + (8 << 30)  # over half of two GPUs
+    script = [[], [99], [99], [99], [99], [99], [99]]
+    # memory grows at step 2, then stays: busy ends READY_STABLE_SECONDS (2 steps of 10 s) later
+    _, states, _ = run_script(script, tmp or tempfile.mkdtemp(),
+                              memory=lambda step: big if step >= 2 else 1 << 30)
+    assert states == ['hold', 'busy', 'yielded'], states
 
 
 if __name__ == '__main__':

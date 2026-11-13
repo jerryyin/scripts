@@ -17,9 +17,11 @@ goes back to waiting (or exits, with --once). It signals no process of another t
 --reclaim-after is given.
 
 A local serve holds the claimed GPUs' free memory from the claim until the queue is empty
-(gpu-hold.py), yielding it while one of our processes uses the GPUs, so no other launcher takes
-them between or during job starts. Jobs get the holder's process group in
-GPU_ADMISSION_OWN_PGIDS so admission checks count it as ours.
+(gpu-hold.py). While one of our processes starts on the GPUs, the holder frees the memory and keeps
+the GPUs lightly busy until that process is ready, so no other launcher takes them between jobs or
+during a server's load. Jobs get the holder's process group in GPU_ADMISSION_OWN_PGIDS (admission
+checks count it as ours), a file to create once their server is ready in GPU_QUEUE_READY, and the
+holder's state (hold, busy, yielded) in the file named by GPU_QUEUE_HOLD_STATE.
 
 One serve runs per DIR: it holds an flock on DIR/serve.lock, which records its --count, and exits
 if another serve holds it. `add --count N` starts `serve DIR --count N --once` in the background
@@ -35,7 +37,7 @@ after --reclaim-grace seconds), logs each, and waits again. Listing and signalli
 processes, so it cannot reclaim.
 
 DIR holds pending/, running/, done/ and failed/. A job is an executable script; it runs with
-HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set (and GPU_ADMISSION_OWN_PGIDS on a local serve), and its output and exit status land
+HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set (and the holder's variables on a local serve), and its output and exit status land
 beside it as <job>.log and <job>.exit. Without --container everything runs locally, which inside
 a container is the simple setup. With --container, `serve` runs on the host (where
 amd-smi sees every tenant) and reaches DIR and the job through `docker exec`, so DIR is a path
@@ -307,16 +309,20 @@ def drain(store: Store, hip: str, log: Path, extra_env: dict[str, str] | None = 
 class MemoryHold:
     """gpu-hold.py on the claimed GPUs, in its own process group, from start() to stop()."""
 
-    def __init__(self, hip: str, log: Path):
+    def __init__(self, hip: str, log: Path, queue: Path):
         self.hip, self.log = hip, log
+        self.ready, self.state = queue / 'hold.ready', queue / 'hold.state'
         self.process: subprocess.Popen | None = None
 
     def start(self) -> dict[str, str]:
-        """Start holding; returns the job environment naming the holder's process group."""
+        """Start holding; returns the job environment naming the holder's group and files."""
+        self.ready.unlink(missing_ok=True)
         self.process = subprocess.Popen(
-            [sys.executable, str(GPU_HOLD), '--hip', self.hip, '--log', str(self.log)],
+            [sys.executable, str(GPU_HOLD), '--hip', self.hip, '--log', str(self.log),
+             '--ready', str(self.ready), '--state', str(self.state)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
-        return {'GPU_ADMISSION_OWN_PGIDS': str(self.process.pid)}
+        return {'GPU_ADMISSION_OWN_PGIDS': str(self.process.pid),
+                'GPU_QUEUE_READY': str(self.ready), 'GPU_QUEUE_HOLD_STATE': str(self.state)}
 
     def stop(self) -> None:
         if self.process is None:
@@ -359,7 +365,7 @@ def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
             note(log, f'no claim after {args.reclaim_after}s; reclaiming')
             reclaim(spare, args.reclaim_grace, log)
         note(log, f'claimed HIP {hip}')
-        holder = None if args.container else hold(hip, log)
+        holder = None if args.container else hold(hip, log, Path(store.root))
         try:
             drain(store, hip, log, holder.start() if holder else None)
         finally:

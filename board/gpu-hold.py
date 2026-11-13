@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-"""Memory holder of a local `gpu-queue serve`: holds the claimed GPUs' free memory and yields it
-while one of our processes uses them."""
+"""Memory holder of a local `gpu-queue serve`: holds the claimed GPUs' free memory, and while one of
+our processes starts on them, frees it and keeps the GPUs lightly busy until that process is ready.
+
+States, written to --state: `hold` (children hold the free memory), `busy` (an own process has the
+GPUs open; children hold no memory and run a small kernel loop), `yielded` (the own process is
+ready; no children). Busy ends when --ready exists, when our processes' GPU memory is over half of
+the GPUs' and unchanged for READY_STABLE_SECONDS, or after BUSY_LIMIT_SECONDS. When no own process
+has the GPUs open, the holder holds again and removes --ready."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +21,8 @@ from pathlib import Path
 CHUNK = 1 << 30
 HEADROOM = 1 << 30  # left free on each GPU for our own process to start in
 POLL_SECONDS = 0.2
+READY_STABLE_SECONDS = 20
+BUSY_LIMIT_SECONDS = 1800
 DEVICE_ENV = ('HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES')
 
 
@@ -61,20 +69,56 @@ def own_gpu_users(hip: set[int], exclude: set[int], proc_root: Path = Path('/pro
     return sorted(users)
 
 
+def drm_vram(pid: int, proc_root: Path = Path('/proc')) -> int:
+    """Largest DRM fdinfo `drm-memory-vram` of a process, in bytes (its VRAM on the GPU it uses)."""
+    largest = 0
+    try:
+        fdinfos = list((proc_root / str(pid) / 'fdinfo').iterdir())
+    except OSError:
+        return 0
+    for fdinfo in fdinfos:
+        try:
+            for line in fdinfo.read_text().splitlines():
+                if line.startswith('drm-memory-vram:'):
+                    amount, _, unit = line.split(':', 1)[1].strip().partition(' ')
+                    scale = {'': 1, 'KiB': 1 << 10, 'MiB': 1 << 20, 'GiB': 1 << 30}[unit.strip()]
+                    largest = max(largest, int(amount) * scale)
+        except (OSError, ValueError, KeyError):
+            continue
+    return largest
+
+
+def vram_total(drm_root: Path = Path('/sys/class/drm')) -> int:
+    """VRAM of one GPU in bytes (the largest card's; the claimed GPUs are alike)."""
+    sizes = [int(p.read_text()) for p in drm_root.glob('card*/device/mem_info_vram_total')]
+    return max(sizes, default=0)
+
+
 def hold_one(headroom: int) -> None:
-    """Allocate the visible GPU's free memory but `headroom` and keep topping it up."""
+    """Allocate the visible GPU's free memory but `headroom` and keep topping it up; on SIGUSR1 free
+    it and run a small kernel loop instead, so the GPU looks busy while holding next to nothing."""
     import torch
 
+    busy = []
+    signal.signal(signal.SIGUSR1, lambda *_: busy.append(True))
     blocks = []
-    while True:
+    while not busy:
         free, _ = torch.cuda.mem_get_info(0)
-        while free - CHUNK >= headroom:
+        while free - CHUNK >= headroom and not busy:
             try:
                 blocks.append(torch.empty(CHUNK, dtype=torch.uint8, device='cuda:0'))
             except torch.OutOfMemoryError:
                 break
             free -= CHUNK
-        time.sleep(0.5)
+        time.sleep(0.2)
+    blocks.clear()
+    torch.cuda.empty_cache()
+    # Back-to-back small kernels: the GPU reads as active while using a few compute units.
+    a = torch.randn(256, 256, device='cuda:0')
+    while True:
+        for _ in range(200):
+            a = torch.tanh(a @ a)
+        torch.cuda.synchronize()
 
 
 class Holder:
@@ -96,6 +140,10 @@ class Holder:
     def holding(self) -> bool:
         return bool(self.children)
 
+    def busy(self) -> None:
+        for child in self.children:
+            child.send_signal(signal.SIGUSR1)
+
     def pids(self) -> set[int]:
         return {child.pid for child in self.children}
 
@@ -110,21 +158,50 @@ class Holder:
         self.children = []
 
 
-def watch(holder: Holder, users, stop, poll: float, log: Path | None) -> None:
-    """Hold while no other process of ours uses the GPUs; release while one does; until stop()."""
+def watch(holder: Holder, users, own_memory, stop, poll: float, log: Path | None,
+          ready: Path | None = None, state_file: Path | None = None, clock=time.monotonic) -> None:
+    """Hold, go busy for an own process's start, step aside once it is ready; until stop()."""
+    state, busy_since, memory, stable_since = None, 0.0, 0, 0.0
+
+    def enter(new: str, why: str) -> None:
+        nonlocal state
+        state = new
+        if state_file is not None:
+            state_file.write_text(new + '\n')
+        note(log, f'{new} HIP {holder.hip}: {why}')
+
     while not stop():
         current = users(holder.pids())
-        if current and holder.holding:
-            holder.release()
-            note(log, f'yield HIP {holder.hip}: own GPU process(es) {current}')
-        elif not current and not holder.holding:
-            holder.hold()
-            note(log, f'hold HIP {holder.hip}: children {sorted(holder.pids())}')
-        elif holder.holding and any(child.poll() is not None for child in holder.children):
-            holder.release()
-            note(log, f'a holder child exited on HIP {holder.hip}; restarting')
+        now = clock()
+        if not current:
+            if state != 'hold' or any(child.poll() is not None for child in holder.children):
+                holder.release()
+                if ready is not None:
+                    ready.unlink(missing_ok=True)
+                holder.hold()
+                enter('hold', f'children {sorted(holder.pids())}')
+        elif state == 'hold':
+            holder.busy()
+            busy_since, memory, stable_since = now, own_memory(current), now
+            enter('busy', f'own GPU process(es) {current}')
+        elif state == 'busy':
+            used = own_memory(current)
+            if abs(used - memory) > CHUNK:
+                memory, stable_since = used, now
+            why = None
+            if ready is not None and ready.exists():
+                why = 'ready'
+            elif memory > len(holder.hip) * vram_total() // 2 and now - stable_since >= READY_STABLE_SECONDS:
+                why = f'own memory {memory >> 30} GiB unchanged for {READY_STABLE_SECONDS} s'
+            elif now - busy_since >= BUSY_LIMIT_SECONDS:
+                why = f'busy for {BUSY_LIMIT_SECONDS} s'
+            if why:
+                holder.release()
+                enter('yielded', why)
         time.sleep(poll)
     holder.release()
+    if state_file is not None:
+        state_file.unlink(missing_ok=True)
     note(log, f'stopped; released HIP {holder.hip}')
 
 
@@ -132,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hip')
     parser.add_argument('--log', type=Path)
+    parser.add_argument('--ready', type=Path)
+    parser.add_argument('--state', type=Path)
     parser.add_argument('--child', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.child:
@@ -145,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(sig, lambda *_: stopping.append(True))
     holder = Holder(hip, args.log)
     watch(holder, lambda exclude: own_gpu_users(set(hip), exclude | {os.getpid()}),
-          lambda: bool(stopping), POLL_SECONDS, args.log)
+          lambda pids: sum(drm_vram(pid) for pid in pids),
+          lambda: bool(stopping), POLL_SECONDS, args.log, args.ready, args.state)
     return 0
 
 

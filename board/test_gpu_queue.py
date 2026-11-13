@@ -44,7 +44,7 @@ def served(queue: Path, count: int = 4):
 class NoHold:
     """Stands in for the memory holder, which needs a GPU."""
 
-    def __init__(self, hip, log):
+    def __init__(self, hip, log, queue):
         pass
 
     def start(self):
@@ -98,7 +98,7 @@ def test_hold_spans_the_claim_and_names_its_group_to_jobs(tmp=None):
     events: list[str] = []
 
     class FakeHold:
-        def __init__(self, hip, _log):
+        def __init__(self, hip, _log, _queue):
             events.append(f'init {hip}')
 
         def start(self):
