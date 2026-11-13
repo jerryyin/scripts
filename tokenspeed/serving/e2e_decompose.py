@@ -38,8 +38,11 @@ cut into one slice per phase first, from the phases' recorded start and finish t
 --predict models a closed-loop benchmark of R requests of L prompt and O output tokens at
 concurrency C (R/C waves) from the fixed-batch measurements, and swaps measured terms between
 configurations (what-ifs). Inputs are this tool's JSON of the measured runs (--runs CFG=JSON),
-prefill_aggregate.py summary tables (--prefill NAME=CSV, row L=prompt tokens, B=C) and decode times
-per output token (--tpot NAME=CFG:MS, e.g. from fbdw_aggregate.py):
+prefill ladders (--prefill NAME=BENCHMARK_JSON: an amd-tracking run_evalscope_matrix.py
+--prefill-summary benchmark.json; its prompt_tokens must be L and its prefill_summary row of
+concurrency C gives prefill_tok_per_s median) and decode times per output token (--tpot
+NAME=CFG:MS, a number, or NAME=CFG:CSV@POINT, the decode_tpot_ms_median of row POINT of the
+table written by amd-tracking report_retained_kv.py RUN --repetitions-only CSV):
   prediction(NAME)   = R*L / prefill tok/s(CFG) + waves*(O-1)*MS
 Per configuration the medians over its runs of the busiest rank's prefill P, decode D, idle I and
 the Decode-line step are taken; core = waves*(O-1)*step/acceptance (acceptance = RequestStats mean,
@@ -296,10 +299,34 @@ def markdown(runs, log_interval=None):
 
 
 def prefill_rate(path, prompt_tokens, batch):
+    """Median prefill tok/s at concurrency `batch` from a run_evalscope_matrix.py --prefill-summary
+    benchmark.json whose prompt_tokens is `prompt_tokens`."""
+    bj = json.load(open(path))
+    if "prefill_summary" not in bj:
+        raise SystemExit(f"{path}: no prefill_summary (run run_evalscope_matrix.py with --prefill-summary)")
+    if bj.get("prompt_tokens") != prompt_tokens:
+        raise SystemExit(f"{path}: prompt_tokens {bj.get('prompt_tokens')} != {prompt_tokens}")
+    for r in bj["prefill_summary"]:
+        if int(r["concurrency"]) == batch:
+            rate = (r.get("prefill_tok_per_s") or {}).get("median")
+            if rate is None:
+                raise SystemExit(f"{path}: concurrency {batch} has no prefill_tok_per_s median")
+            return float(rate)
+    raise SystemExit(f"{path}: no prefill_summary row of concurrency {batch}")
+
+
+def tpot_ms(value):
+    """MS as a number, or CSV@POINT: decode_tpot_ms_median of row POINT of a report_retained_kv.py
+    --repetitions-only table."""
+    path, sep, point = value.rpartition("@")
+    if not sep:
+        return float(value)
     for r in csv.DictReader(open(path)):
-        if int(r["L"]) == prompt_tokens and int(r["B"]) == batch:
-            return float(r["batch_prompt_tok_per_s_median"])
-    raise SystemExit(f"{path}: no L={prompt_tokens} B={batch} row")
+        if r["point"] == point:
+            if not r.get("decode_tpot_ms_median"):
+                raise SystemExit(f"{path}: point {point} has no decode_tpot_ms_median")
+            return float(r["decode_tpot_ms_median"])
+    raise SystemExit(f"{path}: no point {point}")
 
 
 def run_terms(runs, interval, steps):
@@ -394,8 +421,8 @@ def main_predict(a):
         name, rest = split_spec(spec, "--tpot")
         cfg, sep, ms = rest.partition(":")
         if not sep:
-            raise SystemExit(f"--tpot {spec!r}: expected NAME=CFG:MS")
-        tpots.append((name, cfg, float(ms)))
+            raise SystemExit(f"--tpot {spec!r}: expected NAME=CFG:MS or NAME=CFG:CSV@POINT")
+        tpots.append((name, cfg, tpot_ms(ms)))
     acceptance = {k: float(v) for k, v in (split_spec(x, "--acceptance") for x in a.acceptance)}
     res = predict(runs, prefill, tpots, acceptance, a.requests, a.prompt_tokens, a.output_tokens,
                   a.concurrency, a.decode_log_interval)
@@ -421,8 +448,8 @@ def main():
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
     pr.add_argument("--runs", action="append", default=[], help="CFG=JSON written by this tool (repeatable)")
-    pr.add_argument("--prefill", action="append", default=[], help="NAME=prefill_aggregate.py summary.csv")
-    pr.add_argument("--tpot", action="append", default=[], help="NAME=CFG:MS decode time per output token")
+    pr.add_argument("--prefill", action="append", default=[], help="NAME=run_evalscope_matrix.py --prefill-summary benchmark.json")
+    pr.add_argument("--tpot", action="append", default=[], help="NAME=CFG:MS or NAME=CFG:CSV@POINT (report_retained_kv.py --repetitions-only table): decode time per output token")
     pr.add_argument("--acceptance", action="append", default=[], help="CFG=A: what-if acceptance")
     pr.add_argument("--requests", type=int)
     pr.add_argument("--output-tokens", type=int)

@@ -8,8 +8,10 @@
 # TS_STEP_TIMING_* variables that copy reads, writes per-rank dumps to DUMP_DIR, and execs COMMAND.
 # STRIDE times one layer in STRIDE; EVERY harvests every EVERY-th graph replay; EAGER=1 also times
 # eager decode steps (pass --enforce-eager to ts serve yourself). For the uninstrumented reference,
-# run the same command without this wrapper. Compose with ../serving/dsv41_serve.sh:
-#   DSV41_WRAP="timed.sh OUT/step-timing --" (see ../serving/README.md)
+# run the same command without this wrapper. To serve an amd-tracking layout recipe instrumented,
+# wrap its server manager (the server inherits this environment), see README.md:
+#   timed.sh OUT/step-timing -- python3 $AT/skills/inference_engine/benchmark/scripts/manage_server.py \
+#     run --command-file $AT/apps/inference_engine_benchmark/recipes/<model>/<recipe>.sh ...
 set -euo pipefail
 dump=${1:?usage: timed.sh DUMP_DIR -- COMMAND...}; shift
 [[ "${1:-}" == "--" ]] || { echo "usage: timed.sh DUMP_DIR -- COMMAND..." >&2; exit 2; }; shift

@@ -66,8 +66,8 @@ def test_predict_terms_and_whatifs() -> None:
     with tempfile.TemporaryDirectory() as d:
         csvs = {}
         for name, rate in (("a", 400.0), ("b", 500.0)):
-            p = Path(d) / f"{name}.csv"
-            p.write_text(f"L,B,batch_prompt_tok_per_s_median\n1000,2,{rate}\n1000,4,1.0\n")
+            p = Path(d) / f"{name}-benchmark.json"
+            p.write_text(json.dumps(prefill_benchmark(1000, {2: rate, 4: 1.0})))
             csvs[name] = str(p)
         res = e2e.predict(runs, csvs, [("a-fast", "a", 1.0)], {"b": 4.0}, requests=4, prompt_tokens=1000,
                           output_tokens=11, concurrency=2, interval=10)
@@ -82,6 +82,56 @@ def test_predict_terms_and_whatifs() -> None:
     assert w["b with a's prefill-ladder rate"] == 4000 / 400 + 3.0
     assert w["a, decode at a-fast (1 ms per output token)"] == round(8.0 + 0.02 + (3.0 - 0.04) + 1.0, 6)
     assert w["b, acceptance 4 at the measured step time"] == round(6.0 + 20 / 4 * 0.004 + (3.0 - 0.04), 6)
+
+
+def prefill_benchmark(prompt_tokens, rates):
+    """The fields of a run_evalscope_matrix.py --prefill-summary benchmark.json that --prefill reads."""
+    stat = lambda v: {"median": v, "min": v, "max": v}  # noqa: E731
+    return {"prompt_tokens": prompt_tokens, "results": [],
+            "prefill_summary": [{"concurrency": c, "repetitions": 3, "prompt_tokens_per_request": [prompt_tokens],
+                                 "ttft_mean_s": stat(1.0), "ttft_max_s": stat(1.0), "last_first_token_s": stat(1.0),
+                                 "prefill_tok_per_s": stat(r), "send_spread_s": stat(0.0)} for c, r in rates.items()]}
+
+
+def test_prefill_rate_reads_matrix_prefill_summary_and_refuses_mismatches() -> None:
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "benchmark.json"
+        p.write_text(json.dumps(prefill_benchmark(8000, {1: 9000.0, 4: 20000.0})))
+        assert e2e.prefill_rate(str(p), 8000, 4) == 20000.0
+        for args, word in (((8000, 2), "concurrency 2"), ((50000, 1), "prompt_tokens")):
+            try:
+                e2e.prefill_rate(str(p), *args)
+            except SystemExit as exc:
+                assert word in str(exc)
+            else:
+                raise AssertionError(f"{args} must be refused")
+        p.write_text(json.dumps({"prompt_tokens": 8000, "results": []}))
+        try:
+            e2e.prefill_rate(str(p), 8000, 1)
+        except SystemExit as exc:
+            assert "--prefill-summary" in str(exc)
+        else:
+            raise AssertionError("a benchmark.json without prefill_summary must be refused")
+
+
+def test_tpot_from_number_or_retained_kv_repetition_table() -> None:
+    e2e = load("e2e_decompose.py")
+    assert e2e.tpot_ms("12.5") == 12.5
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "repetitions.csv"  # columns as report_retained_kv.py --repetitions-only writes them
+        p.write_text("point,batch_size,per_rank_batch,repetitions,decode_context_min,decode_context_max,"
+                     "decode_tpot_ms_median,decode_tpot_ms_min,decode_tpot_ms_max\n"
+                     "b64-c50000,64,16,3,50000,50500,7.25,7.0,7.5\n"
+                     "b8-c50000,8,2,3,50000,50500,,,\n")
+        assert e2e.tpot_ms(f"{p}@b64-c50000") == 7.25
+        for point, word in (("b8-c50000", "no decode_tpot_ms_median"), ("b1", "no point")):
+            try:
+                e2e.tpot_ms(f"{p}@{point}")
+            except SystemExit as exc:
+                assert word in str(exc)
+            else:
+                raise AssertionError(point)
 
 
 if __name__ == "__main__":
