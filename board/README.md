@@ -13,6 +13,8 @@ board/
 ├── test_gpu_wait.py       # its tests (no GPU needed)
 ├── gpu-queue              # claim GPUs once on a shared host, run queued jobs back to back
 ├── test_gpu_queue.py      # its tests (no GPU or docker needed)
+├── gpu-hold.py            # gpu-queue's memory holder
+├── test_gpu_hold.py       # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -35,7 +37,9 @@ board/
   runs on the host and holds no GPU while the queue is empty. When a job is pending it waits for
   N idle GPUs (`gpu-wait.py N --hip`), then runs every pending job on those GPUs
   oldest first, each starting the moment the previous one exits, including jobs queued while
-  earlier ones run; it releases when the queue is empty. It never runs placeholder load.
+  earlier ones run; it releases when the queue is empty. A local serve holds the claimed
+  GPUs' free memory from the claim until the queue is empty, yielding it while one of our
+  processes uses the GPUs, so another tenant cannot take them between or during job starts.
   `--reclaim-after SECONDS` (host serve with `--container` only, and only where every GPU process
   is yours): when a pending job has waited that long, `serve` stops every `/dev/kfd` holder on the
   host outside `--container` (SIGTERM, SIGKILL after `--reclaim-grace`, through `sudo -n` unless

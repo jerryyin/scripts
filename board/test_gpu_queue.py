@@ -41,13 +41,26 @@ def served(queue: Path, count: int = 4):
         lock.release()
 
 
-def serve_once(queue: Path, log: Path, claims: list[str]):
+class NoHold:
+    """Stands in for the memory holder, which needs a GPU."""
+
+    def __init__(self, hip, log):
+        pass
+
+    def start(self):
+        return {}
+
+    def stop(self):
+        pass
+
+
+def serve_once(queue: Path, log: Path, claims: list[str], hold=None):
     args = argparse.Namespace(count=4, container=None, poll=0, once=True, reclaim_after=None)
 
     def fake_wait(_args, _log):
         claims.append('claim')
         return '5,7,6,4'
-    return quiet(gq.serve, args, gq.Store(str(queue)), log, wait=fake_wait)
+    return quiet(gq.serve, args, gq.Store(str(queue)), log, wait=fake_wait, hold=hold or NoHold)
 
 
 def test_queue_runs_back_to_back_in_one_claim(tmp=None):
@@ -77,6 +90,33 @@ def test_queue_runs_back_to_back_in_one_claim(tmp=None):
     assert not list((queue / 'running').iterdir()) and not list((queue / 'pending').iterdir())
     _, listing = quiet(gq.main, ['status', str(queue)])
     assert 'done: 2' in listing and 'failed: 1' in listing and 'exit=3' in listing
+
+
+def test_hold_spans_the_claim_and_names_its_group_to_jobs(tmp=None):
+    root = Path(tmp or tempfile.mkdtemp())
+    queue, log = root / 'q', root / 'serve.log'
+    events: list[str] = []
+
+    class FakeHold:
+        def __init__(self, hip, _log):
+            events.append(f'init {hip}')
+
+        def start(self):
+            events.append('start')
+            return {'GPU_ADMISSION_OWN_PGIDS': '4242'}
+
+        def stop(self):
+            events.append('stop')
+
+    with served(queue):
+        for name in ('a', 'b'):
+            quiet(gq.main, ['add', str(queue), '--name', name, '--',
+                            f'echo "pgids=$GPU_ADMISSION_OWN_PGIDS"; echo ran-{name} >> {root}/order'])
+    assert serve_once(queue, log, [], hold=FakeHold)[0] == 0
+    assert events == ['init 5,7,6,4', 'start', 'stop'], 'one hold spans every job of the claim'
+    assert (root / 'order').read_text() == 'ran-a\nran-b\n'
+    for job in (queue / 'done').glob('*.sh'):
+        assert (queue / 'done' / f'{job.name}.log').read_text().startswith('pgids=4242\n')
 
 
 def test_empty_queue_claims_nothing_and_recovers_interrupted_jobs(tmp=None):
@@ -115,7 +155,7 @@ def test_reclaim_runs_only_after_a_timed_out_wait(tmp=None):
     answers = iter([None, None, '4,5,6,7'])  # two timed-out waits, then a claim
     reclaimed: list[int] = []
     quiet(gq.serve, args, gq.Store(str(queue)), log, wait=lambda _a, _l: next(answers),
-          reclaim=lambda _spare, grace, _log: reclaimed.append(grace))
+          reclaim=lambda _spare, grace, _log: reclaimed.append(grace), hold=NoHold)
     assert reclaimed == [7, 7], reclaimed
     assert [p.name.split('-', 1)[1] for p in (queue / 'done').glob('*.sh')] == ['job.sh']
 
@@ -219,7 +259,8 @@ def test_once_serve_takes_a_job_queued_as_it_stops(tmp=None):
     args = argparse.Namespace(count=4, container=None, poll=0, once=True, reclaim_after=None)
     claims: list[str] = []
     result, _ = quiet(gq.serve, args, store, root / 'serve.log',
-                      wait=lambda _a, _l: claims.append('claim') or '0,1,2,3', lock=LateJob(store, 4))
+                      wait=lambda _a, _l: claims.append('claim') or '0,1,2,3', lock=LateJob(store, 4),
+                      hold=NoHold)
     assert result == 0 and claims == ['claim'], claims
     assert (queue / 'done' / late.name).exists(), 'the late job must run before the serve exits'
 

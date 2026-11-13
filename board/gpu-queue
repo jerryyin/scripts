@@ -3,7 +3,7 @@
 
 usage: gpu-queue add DIR [--name NAME] [--count N] (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
-       gpu-queue serve DIR --count N [--container NAME] [--poll 5] [--confirm 4]
+       gpu-queue serve DIR --count N [--container NAME] [--poll 1] [--confirm 2]
                        [--idle-by usage|process] [--log FILE] [--once]
                        [--reclaim-after SECONDS [--reclaim-grace 30]]
 
@@ -13,8 +13,13 @@ check. So one claim must cover a sequence of jobs. `serve` holds no GPU while th
 empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`), then runs every
 pending job on those GPUs, oldest first, starting each the moment the previous one exits,
 including jobs added while earlier ones run. It releases the GPUs when the queue is empty and
-goes back to waiting (or exits, with --once). It never runs placeholder load, and signals no
-process unless --reclaim-after is given.
+goes back to waiting (or exits, with --once). It signals no process of another tenant unless
+--reclaim-after is given.
+
+A local serve holds the claimed GPUs' free memory from the claim until the queue is empty
+(gpu-hold.py), yielding it while one of our processes uses the GPUs, so no other launcher takes
+them between or during job starts. Jobs get the holder's process group in
+GPU_ADMISSION_OWN_PGIDS so admission checks count it as ours.
 
 One serve runs per DIR: it holds an flock on DIR/serve.lock, which records its --count, and exits
 if another serve holds it. `add --count N` starts `serve DIR --count N --once` in the background
@@ -30,7 +35,7 @@ after --reclaim-grace seconds), logs each, and waits again. Listing and signalli
 processes, so it cannot reclaim.
 
 DIR holds pending/, running/, done/ and failed/. A job is an executable script; it runs with
-HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set, and its output and exit status land
+HIP_VISIBLE_DEVICES, GPU_QUEUE_HIP and GPU_QUEUE_JOB set (and GPU_ADMISSION_OWN_PGIDS on a local serve), and its output and exit status land
 beside it as <job>.log and <job>.exit. Without --container everything runs locally, which inside
 a container is the simple setup. With --container, `serve` runs on the host (where
 amd-smi sees every tenant) and reaches DIR and the job through `docker exec`, so DIR is a path
@@ -53,12 +58,14 @@ import fcntl
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 GPU_WAIT = Path(__file__).resolve().with_name('gpu-wait.py')
+GPU_HOLD = Path(__file__).resolve().with_name('gpu-hold.py')
 STATES = ('pending', 'running', 'done', 'failed')
 SERVE_LOG = 'serve.log'  # default --log of a serve without --container, inside DIR
 LOCK = 'serve.lock'  # flock of DIR's one serve; holds its --count
@@ -101,8 +108,8 @@ class Store:
     def write_exit(self, job: str, state: str, value: str) -> None:
         self.sh('printf "%s\\n" "$4" > "$1/$2/$3.exit"', state, job, value)
 
-    def run(self, job: str, hip: str) -> int:
-        env = {'HIP_VISIBLE_DEVICES': hip, 'GPU_QUEUE_HIP': hip, 'GPU_QUEUE_JOB': job}
+    def run(self, job: str, hip: str, extra_env: dict[str, str] | None = None) -> int:
+        env = {'HIP_VISIBLE_DEVICES': hip, 'GPU_QUEUE_HIP': hip, 'GPU_QUEUE_JOB': job, **(extra_env or {})}
         result = self.sh('cd "$1/running" && exec bash -lc \'exec "./$0" > "./$0.log" 2>&1\' "$2"',
                          job, check=False, env=env, capture=False)
         return result.returncode
@@ -283,22 +290,48 @@ def recover(store: Store, log: Path) -> None:
         note(log, f'{job}: found in running/ at start, moved to failed/ (interrupted)')
 
 
-def drain(store: Store, hip: str, log: Path) -> None:
+def drain(store: Store, hip: str, log: Path, extra_env: dict[str, str] | None = None) -> None:
     """Run pending jobs on `hip`, oldest first, until none is left."""
     while pending := store.jobs('pending'):
         job = pending[0]
         store.move(job, 'pending', 'running')
         store.sh('touch "$1/running/$2"', job)  # its mtime is the start time `status` reports
         note(log, f'{job}: start on HIP {hip}')
-        status = store.run(job, hip)
+        status = store.run(job, hip, extra_env)
         state = 'done' if status == 0 else 'failed'
         store.move(job, 'running', state)
         store.write_exit(job, state, str(status))
         note(log, f'{job}: exit={status} -> {state}/')
 
 
+class MemoryHold:
+    """gpu-hold.py on the claimed GPUs, in its own process group, from start() to stop()."""
+
+    def __init__(self, hip: str, log: Path):
+        self.hip, self.log = hip, log
+        self.process: subprocess.Popen | None = None
+
+    def start(self) -> dict[str, str]:
+        """Start holding; returns the job environment naming the holder's process group."""
+        self.process = subprocess.Popen(
+            [sys.executable, str(GPU_HOLD), '--hip', self.hip, '--log', str(self.log)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
+        return {'GPU_ADMISSION_OWN_PGIDS': str(self.process.pid)}
+
+    def stop(self) -> None:
+        if self.process is None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(60)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.process.pid, signal.SIGKILL)  # its own group: the holder and its children
+            self.process.wait()
+        self.process = None
+
+
 def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
-          reclaim=reclaim, lock: ServeLock | None = None) -> int:
+          reclaim=reclaim, lock: ServeLock | None = None, hold=MemoryHold) -> int:
     store.init()
     lock = lock or ServeLock(store, args.count)
     if not lock.acquire():
@@ -326,7 +359,12 @@ def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
             note(log, f'no claim after {args.reclaim_after}s; reclaiming')
             reclaim(spare, args.reclaim_grace, log)
         note(log, f'claimed HIP {hip}')
-        drain(store, hip, log)
+        holder = None if args.container else hold(hip, log)
+        try:
+            drain(store, hip, log, holder.start() if holder else None)
+        finally:
+            if holder:
+                holder.stop()
         note(log, f'queue empty; released HIP {hip}')
 
 
@@ -418,8 +456,8 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument('dir')
     p.add_argument('--count', type=int, required=True)
     p.add_argument('--container')
-    p.add_argument('--poll', type=int, default=5)  # other launchers take freed GPUs within seconds
-    p.add_argument('--confirm', type=int, default=4)  # a loaded server reads 0% between requests
+    p.add_argument('--poll', type=float, default=1)  # other launchers take freed GPUs within seconds
+    p.add_argument('--confirm', type=int, default=2)  # a loaded server reads 0% between requests
     p.add_argument('--idle-by', choices=('usage', 'process'), default='usage')
     p.add_argument('--log', type=Path)
     p.add_argument('--once', action='store_true', help='exit when the queue is empty')
