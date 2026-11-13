@@ -95,6 +95,16 @@ def test_busy_ends_when_our_memory_settles(tmp=None):
     assert states == ['hold', 'busy', 'yielded'], states
 
 
+def test_busy_hold_keeps_free_memory_under_the_cap_and_gives_the_rest_to_our_server():
+    GiB = 1 << 30
+    cap = gh.BUSY_FREE_CAP
+    assert gh.busy_hold(free=286 * GiB, held=0, cap=cap) == 46 * GiB  # a 250 GiB request cannot fit
+    # our server allocated 20 GiB from the 240 free: release 20 of the 46 held, free is back at 240
+    assert gh.busy_hold(free=220 * GiB, held=46 * GiB, cap=cap) == 26 * GiB
+    # its weights are in (153 GiB free, nothing held): hold nothing, the KV pool sees a clean GPU
+    assert gh.busy_hold(free=153 * GiB, held=0, cap=cap) == 0
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

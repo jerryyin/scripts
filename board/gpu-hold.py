@@ -3,8 +3,9 @@
 our processes starts on them, frees it and keeps the GPUs lightly busy until that process is ready.
 
 States, written to --state: `hold` (children hold the free memory), `busy` (an own process has the
-GPUs open; children hold no memory and run a small kernel loop), `yielded` (the own process is
-ready; no children). Busy ends when --ready exists, when our processes' GPU memory is over half of
+GPUs open; children keep each GPU's free memory at most BUSY_FREE_CAP, giving the rest to our
+process as it allocates, and run a small kernel loop), `yielded` (the own process is ready; no
+children). Busy ends when --ready exists, when our processes' GPU memory is over half of
 the GPUs' and unchanged for READY_STABLE_SECONDS, or after BUSY_LIMIT_SECONDS. When no own process
 has the GPUs open, the holder holds again and removes --ready."""
 from __future__ import annotations
@@ -22,6 +23,10 @@ CHUNK = 1 << 30
 HEADROOM = 1 << 30  # left free on each GPU for our own process to start in
 POLL_SECONDS = 0.2
 READY_STABLE_SECONDS = 20
+# While our server loads, free memory stays at or below this, so a tenant that takes 250 GiB per GPU
+# at once (seen repeatedly on this host) never fits; our server, which allocates gradually and sizes
+# its KV pool once its weights are in (about 153 GiB free then), never waits on the holder.
+BUSY_FREE_CAP = 240 << 30
 BUSY_LIMIT_SECONDS = 1800
 DEVICE_ENV = ('HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES')
 
@@ -94,9 +99,14 @@ def vram_total(drm_root: Path = Path('/sys/class/drm')) -> int:
     return max(sizes, default=0)
 
 
+def busy_hold(free: int, held: int, cap: int) -> int:
+    """Bytes to hold so that free memory is at most `cap`: what is available beyond `cap`."""
+    return max(0, free + held - cap)
+
+
 def hold_one(headroom: int) -> None:
-    """Allocate the visible GPU's free memory but `headroom` and keep topping it up; on SIGUSR1 free
-    it and run a small kernel loop instead, so the GPU looks busy while holding next to nothing."""
+    """Allocate the visible GPU's free memory but `headroom` and keep topping it up; on SIGUSR1 hold
+    only what keeps free memory at most BUSY_FREE_CAP, and run a small kernel loop."""
     import torch
 
     busy = []
@@ -111,12 +121,21 @@ def hold_one(headroom: int) -> None:
                 break
             free -= CHUNK
         time.sleep(0.2)
-    blocks.clear()
-    torch.cuda.empty_cache()
     # Back-to-back small kernels: the GPU reads as active while using a few compute units.
     a = torch.randn(256, 256, device='cuda:0')
     while True:
-        for _ in range(200):
+        free, _ = torch.cuda.mem_get_info(0)
+        target = busy_hold(free, len(blocks) * CHUNK, BUSY_FREE_CAP)
+        if len(blocks) * CHUNK > target:
+            del blocks[target // CHUNK:]
+            torch.cuda.empty_cache()
+        else:
+            while len(blocks) * CHUNK + CHUNK <= target:
+                try:
+                    blocks.append(torch.empty(CHUNK, dtype=torch.uint8, device='cuda:0'))
+                except torch.OutOfMemoryError:
+                    break
+        for _ in range(20):
             a = torch.tanh(a @ a)
         torch.cuda.synchronize()
 
@@ -183,7 +202,7 @@ def watch(holder: Holder, users, own_memory, stop, poll: float, log: Path | None
         elif state == 'hold':
             holder.busy()
             busy_since, memory, stable_since = now, own_memory(current), now
-            enter('busy', f'own GPU process(es) {current}')
+            enter('busy', f'own GPU process(es) {current}; free memory capped at {BUSY_FREE_CAP >> 30} GiB')
         elif state == 'busy':
             used = own_memory(current)
             if abs(used - memory) > CHUNK:
