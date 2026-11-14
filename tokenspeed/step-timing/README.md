@@ -131,7 +131,7 @@ timed layers, as instrumented, are slower than the average layer, so projected s
 projecting) and, on the `remainder` row, the projection's closure: `overshoot_ms` (sum - graph),
 `overshoot_marker_vs_clean_ms` (marker-free sum - clean step) and the per-marker cost that would close
 it (`closing_marker_us_clean`, `closing_marker_us_graph`). In the campaign's EP4-Petit 50k run the
-closing cost was 4.7-6.8 us per marker at every batch, near the smoke's 4.84 us: the overshoot is
+closing cost had medians of 5.0-6.4 us per marker (range 4.7-7.0) at every batch, near the smoke's 4.84 us: the overshoot is
 mostly marker cost multiplied by the projection, and `petit_share_marker` is the closest reading.
 
 To port the patch to a newer TokenSpeed, apply it in a clone at that commit (`git apply --reject`),
