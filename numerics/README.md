@@ -42,11 +42,22 @@ several configurations and the question is which is faster.
   `--key-divide` and `--scale` align tables whose keys differ (for example per-rank batch and
   per-GPU throughput across rank counts). `--metric` repeats: one table per metric in the given
   order, each under a `### <metric>` heading (`--format json`: one object keyed by metric name);
-  a single `--metric` prints the bare table (JSON: the row list). Tests: `test_range_compare.py`.
+  a single `--metric` prints the bare table (JSON: the row list). `--consensus NAME=A/B,C/D`
+  (repeatable; each name a `--ratio`) appends a column `NAME` with the verdict those ratios share:
+  `higher` or `lower` when every one present in the row says so, `no verdict` when any says
+  `overlap` or they differ (one overlap among disjoint ratios is `no verdict`), `-` when none is
+  present; a ratio whose table lacks the row's key is left out (JSON: `consensus.NAME` =
+  `{verdict, n}`, `n` the ratios present). Use it to compare layouts by the pooled ratio and every
+  start-pair ratio at once. Without it the output is unchanged. Tests: `test_range_compare.py`.
 
   ```bash
   python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \
       --table EP4=ep4/summary.csv --table TP4=tp4/summary.csv --ratio EP4/TP4
+  python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \
+      --table EP4=ep4/pooled.csv --table TP4=tp4/pooled.csv \
+      --table EP4s1=ep4/s1.csv --table TP4s1=tp4/s1.csv --table TP4s2=tp4/s2.csv \
+      --ratio EP4/TP4 --ratio EP4s1/TP4s1 --ratio EP4s1/TP4s2 \
+      --consensus consensus=EP4/TP4,EP4s1/TP4s1,EP4s1/TP4s2
   ```
 
 - `genRandInput.py` — writes a random binary buffer of a given shape and dtype, and with

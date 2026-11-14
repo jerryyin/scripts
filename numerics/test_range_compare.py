@@ -176,6 +176,88 @@ def test_repeated_metric_is_refused_twice() -> None:
         raise AssertionError("a metric given twice must be refused")
 
 
+
+def test_consensus_agreement_disagreement_and_one_overlap() -> None:
+    hi, lo, ov = ({"verdict": v} for v in ("higher", "lower", "overlap"))
+    assert rc.consensus([hi, hi, hi]) == {"verdict": "higher", "n": 3}
+    assert rc.consensus([lo, None, lo]) == {"verdict": "lower", "n": 2}
+    assert rc.consensus([hi, lo]) == {"verdict": "no verdict", "n": 2}
+    assert rc.consensus([hi, hi, ov]) == {"verdict": "no verdict", "n": 3}
+    assert rc.consensus([ov, ov]) == {"verdict": "no verdict", "n": 2}
+    assert rc.consensus([None, None]) == {"verdict": None, "n": 0}
+
+
+# Three tables over B=1..4: C agrees with A at B=1 (both above B), overlaps B at B=2, sits on the
+# other side of B at B=3 (disagreement) and lacks B=4 (left out of the consensus).
+CONS_A = "B,v_median,v_min,v_max\n1,10,9,11\n2,10,9,11\n3,10,9,11\n4,10,9,11\n"
+CONS_B = "B,v_median,v_min,v_max\n1,5,4,6\n2,5,4,6\n3,5,4,6\n4,5,4,6\n"
+CONS_C = "B,v_median,v_min,v_max,w\n1,8,7,8.5,1\n2,5.5,5,6,1\n3,3,2,3.5,1\n"
+
+
+def run_consensus(*extra: str, fmt: str = "md") -> str:
+    a, b, c = write("a.csv", CONS_A), write("b.csv", CONS_B), write("c.csv", CONS_C)
+    argv = ["compare", "--key", "B", "--metric", "v", "--table", f"A={a}", "--table", f"B={b}",
+            "--table", f"C={c}", "--ratio", "A/B", "--ratio", "C/B", "--format", fmt, *extra]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc.main(argv)
+    return buf.getvalue()
+
+
+def test_cli_consensus_column_markdown_and_json() -> None:
+    lines = run_consensus("--consensus", "all=A/B,C/B", "--consensus", "AB=A/B").splitlines()
+    assert lines[0] == "| B | A med [min,max] | B med [min,max] | C med [min,max] | A/B | C/B | all | AB |"
+    assert [line.rsplit("|", 3)[1:3] for line in lines[2:]] == [
+        [" higher ", " higher "], [" no verdict ", " higher "], [" no verdict ", " higher "], [" higher ", " higher "]]
+    data = json.loads(run_consensus("--consensus", "all=A/B,C/B", fmt="json"))
+    assert [r["consensus"]["all"] for r in data] == [
+        {"verdict": "higher", "n": 2}, {"verdict": "no verdict", "n": 2}, {"verdict": "no verdict", "n": 2},
+        {"verdict": "higher", "n": 1}]
+    only_c = json.loads(run_consensus("--consensus", "c=C/B", fmt="json"))
+    assert only_c[3]["consensus"]["c"] == {"verdict": None, "n": 0}
+    assert run_consensus("--consensus", "c=C/B").splitlines()[5].endswith("| - | - |")
+
+
+def test_consensus_with_repeated_metric() -> None:
+    a, b = write("a.csv", METRIC_A), write("b.csv", METRIC_B)
+    argv = ["compare", "--key", "B", "--table", f"A={a}", "--table", f"B={b}", "--ratio", "A/B",
+            "--ratio", "B/A", "--metric", "w", "--metric", "v", "--consensus", "both=A/B,B/A"]
+    for fmt in ("md", "json"):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc.main(argv + ["--format", fmt])
+        out = buf.getvalue()
+        if fmt == "md":
+            assert out.count("| both |") == 2 and out.startswith("### w\n")
+            assert out.rstrip().endswith("0.67 lower | 1.50 higher | no verdict |")
+        else:
+            data = json.loads(out)
+            assert [r["consensus"]["both"]["verdict"] for r in data["w"]] == ["no verdict", "no verdict"]
+
+
+def test_consensus_option_errors() -> None:
+    for spec in ("bad", "x=", "x=A/C", "A/B=A/B", "=A/B"):
+        try:
+            run_consensus("--consensus", spec)
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(spec)
+    try:
+        run_consensus("--consensus", "x=A/B", "--consensus", "x=C/B")
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a consensus name given twice must be refused")
+
+
+def test_without_consensus_output_is_byte_identical_to_40f9d01() -> None:
+    # Pinned at 40f9d01958ce65942a78ef66a5a9e3075068873c, which had no --consensus.
+    assert run_compare("v") == PINNED_SINGLE_MD
+    assert run_compare("v", fmt="json", bounds=False) == PINNED_SINGLE_JSON
+    assert "consensus" not in run_consensus(fmt="json") and run_consensus().count("|") == 7 * 6
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

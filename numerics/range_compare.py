@@ -11,7 +11,9 @@ list under --rows-field):
              'higher' or 'lower' only when the [min,max] ranges are disjoint, else 'overlap'.
              --metric repeats: one table per metric in the given order, each under a
              "### <metric>" heading (JSON: an object keyed by metric); a single --metric prints
-             the bare table (JSON: the row list)
+             the bare table (JSON: the row list). --consensus NAME=A/B,C/D appends a column NAME:
+             'higher' or 'lower' when every listed ratio present in the row has that verdict,
+             'no verdict' when any is 'overlap' or they differ, '-' when none is present
 
 A metric without _median/_min/_max columns is read as a single value (min = median = max).
 Metric names may be dotted paths into nested JSON objects (summary.Req Throughput (req/s)).
@@ -123,8 +125,24 @@ def compare(a: tuple[float, float, float], b: tuple[float, float, float]) -> dic
             "hi": a[2] / b[1] if b[1] else None, "verdict": verdict}
 
 
+def consensus(results: list[dict | None]) -> dict:
+    """One verdict over several compare() results of a row: the common 'higher'/'lower', else 'no verdict'.
+
+    A missing result (None: a table lacks the row's key) is left out; one 'overlap', or 'higher'
+    beside 'lower', gives 'no verdict'; with no result present the verdict is None. n counts the
+    results present."""
+    present = [c["verdict"] for c in results if c]
+    if not present:
+        return {"verdict": None, "n": 0}
+    first = present[0]
+    agree = first in ("higher", "lower") and all(v == first for v in present)
+    return {"verdict": first if agree else "no verdict", "n": len(present)}
+
+
 def compare_tables(tables: dict[str, dict[tuple, dict]], metric: str, ratios: list[tuple[str, str]],
-                   scales: dict[str, float] | None = None) -> list[dict]:
+                   scales: dict[str, float] | None = None,
+                   groups: dict[str, list[str]] | None = None) -> list[dict]:
+    """Rows of values and ratios per key; groups ({name: ["A/B", ...]}) adds rec["consensus"][name]."""
     scales = scales or {}
     keys = sorted({k for t in tables.values() for k in t},
                   key=lambda t: tuple((0, x) if isinstance(x, (int, float)) else (1, str(x)) for x in t))
@@ -137,6 +155,8 @@ def compare_tables(tables: dict[str, dict[tuple, dict]], metric: str, ratios: li
         for a, b in ratios:
             va, vb = rec["values"].get(a), rec["values"].get(b)
             rec["ratios"][f"{a}/{b}"] = compare(va, vb) if va and vb else None
+        if groups:
+            rec["consensus"] = {name: consensus([rec["ratios"][q] for q in names]) for name, names in groups.items()}
         out.append(rec)
     return out
 
@@ -158,13 +178,14 @@ def fmt_ratio(c, digits: int, bounds: bool) -> str:
 
 
 def markdown(rows: list[dict], key: list[str], labels: list[str], ratios: list[str], digits: int,
-             ratio_digits: int, bounds: bool) -> str:
-    head = key + [f"{l} med [min,max]" for l in labels] + ratios
+             ratio_digits: int, bounds: bool, groups: list[str] = ()) -> str:
+    head = key + [f"{l} med [min,max]" for l in labels] + ratios + list(groups)
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in rows:
         cells = [str(x) for x in r["key"]]
         cells += [fmt_value(r["values"][l], digits) for l in labels]
         cells += [fmt_ratio(r["ratios"][q], ratio_digits, bounds) for q in ratios]
+        cells += [r["consensus"][g]["verdict"] or "-" for g in groups]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -250,7 +271,7 @@ def write_rows(rows: list[dict], fmt: str, out) -> None:
 
 
 def write_compare(results: dict[str, tuple[list[str], list[dict]]], key: list[str], ratios: list[str], fmt: str,
-                  digits: int, ratio_digits: int, bounds: bool, out) -> None:
+                  digits: int, ratio_digits: int, bounds: bool, out, groups: list[str] = ()) -> None:
     """Write compare_tables results per metric ({metric: (labels, rows)}, in order).
 
     One metric: the bare table (Markdown) or row list (JSON). Several: in Markdown one table per
@@ -268,9 +289,9 @@ def write_compare(results: dict[str, tuple[list[str], list[dict]]], key: list[st
         return
     if len(results) == 1:
         (labels, rows), = results.values()
-        out.write(markdown(rows, key, labels, ratios, digits, ratio_digits, bounds))
+        out.write(markdown(rows, key, labels, ratios, digits, ratio_digits, bounds, groups))
         return
-    out.write("\n".join(f"### {m}\n\n" + markdown(rows, key, labels, ratios, digits, ratio_digits, bounds)
+    out.write("\n".join(f"### {m}\n\n" + markdown(rows, key, labels, ratios, digits, ratio_digits, bounds, groups)
                          for m, (labels, rows) in results.items()))
 
 
@@ -301,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--digits", type=int, default=1)
     c.add_argument("--ratio-digits", type=int, default=2)
     c.add_argument("--bounds", action="store_true", help="print conservative ratio bounds")
+    c.add_argument("--consensus", action="append", default=[],
+                   help="NAME=A/B,C/D: append column NAME, the verdict all those --ratio columns share "
+                        "('higher'/'lower'), else 'no verdict' (repeatable)")
     c.add_argument("--format", choices=["md", "json"], default="md")
     a = ap.parse_args(argv)
     key = [k for k in a.key.split(",") if k]
@@ -318,6 +342,19 @@ def main(argv: list[str] | None = None) -> int:
     aliases = dict(x.split("=", 1) for x in a.alias)
     ratios = [tuple(r.split("/", 1)) for r in a.ratio]
     scales = {k: float(v) for k, v in (x.split("=", 1) for x in a.scale)}
+    ratio_names = [f"{x}/{y}" for x, y in ratios]
+    groups: dict[str, list[str]] = {}
+    for spec in a.consensus:
+        name, sep, names = spec.partition("=")
+        listed = [q for q in names.split(",") if q]
+        if not sep or not name or not listed:
+            ap.error(f"--consensus {spec!r}: expected NAME=A/B,C/D")
+        if name in groups or name in ratio_names:
+            ap.error(f"--consensus {spec!r}: column {name!r} already exists")
+        unknown = [q for q in listed if q not in ratio_names]
+        if unknown:
+            ap.error(f"--consensus {spec!r}: {unknown[0]!r} is not a --ratio")
+        groups[name] = listed
     results: dict[str, tuple[list[str], list[dict]]] = {}
     for metric in a.metric:
         # Tables are loaded per metric: pooling ("+" or --pool) writes only that metric's columns.
@@ -334,9 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         for a_, b_ in ratios:
             if a_ not in tables or b_ not in tables:
                 ap.error(f"--ratio {a_}/{b_}: unknown label")
-        results[metric] = (list(tables), compare_tables(tables, metric, ratios, scales))
-    write_compare(results, key, [f"{x}/{y}" for x, y in ratios], a.format, a.digits, a.ratio_digits, a.bounds,
-                  sys.stdout)
+        results[metric] = (list(tables), compare_tables(tables, metric, ratios, scales, groups))
+    write_compare(results, key, ratio_names, a.format, a.digits, a.ratio_digits, a.bounds, sys.stdout, list(groups))
     return 0
 
 
