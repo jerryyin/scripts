@@ -28,8 +28,7 @@ board/
   `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Memory
   other processes hold does not count; on a pick it logs who holds memory there (host PIDs,
   from KFD, also inside a container). Never signals anything. `--idle-by process` waits for
-  no process in `amd-smi process` instead. `--snapshot` prints amd-smi's process list as JSON
-  (used by `agent/unattended/measurement_record.py`). A held host-wide lock (`--host-lock`)
+  no process in `amd-smi process` instead. `--snapshot` prints amd-smi's process list as JSON. A held host-wide lock (`--host-lock`)
   makes every GPU busy; `--hip` prints HIP ids (see below). Tests: `test_gpu_wait.py`.
 - `gpu-queue` — a job queue for a shared host with no scheduler, where GPUs a job releases are
   taken by other users' queues before anyone can start the next job, and idle GPUs reserve

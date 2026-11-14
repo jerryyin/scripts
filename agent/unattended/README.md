@@ -3,30 +3,18 @@
 Tools for jobs that run for hours with nobody watching, where the thing that bites you is
 not a crash but a **stale answer that looks like a fresh one**. Both files here exist
 because a status file or a permission file kept reading "fine" after it had stopped being
-true.
+true. A measurement's provenance record is written by amd-tracking's
+`apps/shared/measurement_record.py`, beside the GPU admission sampler whose verdicts it embeds.
 
 ```
 agent/unattended/
 ├── README.md                        # this file
 ├── heartbeat.py                     # status file where every field carries its own vintage
-├── verdict_run_correspondence.py    # is this go/no-go verdict from the LATEST check, or an old one?
-└── measurement_record.py            # write one provenance record (record.json) per measurement
+└── verdict_run_correspondence.py    # is this go/no-go verdict from the LATEST check, or an old one?
 ```
 
 ## Files
 
-- `measurement_record.py begin|sample|finish RECORD ...` — one JSON record per measurement:
-  the exact commands, each repository's commit and cleanliness before and after, the tools used
-  (path, repository commit, SHA-256), the GPUs and their process snapshots before, during and
-  after (taken with `board/gpu-wait.py --snapshot`), the server stop record, and result paths
-  with hashes. `finish --admission VERDICT.json` embeds the admissibility verdict of the
-  measurement window (written by amd-tracking `apps/shared/gpu_admission.py window stop`, the one
-  sampler of KFD/DRM state over the window) with its SHA-256 and sets the record's top-level
-  `admissible` (null, i.e. not proven, without a verdict). `--load-admission VERDICT.json` adds the
-  verdict of the window over the server's load (spawn to readiness); `admissible` then needs both.
-  `--server-capacity FILE.json` embeds the server's capacity (e.g. KV token capacity per rank). The record is written into the run's own directory and belongs to that run; this
-  helper holds no campaign details. `measurement_record.py selftest` runs without a GPU (it
-  queries amd-smi's process list when amd-smi is present).
 - `heartbeat.py` — writes a JSON status file for a long run. Import it and call `write()`,
   or run it directly for a manual write.
 
