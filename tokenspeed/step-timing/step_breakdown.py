@@ -10,7 +10,7 @@
   step_breakdown.py overhead --point LABEL=METRICS_JSON,ANALYSIS_DIR,CLEAN_TPOT_MS [...]
       instrumentation overhead per point: decode TPOT measured while timing (fixed-batch metrics.json)
       against the clean TPOT, with the graph span, step period and host gap from the analyzer.
-  step_breakdown.py share ANALYSIS_DIR --clean-ms X [--target-layers 40 --draft-layers 3]
+  step_breakdown.py share ANALYSIS_DIR --clean-ms X --target-layers N --draft-layers M
                     [--field batch_size=128 --field repetition=0 ...] [--append-csv ROWS.csv]
       the Gluon Petit MoE's share of a decode step, one row per rank: the Petit MoE time of the
       instrumented layers (segments moe.experts, petit.s1, petit.s2, petit.comb, petit.post: the whole
@@ -364,16 +364,16 @@ def main(argv=None):
     s = sub.add_parser("share")
     s.add_argument("analysis_dir")
     s.add_argument("--clean-ms", type=float, required=True, help="uninstrumented decode step ms of the same point")
-    s.add_argument("--target-layers", type=int, default=40, help="target MoE layers per step (DeepSeek V4.1 Flash: 40)")
-    s.add_argument("--draft-layers", type=int, default=3, help="draft MoE layers per step (DSpark stages: 3)")
+    s.add_argument("--target-layers", type=int, required=True, help="target MoE layers per step (the model's)")
+    s.add_argument("--draft-layers", type=int, required=True, help="draft MoE layers per step (0 without a draft)")
     s.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
     s.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
     s.add_argument("--marker-us", type=float, help="also give the share with this fixed cost per Petit marker removed "
                    "(columns petit_ms_per_step_marker, petit_share_marker)")
     pj = sub.add_parser("project", help="whole-step component rows projected from a `table --json` result")
     pj.add_argument("table_json")
-    pj.add_argument("--target-layers", type=int, default=40)
-    pj.add_argument("--draft-layers", type=int, default=3)
+    pj.add_argument("--target-layers", type=int, required=True)
+    pj.add_argument("--draft-layers", type=int, required=True)
     pj.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
     pj.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
     pj.add_argument("--groups", action="store_true", help="one row per (rank, group), summed over its components")

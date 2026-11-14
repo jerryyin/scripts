@@ -4,7 +4,7 @@
 Run one rank per GPU under torchrun:
 
   python3 -m torch.distributed.run --standalone --nproc-per-node=4 petit_layer.py \
-      --ts-src $TS_SRC --profile dsv41_flash --mode both --reps 3 --out petit.json
+      --ts-src $TS_SRC --profile dsv41_flash --tokens 1,6,12,24 --mode both --reps 3 --out petit.json
 
 Everything about the layer comes from TokenSpeed's distributed test
 (tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py in --ts-src), imported
@@ -17,7 +17,7 @@ exactly. The timed inputs (--routing) are checked the same way. Then each mode i
 profiling/dist_timing.py: warmup, then --reps blocks of --iters calls, events around every call
 (graph replay in graph mode), a barrier before each block; per rank and max over ranks.
 
-Pure logic (argument parsing, default token list, limits) runs without a GPU: test_petit_layer.py.
+Pure logic (argument parsing, limits, result rows) runs without a GPU: test_petit_layer.py.
 """
 from __future__ import annotations
 
@@ -40,27 +40,6 @@ TEST_REL = "tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distribut
 # (tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py:251,
 # enforced at :375 "invalid MegaMoE token capacity" and :420 "invalid MegaMoE token count").
 PETIT_MAX_TOKENS_PER_RANK = 1024
-DSPARK_TOKENS_PER_REQUEST = 6  # target MoE: one target token + 5 DSpark draft tokens verified per step
-# Draft MoE: one DSpark block forward per decode step over dspark_block_size = 5 rows per request
-# (runtime/execution/drafter/deepseek_v41_dspark.py:_draft_decode_rows, input_num_tokens =
-# num_decodes * block_size); it runs only for decode requests, so it never sees prefill tokens.
-DSPARK_DRAFT_TOKENS_PER_REQUEST = 5
-DP = 4
-GLOBAL_BATCHES = (4, 8, 16, 32, 64, 128)  # requests in flight over DP4 -> 1..32 per rank
-PREFILL_CHUNKS = (256, 512, 1024)
-PROFILES = ("dsv41_flash", "dsv41_flash_dspark")
-
-
-def default_tokens(profile: str = "dsv41_flash") -> list[int]:
-    """Tokens per GPU serving gives the profile's MoE: 1, decode per-rank batches 1..32 (global 4..128
-    under DP4; decode graphs pad every rank to the same batch) times 6 verify rows (target) or 5 draft
-    rows (dsv41_flash_dspark), and for the target the prefill chunks."""
-    if profile == "dsv41_flash_dspark":
-        return sorted({1, *(DSPARK_DRAFT_TOKENS_PER_REQUEST * (b // DP) for b in GLOBAL_BATCHES)})
-    decode = [DSPARK_TOKENS_PER_REQUEST * (b // DP) for b in GLOBAL_BATCHES]
-    return sorted({1, *decode, *PREFILL_CHUNKS})
-
-
 ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "repetition",
               "max_over_ranks_median_ms", "max_over_ranks_min_ms", "max_over_ranks_max_ms",
               "per_rank_median_ms", "pass", "iters", "tokenspeed_commit", "test_sha256", "source")
@@ -113,12 +92,10 @@ def check_tokens(tokens: list[int]) -> list[int]:
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ts-src", default=os.environ.get("TS_SRC"), help="TokenSpeed checkout (default $TS_SRC)")
-    ap.add_argument("--profile", choices=PROFILES, default="dsv41_flash",
-                    help="test profile: dsv41_flash (384 experts top-6) or dsv41_flash_dspark (DSpark draft MoE, 128 top-3)")
-    ap.add_argument("--tokens", default=None,
-                    help="tokens per GPU, comma list (default: the profile's serving counts, default_tokens(): "
-                         f"dsv41_flash {','.join(map(str, default_tokens()))}; dsv41_flash_dspark "
-                         f"{','.join(map(str, default_tokens('dsv41_flash_dspark')))})")
+    ap.add_argument("--profile", required=True,
+                    help="a profile of the test's _PROFILES (e.g. dsv41_flash, dsv41_flash_dspark)")
+    ap.add_argument("--tokens", required=True,
+                    help="tokens per GPU, comma list (README: the counts serving gives a MoE)")
     ap.add_argument("--active-ranks", type=int, default=None,
                     help="ranks 0..N-1 get the tokens, the others 0 (an idle DP rank's eager IDLE forward "
                          "enters Petit with 0 tokens, e.g. a 1024-token prefill chunk on one rank: "
@@ -142,7 +119,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     if a.active_ranks is not None and a.active_ranks < 1:
         ap.error("--active-ranks must be >= 1")
     try:
-        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens or ",".join(map(str, default_tokens(a.profile)))))
+        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens))
     except ValueError as error:
         ap.error(str(error))
     return a
@@ -241,6 +218,8 @@ def main(argv=None) -> int:
     gpus_before = dist_timing.gpu_context() if rank == 0 else None
     t_start = time.time()
     mod, test_info = load_test(ts_src)
+    if a.profile not in mod._PROFILES:
+        raise SystemExit(f"--profile {a.profile}: the test's profiles are {', '.join(sorted(mod._PROFILES))}")
     profile = mod._PROFILES[a.profile]
     if ws not in profile.world_sizes:
         raise SystemExit(f"{a.profile} is registered for EP{profile.world_sizes}, not {ws}")

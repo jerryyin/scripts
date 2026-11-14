@@ -17,22 +17,16 @@ import petit_layer
 RANGE_COMPARE = Path(__file__).resolve().parents[2] / "numerics" / "range_compare.py"
 
 
-def test_default_tokens_from_serving() -> None:
-    # 1 + decode tokens per rank (requests per rank 1..32 under DP4 x 6) + prefill chunks
-    assert petit_layer.default_tokens() == [1, 6, 12, 24, 48, 96, 192, 256, 512, 1024]
-    # draft MoE: one DSpark block (5 rows per request) per decode step, never prefill tokens
-    assert petit_layer.default_tokens("dsv41_flash_dspark") == [1, 5, 10, 20, 40, 80, 160]
-
-
-def test_parse_defaults() -> None:
-    a = petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json"])
-    assert a.profile == "dsv41_flash" and a.mode == "both" and a.reps == 3
-    assert a.tokens == petit_layer.default_tokens()
+def test_parse_requires_the_profile_and_tokens() -> None:
+    a = petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "any_profile", "--tokens", "1,6"])
+    assert a.profile == "any_profile" and a.tokens == [1, 6] and a.mode == "both" and a.reps == 3
     assert a.routing == "test" and a.seed == 0 and a.active_ranks is None
-    d = petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "dsv41_flash_dspark"])
-    assert d.tokens == petit_layer.default_tokens("dsv41_flash_dspark")
-    p = petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--tokens", "1024", "--active-ranks", "1"])
+    p = petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1024",
+                                "--active-ranks", "1"])
     assert p.tokens == [1024] and p.active_ranks == 1
+    for missing in (["--profile", "x"], ["--tokens", "1"]):
+        with pytest.raises(SystemExit):
+            petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", *missing])
 
 
 @pytest.mark.parametrize("argv", [
@@ -40,13 +34,12 @@ def test_parse_defaults() -> None:
     ["--tokens", "0"],
     ["--reps", "2"],
     ["--warmup", "0"],
-    ["--profile", "dsv4"],       # EP8-only profile
     ["--mode", "neither"],
     ["--active-ranks", "0"],
 ])
 def test_parse_rejects(argv) -> None:
     with pytest.raises(SystemExit):
-        petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", *argv])
+        petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1", *argv])
 
 
 def test_check_tokens_cites_capacity() -> None:

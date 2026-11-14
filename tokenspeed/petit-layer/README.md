@@ -32,13 +32,13 @@ rank to each destination rank, expert load), the tool and TokenSpeed revisions, 
 the profile geometry and plan, and the GPUs (`HIP_VISIBLE_DEVICES`, amd-smi indices) with their
 processes before and after.
 
-Default tokens per GPU (`default_tokens(profile)`, the counts serving gives each MoE at TokenSpeed
-e8fd096e): decode graphs pad every DP rank to the same per-rank batch b (the capture size at or above
-the largest rank's batch; an idle rank replays the graph with dummy rows), so each rank enters Petit
-with the same count. `dsv41_flash` (the target's 40 MoE layers): 1; 6 b for b = 1..32 (one target
-token + 5 DSpark drafts verified per request): 6, 12, 24, 48, 96, 192; prefill chunks 256, 512,
-1024. `dsv41_flash_dspark` (the 3 DSpark draft stages, one block forward per decode step over 5
-rows per request; it never runs on prefill tokens): 1; 5 b: 5, 10, 20, 40, 80, 160.
+`--profile` names a profile of the test's `_PROFILES`; `--tokens` lists the tokens per GPU to time.
+To time what serving runs, take the counts serving gives that MoE. For example, DeepSeek V4.1 Flash
+with 5 DSpark draft tokens under attention DP4 at TokenSpeed e8fd096e: decode graphs pad every DP
+rank to the same per-rank batch b, so the target (`dsv41_flash`, 40 MoE layers per step) sees 6 b
+tokens per GPU (one token plus 5 drafts verified per request) and prefill chunks of up to 1024; the
+draft (`dsv41_flash_dspark`, 3 stages per step) sees 5 b and never prefill tokens. For b = 1..32:
+`--tokens 1,6,12,24,48,96,192,256,512,1024` and `--tokens 1,5,10,20,40,80,160`.
 `--active-ranks N` gives the tokens to ranks 0..N-1 and 0 to the others: an idle DP rank's eager
 IDLE forward enters Petit with 0 tokens (e.g. a 1024-token prefill chunk on one rank while three
 idle: `--tokens 1024 --active-ranks 1`). Petit holds at most 1024 tokens per rank
@@ -53,7 +53,8 @@ over repetitions; `--summary` prints a markdown table of one JSON.
 ```bash
 # on 4 idle gfx950 GPUs (for example as a board/gpu-queue job), TokenSpeed importable by python3
 python3 -m torch.distributed.run --standalone --nproc-per-node=4 petit_layer.py --ts-src "$TS_SRC" \
-    --profile dsv41_flash --mode both --reps 3 --warmup 10 --iters 50 --routing test --seed 0 \
+    --profile dsv41_flash --tokens 1,6,12,24,48,96,192,256,512,1024 \
+    --mode both --reps 3 --warmup 10 --iters 50 --routing test --seed 0 \
     --out petit-layer-dsv41_flash.json
 python3 petit_layer.py --rows petit-rows.csv petit-layer-dsv41_flash.json petit-layer-dsv41_flash_dspark.json
 python3 ../../numerics/range_compare.py summarize petit-rows.csv --key profile,mode,tokens_per_gpu \

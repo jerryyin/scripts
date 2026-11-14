@@ -141,6 +141,17 @@ def test_project_whole_step() -> None:
     assert rows["remainder (graph - projected)"]["batch_size"] == "4"
 
 
+def test_share_and_project_need_the_models_layer_counts() -> None:
+    for argv in (["share", "dir", "--clean-ms", "1"], ["share", "dir", "--clean-ms", "1", "--target-layers", "40"],
+                 ["project", "t.json", "--draft-layers", "3"]):
+        try:
+            sb.main(argv)
+        except SystemExit as exit_:
+            assert exit_.code == 2, argv
+        else:
+            raise AssertionError(f"{argv} ran without the layer counts")
+
+
 def test_project_groups_sum() -> None:
     t = {"stride": 40, "clean_ms": 10.0, "role": {"0": "busy"}, "graph": {"0": 10.0},
          "comp": {"attn: sparse-MLA core": {"vals": {"0": 0.1}}, "attn: qkv_a projection": {"vals": {"0": 0.05}},
