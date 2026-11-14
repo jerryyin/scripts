@@ -14,6 +14,7 @@ profiling/
 ├── test_att_analyze.py   # non-GPU unit tests for the reducer (pytest)
 ├── analyze_trace.py      # per-step GPU time from PyTorch-profiler Chrome traces or rocprofv3 CSV
 ├── graph_event_smoke.py  # does a timing event recorded in CUDA-graph capture become a timed node?
+├── test_graph_event_smoke.py  # non-GPU unit tests for its second-replay verdict (pytest)
 ├── dist_timing.py        # per-call event timing of a call every torch.distributed rank makes together
 └── test_dist_timing.py   # non-GPU unit tests for its statistics and argument helpers (pytest)
 ```
@@ -31,7 +32,11 @@ profiling/
 - `graph_event_smoke.py OUT.json` — on one idle GPU, checks that `torch.cuda.Event(enable_timing=True,
   external=True)` recorded during stream capture becomes a timed event-record node, on the
   capture stream and on a forked stream, and measures the per-node overhead. Run it before
-  instrumenting a captured graph with timing events.
+  instrumenting a captured graph with timing events. The second-replay check fails when an event is
+  not refreshed by a replay (stale: outside replay 2) or moves inside the graph by 0.5 ms or more
+  relative to the graph's first event; a shift of the host launch gap before the graph
+  (`launch_gap_ms`, `max_offset_shift_ms`) is reported, not failed. Its verdict logic
+  (`replay_checks`) is tested without a GPU in `test_graph_event_smoke.py`.
 - `dist_timing.py` — importable core for timing one collective call (a layer with a token
   exchange, a collective) on every rank of a `torchrun` job, eager or as CUDA-graph replay (pass
   `graph.replay`): `time_calls` puts timing events around each call after a device sync and a
