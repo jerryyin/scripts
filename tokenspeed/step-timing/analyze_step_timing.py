@@ -3,12 +3,17 @@
 per-component breakdown per decode step. CPU-only, stdlib only.
 
 usage: analyze_step_timing.py --dir <dump dir> --out <out dir> [--skip 20] [--bs N]
+                              [--stage-json STAGE.json | --wall-from T --wall-to T]
        analyze_step_timing.py --self-test --out <dir>
 
 Main-stream segments: marker k -> next main-stream marker, labelled by marker k.
 Aux-stream (overlapped) pairs: attn.kvidx.b->e (compressor/KV write/indexer) and
 shared.b->e (shared expert) are reported separately; they are hidden unless the
 main stream waits at the join (attn.q segment / moe.shared_join segment).
+Draft-model layers (DSpark stages) are dumped as layer id + DRAFT_LAYER_OFFSET (instrumentation.diff,
+step_timing.set_layer_offset); their segments get categories "draft:<category>" in bucket "draft".
+--stage-json takes the decode window of one amd-tracking retained-KV stage (stage.json:
+started_unix + prefill_request_seconds .. finished_unix), i.e. one batch x repetition point.
 """
 import argparse, collections, glob, json, math, os, random, statistics, sys
 
@@ -35,7 +40,10 @@ SEG = {  # start-marker name -> (category, bucket)
     "ffn.end": ("layer_tail", "norm/mhc"),
     "final": ("final_norm", "other"),
     "model.end": ("lm_head+sampling+outputs", "head+sample"),
+    "draft.begin": ("draft.embed+prep", "draft"),
+    "draft.end": ("draft.tail(norm+head+sampling+outputs)", "draft"),
 }
+DRAFT_LAYER_OFFSET = 1000  # step_timing.DRAFT_LAYER_OFFSET in instrumentation.diff
 AUX = {("attn.kvidx.b", "attn.kvidx.e"): "aux.attn.compressor+indexer",
        ("shared.b", "shared.e"): "aux.shared_expert"}
 
@@ -65,8 +73,8 @@ def step_components(seq, t, graph_ms):
         lay, n = split(seq["names"][a])
         dt = (t[b] if b is not None else graph_ms) - t[a]
         cat, bk = SEG.get(n, ("other:" + n, "other"))
-        if n.startswith("petit.") or n in ("moe.experts",):
-            pass
+        if lay >= DRAFT_LAYER_OFFSET:
+            cat, bk = "draft:" + cat, "draft"
         cats[cat] += dt; buckets[bk] += dt
         if lay >= 0:
             per_layer[(lay, cat)] += dt
@@ -74,6 +82,8 @@ def step_components(seq, t, graph_ms):
     for i, nm in enumerate(seq["names"]):
         lay, n = split(nm)
         for (b, e), label in AUX.items():
+            if lay >= DRAFT_LAYER_OFFSET:
+                label = "draft:" + label
             if n == b:
                 open_[(lay, label)] = t[i]
             elif n == e and (lay, label) in open_:
@@ -98,6 +108,12 @@ def load(dirpath):
         rank = int(base.split("-r")[1].split("-p")[0])
         ranks.setdefault(rank, []).append((f, seqs, steps))
     return ranks
+
+
+def stage_window(path):
+    """Decode window (epoch s) of one retained-KV stage: after its prefill request, to its finish."""
+    st = json.load(open(path))
+    return st["started_unix"] + st["prefill_request_seconds"], st["finished_unix"]
 
 
 def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=None, wall_to=None, busy_ranks=None):
@@ -171,7 +187,8 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             for (lay, c), v in sorted(L.items()):
                 f.write(f"{lay},{c},{statistics.median(v):.5f}\n")
         report.append("")
-        summary.append(dict(rank=rank, role=role, n=len(recs), graph_ms=gmed, period_ms=pmed,
+        main_markers = sum(1 for st in recs[0][0]["streams"] if st == "main")
+        summary.append(dict(rank=rank, role=role, n=len(recs), graph_ms=gmed, period_ms=pmed, main_markers=main_markers,
                             host_gap_ms=pmed - gmed, bucket_sum_ms=bsum, layers=n_layers,
                             harvest_ms=statistics.median(harvest)))
     # busy vs idle comparison
@@ -187,7 +204,7 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
         report.append("")
     for name, data, cols in (("per_category.csv", rows, ["rank", "role", "category", "median_ms", "p10", "p90", "n"]),
                              ("per_bucket.csv", bucket_rows, ["rank", "role", "bucket", "median_ms", "p10", "p90", "n"]),
-                             ("summary.csv", summary, ["rank", "role", "n", "graph_ms", "period_ms", "host_gap_ms", "bucket_sum_ms", "layers", "harvest_ms"])):
+                             ("summary.csv", summary, ["rank", "role", "n", "graph_ms", "period_ms", "host_gap_ms", "bucket_sum_ms", "layers", "harvest_ms", "main_markers"])):
         with open(os.path.join(out, name), "w") as f:
             f.write(",".join(cols) + "\n")
             for r in data:
@@ -208,7 +225,7 @@ LAYER_ORDER = ["layer", "attn", "attn.fork", "attn.kvidx.b", "attn.kvidx.e", "at
                "petit.comb", "petit.post", "moe.join", "ffn.end"]
 
 
-def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21)):
+def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21), draft_layers=1):
     os.makedirs(dirpath, exist_ok=True)
     rnd = random.Random(7)
     for rank in range(4):
@@ -221,6 +238,13 @@ def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21)):
                 names.append(f"{l}:{n}")
                 streams.append("s9" if n in ("attn.kvidx.b", "attn.kvidx.e", "shared.b", "shared.e") else "main")
         names += ["-1:final", "-1:model.end"]; streams += ["main", "main"]
+        if draft_layers:
+            names.append("-1:draft.begin"); streams.append("main")
+            for l in range(DRAFT_LAYER_OFFSET, DRAFT_LAYER_OFFSET + draft_layers):
+                for n in LAYER_ORDER[1:]:
+                    names.append(f"{l}:{n}")
+                    streams.append("s9" if n in ("attn.kvidx.b", "attn.kvidx.e", "shared.b", "shared.e") else "main")
+            names.append("-1:draft.end"); streams.append("main")
         lines = [json.dumps({"type": "seq", "sid": 0, "bs": 1, "names": names, "streams": streams, "dropped": 0})]
         wall = 1000.0
         for k in range(steps):
@@ -239,9 +263,10 @@ def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21)):
                     fork_t = x
                 if n == "moe.experts":
                     fork_t = x
-                d = {"model.begin": 0.1, "engram": 0.05, "final": 0.02, "model.end": 0.3}.get(n)
+                d = {"model.begin": 0.1, "engram": 0.05, "final": 0.02, "model.end": 0.3,
+                     "draft.begin": 0.04, "draft.end": 0.06}.get(n)
                 if d is None:
-                    d = TRUTH[n][0 if busy else 1]
+                    d = TRUTH[n][0 if busy else 1] * (0.5 if lay >= DRAFT_LAYER_OFFSET else 1.0)
                 x += d * (1 + rnd.uniform(-0.02, 0.02))
             graph_ms = x
             replay = 4 * (k + 1)
@@ -268,7 +293,11 @@ def self_test(out):
               (2, "engram", 2 * 0.05),
               (2, "aux.attn.compressor+indexer", 43 * 0.040),
               (2, "aux.shared_expert", 43 * 0.030),
-              (3, "lm_head+sampling+outputs", 0.3)]
+              (3, "lm_head+sampling+outputs", 0.3),
+              (2, "draft:petit.stage1(dispatch_wait+gate_up)", 0.5 * TRUTH["petit.s1"][0]),
+              (2, "draft:moe.prep(quant/non-petit experts)", 0.5 * TRUTH["moe.experts"][0]),
+              (2, "draft.tail(norm+head+sampling+outputs)", 0.06),
+              (2, "draft:aux.shared_expert", 0.030)]
     lines = []
     for rank, cat, want in checks:
         got = get(rank, cat)
@@ -293,10 +322,14 @@ if __name__ == "__main__":
     ap.add_argument("--wall-from", type=float, help="epoch seconds; keep records at/after (point window start)")
     ap.add_argument("--wall-to", type=float, help="epoch seconds; keep records at/before (point window end)")
     ap.add_argument("--busy-ranks", help="comma list overriding the busy/idle role (e.g. from server-log placement)")
+    ap.add_argument("--stage-json", help="amd-tracking retained-KV stage.json: keep records in its decode window "
+                    "(started_unix + prefill_request_seconds .. finished_unix); overrides --wall-from/--wall-to")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         sys.exit(self_test(a.out))
+    if a.stage_json:
+        a.wall_from, a.wall_to = stage_window(a.stage_json)
     analyze(a.dir, a.out, a.skip, a.bs, a.layers, a.wall_from, a.wall_to,
             None if a.busy_ranks is None else {int(x) for x in a.busy_ranks.split(',') if x})
     print(open(os.path.join(a.out, "report.md")).read())

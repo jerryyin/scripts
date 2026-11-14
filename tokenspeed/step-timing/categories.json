@@ -1,5 +1,5 @@
 {
- "_doc": "Ordered list; first matching regex (Python re.search, case-insensitive) wins. Kernel names in torch/kineto traces are the HIP symbol names (Triton/Gluon kernels keep their Python function name, possibly with suffixes). Citations are TokenSpeed @0dd8d477 paths relative to /zyin/dsv41/tokenspeed. TK=tokenspeed-kernel/python/tokenspeed_kernel, TKA=tokenspeed-kernel-amd/python/tokenspeed_kernel_amd, PET=TK/thirdparty/gluon_petit/lib/moe/rocm.",
+ "_doc": "Ordered list; first matching regex (Python re.search, case-insensitive) wins. Kernel names in torch/kineto traces are the HIP symbol names (Triton/Gluon kernels keep their Python function name, possibly with suffixes). Citations are TokenSpeed @0dd8d477 paths (kernel names MegaMoEStage1, MegaMoEStage2, MegaMoECombine, MegaMoEQuantizeMxFp4 checked present at e8fd096e; line numbers may differ) relative to /zyin/dsv41/tokenspeed. TK=tokenspeed-kernel/python/tokenspeed_kernel, TKA=tokenspeed-kernel-amd/python/tokenspeed_kernel_amd, PET=TK/thirdparty/gluon_petit/lib/moe/rocm.",
  "categories": [
   {
    "category": "memcpy_h2d",

@@ -10,6 +10,15 @@
   step_breakdown.py overhead --point LABEL=METRICS_JSON,ANALYSIS_DIR,CLEAN_TPOT_MS [...]
       instrumentation overhead per point: decode TPOT measured while timing (fixed-batch metrics.json)
       against the clean TPOT, with the graph span, step period and host gap from the analyzer.
+  step_breakdown.py share ANALYSIS_DIR --clean-ms X [--target-layers 40 --draft-layers 3]
+                    [--field batch_size=128 --field repetition=0 ...] [--append-csv ROWS.csv]
+      the Gluon Petit MoE's share of a decode step, one row per rank: the Petit MoE time of the
+      instrumented layers (segments moe.experts, petit.s1, petit.s2, petit.comb, petit.post: the whole
+      MoELayer.forward -> kernel_moe_apply call, from activation quantization to the combined output;
+      router/top-k and the shared expert excluded) per instrumented target layer and per instrumented
+      draft stage, projected to all MoE layers (target x --target-layers + draft x --draft-layers), over
+      the clean (uninstrumented) step; 'corr' subtracts the per-marker cost (graph - clean) / markers
+      from each Petit segment. Rows append to a CSV for numerics/range_compare.py summarize.
 
 The correction is approximate: the shares, not the absolute corrected times, are the evidence.
 """
@@ -23,6 +32,19 @@ import statistics
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DRAFT_LAYER_OFFSET = 1000  # analyze_step_timing.DRAFT_LAYER_OFFSET
+# Analyzer categories of the segments from moe.experts to the next marker after the Petit call
+# (shared.b): activation quantize + route copies, stage 1 (dispatch wait + gate/up), stage 2 (down),
+# combine, and the return to Python. Without kernel-side markers moe.experts alone spans the call.
+PETIT_CATEGORIES = ("moe.prep(quant/non-petit experts)", "petit.stage1(dispatch_wait+gate_up)",
+                    "petit.stage2(down)", "petit.combine", "moe.shared_join_wait")
+PETIT_MARKERS = ("moe.experts", "petit.s1", "petit.s2", "petit.comb", "petit.post")
+
+
+def marker_name(name):
+    """'L:name' -> name, prefixed 'draft:' for a draft-model layer (L >= DRAFT_LAYER_OFFSET)."""
+    layer, n = name.split(":", 1)
+    return ("draft:" + n) if int(layer) >= DRAFT_LAYER_OFFSET else n
 
 
 def load_map(path):
@@ -51,7 +73,7 @@ def table(analysis_dir, dump_dir, label, clean_ms=None, components=None):
     summ = {int(r["rank"]): r for r in csv.DictReader(open(os.path.join(analysis_dir, "summary.csv")))}
     ranks = sorted(cat)
     seq = first_seq(dump_dir)
-    names = [n.split(":", 1)[1] for n, s in zip(seq["names"], seq["streams"]) if s == "main"]
+    names = [marker_name(n) for n, s in zip(seq["names"], seq["streams"]) if s == "main"]
     count = collections.Counter(names)
     known = {c for comp in comps for c in comp["categories"]}
     for c in sorted({c for r in ranks for c in cat[r] if c not in known and not c.startswith("aux.")}):
@@ -158,6 +180,62 @@ def overhead(points):
     return "\n".join(lines) + "\n"
 
 
+def share(analysis_dir, clean_ms, target_layers=40, draft_layers=3, fields=None):
+    """Rows (one per rank) of the Petit MoE's share of the step; see the module docstring."""
+    summ = {int(r["rank"]): r for r in csv.DictReader(open(os.path.join(analysis_dir, "summary.csv")))}
+    rows = []
+    for rank in sorted(summ):
+        per = collections.defaultdict(float)
+        layers = {"target": set(), "draft": set()}
+        markers = {"target": 0, "draft": 0}
+        for r in csv.DictReader(open(os.path.join(analysis_dir, f"per_layer_r{rank}.csv"))):
+            layer = int(r["layer"])
+            kind = "draft" if layer >= DRAFT_LAYER_OFFSET else "target"
+            cat = r["category"][len("draft:"):] if kind == "draft" else r["category"]
+            if cat in PETIT_CATEGORIES:
+                per[kind] += float(r["median_ms"])
+                layers[kind].add(layer)
+                markers[kind] += 1
+        graph = float(summ[rank]["graph_ms"])
+        main_markers = int(summ[rank].get("main_markers") or 0)
+        delta = (graph - clean_ms) / main_markers if main_markers else None
+        row = dict(fields or {})
+        row.update(rank=rank, role=summ[rank]["role"], n=int(summ[rank]["n"]), graph_ms=graph, clean_ms=clean_ms,
+                   target_layers=target_layers, draft_layers=draft_layers,
+                   instrumented_target_layers=len(layers["target"]), instrumented_draft_layers=len(layers["draft"]))
+        proj = proj_corr = 0.0
+        for kind, total in (("target", target_layers), ("draft", draft_layers)):
+            k = len(layers[kind])
+            if not k or not total:
+                row[f"{kind}_petit_ms_per_layer"] = None
+                continue
+            per_layer = per[kind] / k
+            row[f"{kind}_petit_ms_per_layer"] = per_layer
+            proj += per_layer * total
+            if delta is not None:
+                proj_corr += (per[kind] - markers[kind] * delta) / k * total
+        row["petit_ms_per_step"] = proj
+        row["petit_share_of_clean"] = proj / clean_ms
+        row["petit_share_of_graph"] = proj / graph
+        row["petit_ms_per_step_corr"] = proj_corr if delta is not None else None
+        row["petit_share_corr"] = proj_corr / clean_ms if delta is not None else None
+        rows.append(row)
+    return rows
+
+
+def append_csv(path, rows):
+    new = not os.path.exists(path) or os.path.getsize(path) == 0
+    cols = list(rows[0])
+    if not new:
+        with open(path, newline="") as fh:
+            cols = next(csv.reader(fh))
+    with open(path, "a", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, extrasaction="raise")
+        if new:
+            w.writeheader()
+        w.writerows(rows)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -171,12 +249,26 @@ def main(argv=None):
     d.add_argument("a"); d.add_argument("b"); d.add_argument("--labels", default="A,B")
     o = sub.add_parser("overhead")
     o.add_argument("--point", action="append", required=True)
+    s = sub.add_parser("share")
+    s.add_argument("analysis_dir")
+    s.add_argument("--clean-ms", type=float, required=True, help="uninstrumented decode step ms of the same point")
+    s.add_argument("--target-layers", type=int, default=40, help="target MoE layers per step (DeepSeek V4.1 Flash: 40)")
+    s.add_argument("--draft-layers", type=int, default=3, help="draft MoE layers per step (DSpark stages: 3)")
+    s.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
+    s.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
     a = ap.parse_args(argv)
     if a.cmd == "table":
         res = table(a.analysis_dir, a.dump_dir, a.label, a.clean_ms, a.components)
         if a.json:
             json.dump(res, open(a.json, "w"), indent=1)
         sys.stdout.write(table_markdown(res))
+    elif a.cmd == "share":
+        rows = share(a.analysis_dir, a.clean_ms, a.target_layers, a.draft_layers,
+                     dict(f.split("=", 1) for f in a.field))
+        if a.append_csv:
+            append_csv(a.append_csv, rows)
+        json.dump(rows, sys.stdout, indent=1)
+        sys.stdout.write("\n")
     elif a.cmd == "diff":
         la, lb = a.labels.split(",")
         sys.stdout.write(diff(json.load(open(a.a)), json.load(open(a.b)), la, lb))

@@ -59,8 +59,44 @@ def test_overhead_row() -> None:
         assert row == "| p B=1 | 5.00 | 4.00 | +25.0 | 4.000 | 4.600 | 0.600 | 100 |"
 
 
+def test_share_on_self_test_dumps() -> None:
+    """Petit share from the analyzer's synthetic dumps: 43 target layers and 1 draft stage instrumented."""
+    import analyze_step_timing as ast
+    with tempfile.TemporaryDirectory() as d:
+        dump, out = Path(d) / "dump", Path(d) / "analysis"
+        ast.synth(str(dump))
+        ast.analyze(str(dump), str(out), skip=20)
+        busy = ast.TRUTH
+        per_target = sum(busy[n][0] for n in ("moe.experts", "petit.s1", "petit.s2", "petit.comb", "petit.post"))
+        rows = sb.share(str(out), clean_ms=10.0, target_layers=43, draft_layers=3, fields={"batch_size": "4"})
+        r = [x for x in rows if x["rank"] == 2][0]
+        assert r["batch_size"] == "4" and r["role"] == "busy"
+        assert (r["instrumented_target_layers"], r["instrumented_draft_layers"]) == (43, 1)
+        assert abs(r["target_petit_ms_per_layer"] - per_target) < 0.03 * per_target
+        assert abs(r["draft_petit_ms_per_layer"] - 0.5 * per_target) < 0.03 * per_target
+        want = 43 * per_target + 3 * 0.5 * per_target
+        assert abs(r["petit_ms_per_step"] - want) < 0.03 * want
+        assert abs(r["petit_share_of_clean"] - want / 10.0) < 0.03 * want / 10.0
+        # corr subtracts (graph - clean) / main markers per Petit segment (5 per instrumented layer)
+        delta = (r["graph_ms"] - 10.0) / int(next(x for x in __import__("csv").DictReader(open(out / "summary.csv"))
+                                                if x["rank"] == "2")["main_markers"])
+        assert abs(r["petit_ms_per_step_corr"] - (r["petit_ms_per_step"] - 5 * delta * (43 + 3))) < 1e-6
+        csv_path = Path(d) / "rows.csv"
+        sb.append_csv(str(csv_path), rows)
+        sb.append_csv(str(csv_path), rows)
+        assert len(csv_path.read_text().splitlines()) == 1 + 2 * len(rows)
+
+
+def test_draft_markers_counted_apart() -> None:
+    assert sb.marker_name("0:moe.experts") == "moe.experts"
+    assert sb.marker_name("1000:moe.experts") == "draft:moe.experts"
+    assert sb.marker_name("-1:draft.end") == "draft.end"
+
+
 if __name__ == "__main__":
     test_table_correction_and_diff()
     test_without_clean_step_there_is_no_correction()
     test_overhead_row()
+    test_share_on_self_test_dumps()
+    test_draft_markers_counted_apart()
     print("ok")

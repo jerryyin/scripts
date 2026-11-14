@@ -1,5 +1,5 @@
 {
- "_doc": "Requested components of a DeepSeek V4.1 decode step, as sums of analyze_step_timing.py categories. 'markers' are the start-marker names (from instrumentation.diff) inside the component, used for the per-marker overhead correction. Categories not listed here are reported as 'other: <category>'; 'aux' categories run overlapped on the aux stream and are shown but not summed.",
+ "_doc": "Requested components of a DeepSeek V4.1 decode step, as sums of analyze_step_timing.py categories. 'markers' are the start-marker names (from instrumentation.diff) inside the component, used for the per-marker overhead correction. Categories not listed here are reported as 'other: <category>'; 'aux' categories run overlapped on the aux stream and are shown but not summed. Draft-model (DSpark) segments are categories 'draft:<category>' and markers 'draft:<marker>' (layer id >= 1000 in the dump); the Petit MoE of a layer is the components 'MoE prep' + 'Petit Stage1/Stage2/Combine/post' (moe.experts .. petit.post, the whole kernel_moe_apply call), see step_breakdown.py share.",
  "components": [
   {"name": "embed/prep (+graph.pre)", "categories": ["embed+prep", "graph.pre(before model.begin)"], "markers": ["model.begin"]},
   {"name": "Engram", "categories": ["engram"], "markers": ["engram"]},
@@ -22,7 +22,13 @@
   {"name": "add/post-comm (TP4 all-reduce)", "categories": ["ffn.add+post_comm(allreduce)"], "markers": ["moe.join"]},
   {"name": "layer tail (ffn.end->next layer)", "categories": ["layer_tail"], "markers": ["ffn.end"]},
   {"name": "final norm", "categories": ["final_norm"], "markers": ["final"]},
-  {"name": "lm_head+sampling+outputs", "categories": ["lm_head+sampling+outputs"], "markers": ["model.end"]}
+  {"name": "lm_head+sampling+outputs", "categories": ["lm_head+sampling+outputs"], "markers": ["model.end"]},
+  {"name": "DSpark draft: embed/prep (draft.begin->first stage)", "categories": ["draft.embed+prep"], "markers": ["draft.begin"]},
+  {"name": "DSpark draft: Petit MoE (moe.experts..petit.post of the instrumented stages)", "categories": ["draft:moe.prep(quant/non-petit experts)", "draft:petit.stage1(dispatch_wait+gate_up)", "draft:petit.stage2(down)", "draft:petit.combine", "draft:moe.shared_join_wait"], "markers": ["draft:moe.experts", "draft:petit.s1", "draft:petit.s2", "draft:petit.comb", "draft:petit.post"]},
+  {"name": "DSpark draft: MoE router/top-k", "categories": ["draft:moe.router_gate_topk"], "markers": ["draft:moe.router"]},
+  {"name": "DSpark draft: shared expert (serial on main stream)", "categories": ["draft:other:shared.b"], "markers": ["draft:shared.b"]},
+  {"name": "DSpark draft: layer tail (ffn.end->next marker; holds the uninstrumented stages)", "categories": ["draft:layer_tail"], "markers": ["draft:ffn.end"]},
+  {"name": "DSpark draft: tail (final norm, head, greedy block sampling, outputs)", "categories": ["draft.tail(norm+head+sampling+outputs)"], "markers": ["draft.end"]}
  ],
  "aux": ["aux.attn.compressor+indexer", "aux.shared_expert"]
 }

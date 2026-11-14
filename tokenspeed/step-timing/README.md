@@ -8,17 +8,17 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `0dd8d477` (DeepSeek V4.1 model and MoE files, forward step, new `runtime/utils/step_timing.py`) |
+| `instrumentation.diff` | The patch, against TokenSpeed `e8fd096ed80112d6108725bad1fbdc3accb0a559` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the earlier version against `0dd8d477` is this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
-| `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), and the instrumentation overhead per point (`overhead`); tests in `test_step_breakdown.py` |
+| `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), and the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, rows for `numerics/range_compare.py`); tests in `test_step_breakdown.py` |
 
 Make the patched copy in a clone (never a worktree or an edit of the checkout you serve from;
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 0dd8d477
+git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach e8fd096ed80112d6108725bad1fbdc3accb0a559
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
@@ -59,17 +59,57 @@ INSTR=$INSTR STRIDE=40 ./timed.sh "$OUT/step-timing" -- \
   --token-corpus-metadata "$BANK/input.json" --execute
 ```
 
-Under that harness only the `python/` part of the patch is imported from the clone (its job sets
-`PYTHONPATH` to `$INSTR/python`), so the Gluon Petit `mega_moe.py` markers in
-`tokenspeed-kernel/` are timed only on the `manage_server.py` route. Then:
+The harness's job sets the engine's `PYTHONPATH` itself (`tiered_benchmark.py`, `source_pythonpath`):
+from amd-tracking `a7c0557` on it is `$INSTR/python:$INSTR/tokenspeed-kernel/python`, so the Gluon
+Petit `mega_moe.py` stage markers in `tokenspeed-kernel/` are timed there too (before that commit only
+`$INSTR/python` was on the path and the kernel package came from the editable install, so only the
+python-level markers fired). `tokenspeed-kernel/python` holds no build products at e8fd096e; it imports
+from a clone. `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
+the harness only the `TS_STEP_TIMING_*` variables pass through (the engine inherits the environment).
+
+Markers (main stream unless noted), each at the same logical boundary as in the 0dd8d477 version:
+`model.begin` (before the encoder), `engram` / `layer` (per decoder layer, before Engram / mHC
+pre-attention), `attn` (attention call), `attn.fork`, `attn.kvidx.b` .. `attn.kvidx.e` (compressor /
+KV write / indexer branch, aux stream when overlapped), `attn.q` (q projection after the branch),
+`attn.core` (sparse-MLA kernel), `attn.wo` (output projection), `hc_ffn` (mHC pre-FFN), `ffn`
+(`_forward_ffn`), `moe.router` (gate + top-k), `moe.experts` (the routed-expert call: for Gluon
+Petit the whole `kernel_moe_apply`: activation MXFP4 quantize, route copies, then `petit.s1`
+(stage 1: dispatch wait + gate/up), `petit.s2` (down), `petit.comb` (combine), `petit.post` (return)),
+`shared.b` .. `shared.e` (shared expert; on the main stream under Petit, which runs it serially after
+the routed call), `moe.join`, `ffn.end`, `final` (final norm), `model.end` (head, sampling, outputs,
+and with DSpark the draft round inside the same graph). New at e8fd096e: the replay is timed when a
+drafter replays the decode graph (DSpark), and the DSpark draft model marks `draft.begin` /
+`draft.end` around its block forward with its stages recorded as layer id + 1000
+(`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as `draft:<category>`. The Petit MoE of
+one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
+shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
+
+`STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
+0..39, none dense or hash-routed) and 3 DSpark stages (ids 0..2), so `STRIDE=40` times target layer 0
+and draft stage 0 (2 of 43 MoE layers; about 44 markers per step: 20 per target layer, up to 19 per draft stage, 5 step-level), `STRIDE=20` times 2 + 1,
+`STRIDE=1` all 43. `share` projects the instrumented layers' Petit time to 40 + 3 layers. Then:
 
 ```bash
 python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown"
 python3 step_breakdown.py table "$OUT/breakdown" "$OUT/step-timing" --label "EP4 B=1" --clean-ms 15.55 --json ep4.json
 ```
 
-To port the patch to a newer TokenSpeed, apply it in a clone at that commit, fix the rejected
-hunks, then regenerate it with `git -C "$INSTR" add -N python/tokenspeed/runtime/utils/step_timing.py`
+Per retained-KV stage (one batch x repetition), `--stage-json` restricts the analysis to the stage's
+decode window, and `share` appends the Petit share rows; `range_compare.py summarize` gives the share's
+median and range over repetitions:
+
+```bash
+python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown/$STAGE" --skip 2 \
+    --stage-json "$ATTEMPT/stages/$STAGE/stage.json"
+python3 step_breakdown.py share "$OUT/breakdown/$STAGE" --clean-ms "$CLEAN_GPU_MS" --target-layers 40 \
+    --draft-layers 3 --field batch_size=128 --field repetition=0 --append-csv "$OUT/petit-share.csv"
+python3 ../../numerics/range_compare.py summarize "$OUT/petit-share.csv" --where role=busy \
+    --key batch_size --metric petit_share_of_clean --metric petit_share_corr
+```
+
+To port the patch to a newer TokenSpeed, apply it in a clone at that commit (`git apply --reject`),
+fix the rejected hunks so each marker sits at the same boundary, `python3 -m py_compile` every
+patched file, then regenerate it with `git -C "$INSTR" add -N python/tokenspeed/runtime/utils/step_timing.py`
 and `git -C "$INSTR" diff > instrumentation.diff`.
 
 Check first that timing events survive graph capture on your stack (`profiling/graph_event_smoke.py`),
