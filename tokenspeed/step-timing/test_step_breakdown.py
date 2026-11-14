@@ -165,3 +165,24 @@ def test_share_marker_us() -> None:
         assert abs(r["petit_ms_per_step_marker"] - (r["petit_ms_per_step"] - 5 * 0.005 * (43 + 3))) < 1e-6
         assert abs(r["petit_share_marker"] - r["petit_ms_per_step_marker"] / 10.0) < 1e-12
         assert "marker_us" not in sb.share(str(out), clean_ms=10.0, target_layers=43, draft_layers=3)[0]
+
+
+def test_project_marker_closure() -> None:
+    # 4 timed layers of 1.0 ms each, 10 markers each at 5 us; untimed layers 0.95 ms (= 1.0 - 10 x 5 us)
+    # and 3 step-level markers: the marker-free projection must close on the clean step exactly
+    us, timed_ms, m = 5.0, 1.0, 10
+    clean = 40 * (timed_ms - m * us / 1000)
+    graph = clean + (4 * m + 3) * us / 1000
+    t = {"stride": 10, "clean_ms": clean, "role": {"0": "busy"}, "graph": {"0": graph}, "main_markers_per_step": 4 * m + 3,
+         "comp": {"attn: sparse-MLA core": {"vals": {"0": 4 * timed_ms}, "markers": 4 * m},
+                  "layer tail (ffn.end->next layer)": {"vals": {"0": graph - 4 * timed_ms}, "markers": 3}}}
+    plain = sb.project(t, 40, 3)
+    rows = sb.project(t, 40, 3, marker_us=us)
+    assert [r["projected_ms"] for r in rows] == [r["projected_ms"] for r in plain]
+    assert "markers" not in plain[0] and all(set(r) == set(rows[0]) for r in rows)
+    rem = rows[-1]
+    assert abs(rem["overshoot_ms"] - (40 * timed_ms - graph)) < 1e-9
+    assert abs(rem["overshoot_marker_vs_clean_ms"]) < 1e-9
+    assert abs(rem["closing_marker_us_clean"] - us) < 1e-9 and abs(rem["closing_marker_us_graph"] - us) < 1e-9
+    g = {r["group"]: r for r in sb.project_groups(rows)}
+    assert g["attention"]["markers"] == 40 and abs(g["attention"]["projected_ms_marker"] - clean) < 1e-9
