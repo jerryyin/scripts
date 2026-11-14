@@ -17,9 +17,9 @@ goes back to waiting (or exits, with --once). It signals no process of another t
 --reclaim-after is given.
 
 A local serve holds the claimed GPUs' free memory from the claim until the queue is empty
-(gpu-hold.py). While one of our processes starts on the GPUs, the holder frees the memory and keeps
-the GPUs lightly busy until that process is ready, so no other launcher takes them between jobs or
-during a server's load. Jobs get the holder's process group in GPU_ADMISSION_OWN_PGIDS (admission
+(gpu-hold.py). While one of our processes starts on the GPUs, the holder gives it the memory but
+keeps each GPU's free memory capped until that process is ready, so no other launcher takes them
+between jobs or during a server's load. Jobs get the holder's process group in GPU_ADMISSION_OWN_PGIDS (admission
 checks count it as ours), a file to create once their server is ready in GPU_QUEUE_READY, and the
 holder's state (hold, busy, yielded) in the file named by GPU_QUEUE_HOLD_STATE.
 

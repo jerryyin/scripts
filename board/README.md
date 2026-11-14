@@ -39,8 +39,8 @@ board/
   oldest first, each starting the moment the previous one exits, including jobs queued while
   earlier ones run; it releases when the queue is empty. A local serve holds the claimed
   GPUs' free memory from the claim until the queue is empty; while one of our processes starts on
-  them it frees the memory and keeps the GPUs lightly busy until that process signals it is ready
-  (`GPU_QUEUE_READY`), so another tenant cannot take them between jobs or during a server's load.
+  them it gives that process the memory but keeps each GPU's free memory capped until it signals it
+  is ready (`GPU_QUEUE_READY`), so another tenant cannot take them between jobs or during a load.
   `--reclaim-after SECONDS` (host serve with `--container` only, and only where every GPU process
   is yours): when a pending job has waited that long, `serve` stops every `/dev/kfd` holder on the
   host outside `--container` (SIGTERM, SIGKILL after `--reclaim-grace`, through `sudo -n` unless

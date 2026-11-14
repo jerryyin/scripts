@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Memory holder of a local `gpu-queue serve`: holds the claimed GPUs' free memory, and while one of
-our processes starts on them, frees it and keeps the GPUs lightly busy until that process is ready.
+our processes starts on them, gives it that memory but keeps free memory capped until it is ready.
 
 States, written to --state: `hold` (children hold the free memory), `busy` (an own process has the
 GPUs open; children keep each GPU's free memory at most BUSY_FREE_CAP, giving the rest to our
-process as it allocates, and run a small kernel loop), `yielded` (the own process is ready; no
-children). Busy ends when --ready exists, when our processes' GPU memory is over half of
+process as it allocates), `yielded` (the own process is ready; no children). Busy ends when --ready exists, when our processes' GPU memory is over half of
 the GPUs' and unchanged for READY_STABLE_SECONDS, or after BUSY_LIMIT_SECONDS. When no own process
 has the GPUs open, the holder holds again and removes --ready."""
 from __future__ import annotations
@@ -106,7 +105,7 @@ def busy_hold(free: int, held: int, cap: int) -> int:
 
 def hold_one(headroom: int) -> None:
     """Allocate the visible GPU's free memory but `headroom` and keep topping it up; on SIGUSR1 hold
-    only what keeps free memory at most BUSY_FREE_CAP, and run a small kernel loop."""
+    only what keeps free memory at most BUSY_FREE_CAP."""
     import torch
 
     busy = []
@@ -121,8 +120,6 @@ def hold_one(headroom: int) -> None:
                 break
             free -= CHUNK
         time.sleep(0.2)
-    # Back-to-back small kernels: the GPU reads as active while using a few compute units.
-    a = torch.randn(256, 256, device='cuda:0')
     while True:
         free, _ = torch.cuda.mem_get_info(0)
         target = busy_hold(free, len(blocks) * CHUNK, BUSY_FREE_CAP)
@@ -135,9 +132,7 @@ def hold_one(headroom: int) -> None:
                     blocks.append(torch.empty(CHUNK, dtype=torch.uint8, device='cuda:0'))
                 except torch.OutOfMemoryError:
                     break
-        for _ in range(20):
-            a = torch.tanh(a @ a)
-        torch.cuda.synchronize()
+        time.sleep(0.05)
 
 
 class Holder:
