@@ -180,7 +180,7 @@ def overhead(points):
     return "\n".join(lines) + "\n"
 
 
-def share(analysis_dir, clean_ms, target_layers=40, draft_layers=3, fields=None):
+def share(analysis_dir, clean_ms, target_layers=40, draft_layers=3, fields=None, marker_us=None):
     """Rows (one per rank) of the Petit MoE's share of the step; see the module docstring."""
     summ = {int(r["rank"]): r for r in csv.DictReader(open(os.path.join(analysis_dir, "summary.csv")))}
     rows = []
@@ -219,8 +219,91 @@ def share(analysis_dir, clean_ms, target_layers=40, draft_layers=3, fields=None)
         row["petit_share_of_graph"] = proj / graph
         row["petit_ms_per_step_corr"] = proj_corr if delta is not None else None
         row["petit_share_corr"] = proj_corr / clean_ms if delta is not None else None
+        if marker_us is not None:
+            # a fixed per-marker cost (e.g. profiling/graph_event_smoke.py per_event_node_overhead_us) removed
+            # from each Petit marker of the instrumented layers before projecting
+            proj_m = 0.0
+            for kind, total in (("target", target_layers), ("draft", draft_layers)):
+                k = len(layers[kind])
+                if k and total:
+                    proj_m += (per[kind] - markers[kind] * marker_us / 1000.0) / k * total
+            row["marker_us"] = marker_us
+            row["petit_ms_per_step_marker"] = proj_m
+            row["petit_share_marker"] = proj_m / clean_ms
         rows.append(row)
     return rows
+
+
+STEP_LEVEL = ("embed/prep", "final norm", "lm_head", "DSpark draft: embed/prep", "DSpark draft: tail")
+UNTIMED_TAILS = ("layer tail", "DSpark draft: layer tail")
+
+
+def project_group(name):
+    """Coarse group of a table component (attention, router, petit, shared, norms, head, draft, other)."""
+    if name.startswith("DSpark draft") or name.startswith("other: draft:"):
+        return "draft"
+    for key, group in (("norm", "norms"), ("attn", "attention"), ("Petit", "petit"), ("MoE prep", "petit"),
+                       ("router", "router"), ("shared", "shared_expert"), ("lm_head", "head"), ("embed", "embed")):
+        if key in name:
+            return group
+    return "other"
+
+
+def project(t, target_layers=40, draft_layers=3, fields=None):
+    """Rows (rank x component) of a whole decode step from one `table` result (its --json): each per-layer
+    component of the instrumented target layers x target_layers / timed target layers, each per-stage
+    draft component x draft_layers / timed draft stages, step-level ones x 1. The layer tails of timed
+    layers hold the untimed layers, so they are left out and `remainder` = graph span - sum of projected
+    components (the true per-layer tails, the draft stages' own tails and the projection error). Overlapped
+    aux-stream draft categories (`other: draft:aux.*`) are left out like the target's aux rows."""
+    stride = int(t["stride"])
+    timed = {"target": -(-target_layers // stride), "draft": -(-draft_layers // stride)}
+    rows = []
+    for rank, graph in sorted(t["graph"].items(), key=lambda kv: int(kv[0])):
+        total = 0.0
+        for name, c in t["comp"].items():
+            if any(name.startswith(x) for x in UNTIMED_TAILS) or ":aux." in name:
+                continue  # untimed layers' tails; overlapped aux-stream draft parts (not on the step's path)
+            raw = c["vals"].get(rank)
+            if raw is None:
+                continue
+            if any(name.startswith(x) for x in STEP_LEVEL):
+                factor = 1.0
+            elif name.startswith("DSpark draft") or name.startswith("other: draft:"):
+                factor = draft_layers / timed["draft"]
+            else:
+                factor = target_layers / timed["target"]
+            row = dict(fields or {})
+            row.update(rank=int(rank), role=t["role"][rank], component=name, group=project_group(name), raw_ms=raw,
+                       factor=factor, projected_ms=raw * factor, share_of_graph=raw * factor / graph,
+                       share_of_clean=raw * factor / t["clean_ms"] if t.get("clean_ms") else None)
+            rows.append(row)
+            total += raw * factor
+        row = dict(fields or {})
+        row.update(rank=int(rank), role=t["role"][rank], component="remainder (graph - projected)", group="remainder",
+                   raw_ms=None, factor=None, projected_ms=graph - total, share_of_graph=(graph - total) / graph,
+                   share_of_clean=(graph - total) / t["clean_ms"] if t.get("clean_ms") else None)
+        rows.append(row)
+    return rows
+
+
+def project_groups(rows):
+    """project() rows summed per (rank, group): one row per group with the summed projected_ms and shares."""
+    out = {}
+    for r in rows:
+        key = (r["rank"], r["group"])
+        if key not in out:
+            o = {k: v for k, v in r.items() if k not in ("component", "raw_ms", "factor")}
+            o.update(components=0, projected_ms=0.0, share_of_graph=0.0,
+                     share_of_clean=0.0 if r["share_of_clean"] is not None else None)
+            out[key] = o
+        o = out[key]
+        o["components"] += 1
+        o["projected_ms"] += r["projected_ms"]
+        o["share_of_graph"] += r["share_of_graph"]
+        if o["share_of_clean"] is not None:
+            o["share_of_clean"] += r["share_of_clean"]
+    return list(out.values())
 
 
 def append_csv(path, rows):
@@ -256,6 +339,15 @@ def main(argv=None):
     s.add_argument("--draft-layers", type=int, default=3, help="draft MoE layers per step (DSpark stages: 3)")
     s.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
     s.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
+    s.add_argument("--marker-us", type=float, help="also give the share with this fixed cost per Petit marker removed "
+                   "(columns petit_ms_per_step_marker, petit_share_marker)")
+    pj = sub.add_parser("project", help="whole-step component rows projected from a `table --json` result")
+    pj.add_argument("table_json")
+    pj.add_argument("--target-layers", type=int, default=40)
+    pj.add_argument("--draft-layers", type=int, default=3)
+    pj.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
+    pj.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
+    pj.add_argument("--groups", action="store_true", help="one row per (rank, group), summed over its components")
     a = ap.parse_args(argv)
     if a.cmd == "table":
         res = table(a.analysis_dir, a.dump_dir, a.label, a.clean_ms, a.components)
@@ -264,7 +356,16 @@ def main(argv=None):
         sys.stdout.write(table_markdown(res))
     elif a.cmd == "share":
         rows = share(a.analysis_dir, a.clean_ms, a.target_layers, a.draft_layers,
-                     dict(f.split("=", 1) for f in a.field))
+                     dict(f.split("=", 1) for f in a.field), a.marker_us)
+        if a.append_csv:
+            append_csv(a.append_csv, rows)
+        json.dump(rows, sys.stdout, indent=1)
+        sys.stdout.write("\n")
+    elif a.cmd == "project":
+        rows = project(json.load(open(a.table_json)), a.target_layers, a.draft_layers,
+                       dict(f.split("=", 1) for f in a.field))
+        if a.groups:
+            rows = project_groups(rows)
         if a.append_csv:
             append_csv(a.append_csv, rows)
         json.dump(rows, sys.stdout, indent=1)

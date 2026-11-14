@@ -100,3 +100,68 @@ if __name__ == "__main__":
     test_share_on_self_test_dumps()
     test_draft_markers_counted_apart()
     print("ok")
+
+
+def test_stage_window_selected_forwards() -> None:
+    import analyze_step_timing as ast
+    with tempfile.TemporaryDirectory() as d:
+        attempt = Path(d) / "attempt-001"
+        stage = attempt / "stages" / "c0-l50000-b32"
+        stage.mkdir(parents=True)
+        st = {"started_unix": 100.0, "prefill_request_seconds": 10.0, "finished_unix": 200.0,
+              "selected_decode_indices_by_rank": {"0": [5, 6, 7], "1": [8, 9, 10], "2": []}}
+        (stage / "stage.json").write_text(json.dumps(st))
+        for rank, base in ((0, 120.0), (1, 120.5)):
+            (attempt / f"forwards-rank{rank}.jsonl").write_text(
+                "".join(json.dumps({"index": i, "wall_unix": base + (i % 5)}) + "\n" for i in range(12)))
+        assert ast.stage_window(str(stage / "stage.json")) == (110.0, 200.0)
+        lo, hi = ast.stage_window(str(stage / "stage.json"), selected=True)
+        # rank 0: 5..7 -> walls 120..122; rank 1: 8..10 -> 123.5, 124.5, 120.5 (wall order need not follow
+        # index; first/last are the selected first and last forwards); period = max over ranks
+        assert lo == 120.0 and abs(hi - (122.0 + 1.0)) < 1e-9, (lo, hi)
+
+
+def test_project_whole_step() -> None:
+    t = {"stride": 10, "clean_ms": 10.0, "role": {"0": "busy"}, "graph": {"0": 11.0},
+         "comp": {"embed/prep (+graph.pre)": {"vals": {"0": 0.1}},
+                  "attn: sparse-MLA core": {"vals": {"0": 0.4}},
+                  "Petit Stage1 (dispatch wait + gate/up)": {"vals": {"0": 0.2}},
+                  "layer tail (ffn.end->next layer)": {"vals": {"0": 9.0}},
+                  "DSpark draft: Petit MoE (moe.experts..petit.post of the instrumented stages)": {"vals": {"0": 0.1}},
+                  "DSpark draft: layer tail (ffn.end->next marker; holds the uninstrumented stages)": {"vals": {"0": 0.5}},
+                  "lm_head+sampling+outputs": {"vals": {"0": 0.3}}}}
+    rows = {r["component"]: r for r in sb.project(t, 40, 3, {"batch_size": "4"})}
+    assert rows["attn: sparse-MLA core"]["projected_ms"] == 4.0 and rows["attn: sparse-MLA core"]["group"] == "attention"
+    assert rows["Petit Stage1 (dispatch wait + gate/up)"]["projected_ms"] == 2.0
+    assert abs(rows["DSpark draft: Petit MoE (moe.experts..petit.post of the instrumented stages)"]["projected_ms"] - 0.3) < 1e-12
+    assert rows["embed/prep (+graph.pre)"]["projected_ms"] == 0.1 and rows["lm_head+sampling+outputs"]["factor"] == 1.0
+    assert "layer tail (ffn.end->next layer)" not in rows
+    assert sb.project_group("norms/mHC pre-attn") == "norms" and sb.project_group("MoE router/top-k") == "router"
+    assert abs(rows["remainder (graph - projected)"]["projected_ms"] - (11.0 - 0.1 - 4.0 - 2.0 - 0.3 - 0.3)) < 1e-9
+    assert rows["remainder (graph - projected)"]["batch_size"] == "4"
+
+
+def test_project_groups_sum() -> None:
+    t = {"stride": 40, "clean_ms": 10.0, "role": {"0": "busy"}, "graph": {"0": 10.0},
+         "comp": {"attn: sparse-MLA core": {"vals": {"0": 0.1}}, "attn: qkv_a projection": {"vals": {"0": 0.05}},
+                  "Petit Combine": {"vals": {"0": 0.02}},
+                  "other: draft:aux.shared_expert": {"vals": {"0": 0.5}}}}
+    g = {r["group"]: r for r in sb.project_groups(sb.project(t, 40, 3))}
+    assert abs(g["attention"]["projected_ms"] - 6.0) < 1e-9 and g["attention"]["components"] == 2
+    assert abs(g["petit"]["projected_ms"] - 0.8) < 1e-9
+    assert abs(g["remainder"]["projected_ms"] - 3.2) < 1e-9
+    assert abs(sum(r["share_of_graph"] for r in g.values()) - 1.0) < 1e-9
+
+
+def test_share_marker_us() -> None:
+    import analyze_step_timing as ast
+    with tempfile.TemporaryDirectory() as d:
+        dump, out = Path(d) / "dump", Path(d) / "analysis"
+        ast.synth(str(dump))
+        ast.analyze(str(dump), str(out), skip=20)
+        r = [x for x in sb.share(str(out), clean_ms=10.0, target_layers=43, draft_layers=3, marker_us=5.0)
+             if x["rank"] == 2][0]
+        # 5 Petit markers per instrumented layer, 5 us each, projected to 43 + 3 layers
+        assert abs(r["petit_ms_per_step_marker"] - (r["petit_ms_per_step"] - 5 * 0.005 * (43 + 3))) < 1e-6
+        assert abs(r["petit_share_marker"] - r["petit_ms_per_step_marker"] / 10.0) < 1e-12
+        assert "marker_us" not in sb.share(str(out), clean_ms=10.0, target_layers=43, draft_layers=3)[0]

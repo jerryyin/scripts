@@ -110,10 +110,41 @@ def load(dirpath):
     return ranks
 
 
-def stage_window(path):
-    """Decode window (epoch s) of one retained-KV stage: after its prefill request, to its finish."""
+def stage_window(path, selected=False):
+    """Decode window (epoch s) of one retained-KV stage: after its prefill request, to its finish.
+
+    selected=True narrows it to the harness's selected decode forwards (the steps its
+    decode_gpu_mean_ms is taken over): from the earliest first to the latest last selected forward's
+    wall_unix over ranks (stage.json selected_decode_indices_by_rank; forwards-rank<r>.jsonl in the
+    attempt directory two levels above stages/<label>/), plus one mean step period at the end because
+    a step's timing record is harvested after its submit. Without this the window also holds the
+    stage's tail, where the last requests finish at a smaller batch and can outnumber the full-batch
+    steps (their median then is a different point)."""
     st = json.load(open(path))
-    return st["started_unix"] + st["prefill_request_seconds"], st["finished_unix"]
+    lo, hi = st["started_unix"] + st["prefill_request_seconds"], st["finished_unix"]
+    if not selected:
+        return lo, hi
+    attempt = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path))))
+    firsts, lasts, periods = [], [], []
+    for rank, idx in (st.get("selected_decode_indices_by_rank") or {}).items():
+        if not idx:
+            continue
+        want, walls = {min(idx), max(idx)}, {}
+        with open(os.path.join(attempt, f"forwards-rank{rank}.jsonl")) as fh:
+            for line in fh:
+                o = json.loads(line)
+                if o.get("index") in want:
+                    walls[o["index"]] = o["wall_unix"]
+                    if len(walls) == len(want):
+                        break
+        if len(walls) != len(want):
+            raise SystemExit(f"{path}: selected forwards {sorted(want)} of rank {rank} not in forwards-rank{rank}.jsonl")
+        firsts.append(walls[min(idx)]); lasts.append(walls[max(idx)])
+        if len(idx) > 1:
+            periods.append((walls[max(idx)] - walls[min(idx)]) / (max(idx) - min(idx)))
+    if not firsts:
+        raise SystemExit(f"{path}: no selected decode forwards (selected_decode_indices_by_rank)")
+    return max(lo, min(firsts)), min(hi, max(lasts) + (max(periods) if periods else 0.0))
 
 
 def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=None, wall_to=None, busy_ranks=None):
@@ -324,12 +355,15 @@ if __name__ == "__main__":
     ap.add_argument("--busy-ranks", help="comma list overriding the busy/idle role (e.g. from server-log placement)")
     ap.add_argument("--stage-json", help="amd-tracking retained-KV stage.json: keep records in its decode window "
                     "(started_unix + prefill_request_seconds .. finished_unix); overrides --wall-from/--wall-to")
+    ap.add_argument("--stage-selected", action="store_true",
+                    help="with --stage-json: keep only the harness's selected decode forwards (the steps of its "
+                    "decode_gpu_mean_ms), not the whole request window with the stage's smaller-batch tail")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         sys.exit(self_test(a.out))
     if a.stage_json:
-        a.wall_from, a.wall_to = stage_window(a.stage_json)
+        a.wall_from, a.wall_to = stage_window(a.stage_json, a.stage_selected)
     analyze(a.dir, a.out, a.skip, a.bs, a.layers, a.wall_from, a.wall_to,
             None if a.busy_ranks is None else {int(x) for x in a.busy_ranks.split(',') if x})
     print(open(os.path.join(a.out, "report.md")).read())

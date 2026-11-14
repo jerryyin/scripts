@@ -10,9 +10,9 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | --- | --- |
 | `instrumentation.diff` | The patch, against TokenSpeed `e8fd096ed80112d6108725bad1fbdc3accb0a559` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the earlier version against `0dd8d477` is this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
-| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--self-test` runs without a GPU |
+| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
-| `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), and the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, rows for `numerics/range_compare.py`); tests in `test_step_breakdown.py` |
+| `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
 
 Make the patched copy in a clone (never a worktree or an edit of the checkout you serve from;
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
@@ -96,16 +96,37 @@ python3 step_breakdown.py table "$OUT/breakdown" "$OUT/step-timing" --label "EP4
 
 Per retained-KV stage (one batch x repetition), `--stage-json` restricts the analysis to the stage's
 decode window, and `share` appends the Petit share rows; `range_compare.py summarize` gives the share's
-median and range over repetitions:
+median and range over repetitions. Add `--stage-selected`: without it the window is the stage's whole
+request window (end of its prefill request to its finish), which also holds the stage's tail, where
+the last requests finish at a smaller batch; at global batch 32 those 1-request steps outnumbered the
+full-batch ones on one rank and the medians described another point. `--stage-selected` keeps the
+harness's selected decode forwards only (stage.json `selected_decode_indices_by_rank`, their
+`wall_unix` in the attempt's `forwards-rank<r>.jsonl`, plus one step period), the same steps the
+harness's `decode_gpu_mean_ms` is taken over:
 
 ```bash
 python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown/$STAGE" --skip 2 \
-    --stage-json "$ATTEMPT/stages/$STAGE/stage.json"
+    --stage-json "$ATTEMPT/stages/$STAGE/stage.json" --stage-selected
+python3 step_breakdown.py table "$OUT/breakdown/$STAGE" "$OUT/step-timing" --label "$STAGE" \
+    --clean-ms "$CLEAN_GPU_MS" --json "$OUT/breakdown/$STAGE/table.json" > "$OUT/breakdown/$STAGE/table.md"
 python3 step_breakdown.py share "$OUT/breakdown/$STAGE" --clean-ms "$CLEAN_GPU_MS" --target-layers 40 \
-    --draft-layers 3 --field batch_size=128 --field repetition=0 --append-csv "$OUT/petit-share.csv"
+    --draft-layers 3 --marker-us "$EVENT_NODE_US" --field batch_size=128 --field repetition=0 \
+    --append-csv "$OUT/petit-share.csv"
+python3 step_breakdown.py project "$OUT/breakdown/$STAGE/table.json" --groups --target-layers 40 \
+    --draft-layers 3 --field batch_size=128 --append-csv "$OUT/step-groups.csv"
 python3 ../../numerics/range_compare.py summarize "$OUT/petit-share.csv" --where role=busy \
-    --key batch_size --metric petit_share_of_clean --metric petit_share_corr
+    --key batch_size --metric petit_share_of_clean --metric petit_share_corr --metric petit_share_marker
 ```
+
+Share readings (all divide by the clean step `--clean-ms`): `petit_share_of_clean` projects the
+timed layers' Petit time as measured; `petit_share_corr` first removes the analyzer's per-marker
+overhead estimate, (instrumented graph - clean) / main-stream markers; `petit_share_marker`
+(`--marker-us US`) removes a fixed US per Petit marker instead, e.g. `profiling/graph_event_smoke.py`'s
+`per_event_node_overhead_us`. `project` multiplies each timed-layer component by 40 / timed layers,
+each draft-stage component by 3 / timed stages and step-level ones by 1, leaves out the timed layers'
+`layer tail` (it holds the untimed layers) and overlapped aux-stream draft rows, and reports
+`remainder` = instrumented graph span - sum of projected components. A negative `remainder` means the
+timed layers, as instrumented, are slower than the average layer, so projected shares lean high.
 
 To port the patch to a newer TokenSpeed, apply it in a clone at that commit (`git apply --reject`),
 fix the rejected hunks so each marker sits at the same boundary, `python3 -m py_compile` every
