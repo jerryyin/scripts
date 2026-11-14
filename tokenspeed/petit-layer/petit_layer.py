@@ -40,17 +40,64 @@ TEST_REL = "tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distribut
 # (tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py:251,
 # enforced at :375 "invalid MegaMoE token capacity" and :420 "invalid MegaMoE token count").
 PETIT_MAX_TOKENS_PER_RANK = 1024
-DSPARK_TOKENS_PER_REQUEST = 6  # one target token + 5 DSpark draft tokens per decode step
+DSPARK_TOKENS_PER_REQUEST = 6  # target MoE: one target token + 5 DSpark draft tokens verified per step
+# Draft MoE: one DSpark block forward per decode step over dspark_block_size = 5 rows per request
+# (runtime/execution/drafter/deepseek_v41_dspark.py:_draft_decode_rows, input_num_tokens =
+# num_decodes * block_size); it runs only for decode requests, so it never sees prefill tokens.
+DSPARK_DRAFT_TOKENS_PER_REQUEST = 5
 DP = 4
 GLOBAL_BATCHES = (4, 8, 16, 32, 64, 128)  # requests in flight over DP4 -> 1..32 per rank
 PREFILL_CHUNKS = (256, 512, 1024)
 PROFILES = ("dsv41_flash", "dsv41_flash_dspark")
 
 
-def default_tokens() -> list[int]:
-    """1, decode tokens per rank for global batches 4..128 under DP4 with 5 drafts, prefill chunks."""
+def default_tokens(profile: str = "dsv41_flash") -> list[int]:
+    """Tokens per GPU serving gives the profile's MoE: 1, decode per-rank batches 1..32 (global 4..128
+    under DP4; decode graphs pad every rank to the same batch) times 6 verify rows (target) or 5 draft
+    rows (dsv41_flash_dspark), and for the target the prefill chunks."""
+    if profile == "dsv41_flash_dspark":
+        return sorted({1, *(DSPARK_DRAFT_TOKENS_PER_REQUEST * (b // DP) for b in GLOBAL_BATCHES)})
     decode = [DSPARK_TOKENS_PER_REQUEST * (b // DP) for b in GLOBAL_BATCHES]
     return sorted({1, *decode, *PREFILL_CHUNKS})
+
+
+ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "repetition",
+              "max_over_ranks_median_ms", "max_over_ranks_min_ms", "max_over_ranks_max_ms",
+              "per_rank_median_ms", "pass", "iters", "tokenspeed_commit", "test_sha256", "source")
+
+
+def record_rows(record: dict, source: str = "") -> list[dict]:
+    """One row per profile x routing x mode x tokens x repetition of an output JSON (any version),
+    for numerics/range_compare.py (summarize --key profile,mode,tokens_per_gpu --metric
+    max_over_ranks_median_ms gives median/min/max over repetitions)."""
+    args = record["args"]
+    rows = []
+    for r in record["results"]:
+        for mode, t in r["timing_ms"].items():
+            for k, rep in enumerate(t["per_repetition"]):
+                rows.append({
+                    "profile": record["profile"]["name"], "routing": args.get("routing", "test"),
+                    "seed": args.get("seed", 0), "mode": mode, "tokens_per_gpu": r["tokens_per_gpu"],
+                    "active_ranks": r.get("active_ranks", record.get("world_size")), "repetition": k,
+                    "max_over_ranks_median_ms": rep["max_over_ranks_median_ms"],
+                    "max_over_ranks_min_ms": rep["max_over_ranks_min_ms"],
+                    "max_over_ranks_max_ms": rep["max_over_ranks_max_ms"],
+                    "per_rank_median_ms": " ".join(f"{v:.6f}" for v in rep["per_rank_median_ms"]),
+                    "pass": r["pass"], "iters": args.get("iters"),
+                    "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
+                    "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source})
+    return rows
+
+
+def write_rows_csv(out: str, inputs: list[str]) -> int:
+    import csv
+    rows = [row for path in inputs for row in record_rows(json.loads(Path(path).read_text()), path)]
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=ROW_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    return len(rows)
 
 
 def check_tokens(tokens: list[int]) -> list[int]:
@@ -68,8 +115,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--ts-src", default=os.environ.get("TS_SRC"), help="TokenSpeed checkout (default $TS_SRC)")
     ap.add_argument("--profile", choices=PROFILES, default="dsv41_flash",
                     help="test profile: dsv41_flash (384 experts top-6) or dsv41_flash_dspark (DSpark draft MoE, 128 top-3)")
-    ap.add_argument("--tokens", default=",".join(map(str, default_tokens())),
-                    help="tokens per GPU, comma list (default: %(default)s)")
+    ap.add_argument("--tokens", default=None,
+                    help="tokens per GPU, comma list (default: the profile's serving counts, default_tokens(): "
+                         f"dsv41_flash {','.join(map(str, default_tokens()))}; dsv41_flash_dspark "
+                         f"{','.join(map(str, default_tokens('dsv41_flash_dspark')))})")
+    ap.add_argument("--active-ranks", type=int, default=None,
+                    help="ranks 0..N-1 get the tokens, the others 0 (an idle DP rank's eager IDLE forward "
+                         "enters Petit with 0 tokens, e.g. a 1024-token prefill chunk on one rank: "
+                         "--active-ranks 1); default: all ranks")
     ap.add_argument("--warmup", type=int, default=10, help="untimed calls per mode and token count")
     ap.add_argument("--iters", type=int, default=50, help="timed calls per repetition")
     ap.add_argument("--reps", type=int, default=3, help="timed repetitions (>= 3)")
@@ -86,8 +139,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--reps must be >= 3")
     if a.iters < 1 or a.warmup < 1:
         ap.error("--iters and --warmup must be >= 1 (warmup excludes the JIT-compiling first call)")
+    if a.active_ranks is not None and a.active_ranks < 1:
+        ap.error("--active-ranks must be >= 1")
     try:
-        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens))
+        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens or ",".join(map(str, default_tokens(a.profile)))))
     except ValueError as error:
         ap.error(str(error))
     return a
@@ -159,6 +214,11 @@ def summary_table(record: dict) -> str:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "--rows":  # petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]
+        if len(argv) < 3:
+            raise SystemExit("usage: petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]")
+        print(f"[petit_layer] wrote {write_rows_csv(argv[1], argv[2:])} rows to {argv[1]}")
+        return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:
             record = json.loads(Path(path).read_text())
@@ -206,8 +266,10 @@ def main(argv=None) -> int:
                 "reference_pass": msg is None, "reference_error": msg,
                 "finite": bool(torch.isfinite(actual).all())}
 
-    for count in a.tokens:
-        counts = [count] * ws
+    active = ws if a.active_ranks is None else min(a.active_ranks, ws)
+    for tokens in a.tokens:
+        counts = [tokens if r < active else 0 for r in range(ws)]
+        count = counts[rank]
         x = torch.empty((count, profile.hidden), device=device, dtype=torch.bfloat16)
         ids, weights = mod._routing(count, rank, profile, ws, device)
         refresh, run = mod._closures(x, ids, weights, profile, rank, ws, device, count, counts, plan, layer)
@@ -269,7 +331,8 @@ def main(argv=None) -> int:
         ok = all(s["reference_pass"] and s["graph_equals_eager"] and s["finite"]
                  for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]])
         results.append({
-            "tokens_per_gpu": count, "num_tokens_global": sum(counts), "pass": ok,
+            "tokens_per_gpu": tokens, "active_ranks": active, "counts": counts,
+            "num_tokens_global": sum(counts), "pass": ok,
             "max_abs_err": max(s["max_abs_err"] for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]]),
             "max_rel_err": max(s["max_rel_err"] for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]]),
             "graph_equals_eager": all(s["graph_equals_eager"] for v in verdicts
@@ -282,7 +345,7 @@ def main(argv=None) -> int:
         })
         if rank == 0:
             t = {m: round(timing[m]["max_over_ranks_ms"]["median"], 4) for m in timing}
-            print(f"[petit_layer] {a.profile} tokens/gpu={count} pass={ok} max_abs={results[-1]['max_abs_err']:.3g} "
+            print(f"[petit_layer] {a.profile} tokens/gpu={tokens} active_ranks={active} pass={ok} max_abs={results[-1]['max_abs_err']:.3g} "
                   f"graph==eager={results[-1]['graph_equals_eager']} first_call_compiled={first['compiled']} "
                   f"max-over-ranks median ms={t}", flush=True)
         del graph, captured

@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token list, Petit's 1024-token limit, test-source extraction |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize` |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -32,16 +32,31 @@ rank to each destination rank, expert load), the tool and TokenSpeed revisions, 
 the profile geometry and plan, and the GPUs (`HIP_VISIBLE_DEVICES`, amd-smi indices) with their
 processes before and after.
 
-Default tokens per GPU: 1; the decode tokens per rank of DSpark serving (1 + 5 drafts = 6 per
-request) for a global batch of 4 to 128 under DP4, i.e. 1 to 32 requests per rank: 6, 12, 24, 48,
-96, 192; and prefill chunks 256, 512, 1024. Petit holds at most 1024 tokens per rank
+Default tokens per GPU (`default_tokens(profile)`, the counts serving gives each MoE at TokenSpeed
+e8fd096e): decode graphs pad every DP rank to the same per-rank batch b (the capture size at or above
+the largest rank's batch; an idle rank replays the graph with dummy rows), so each rank enters Petit
+with the same count. `dsv41_flash` (the target's 40 MoE layers): 1; 6 b for b = 1..32 (one target
+token + 5 DSpark drafts verified per request): 6, 12, 24, 48, 96, 192; prefill chunks 256, 512,
+1024. `dsv41_flash_dspark` (the 3 DSpark draft stages, one block forward per decode step over 5
+rows per request; it never runs on prefill tokens): 1; 5 b: 5, 10, 20, 40, 80, 160.
+`--active-ranks N` gives the tokens to ranks 0..N-1 and 0 to the others: an idle DP rank's eager
+IDLE forward enters Petit with 0 tokens (e.g. a 1024-token prefill chunk on one rank while three
+idle: `--tokens 1024 --active-ranks 1`). Petit holds at most 1024 tokens per rank
 (`MegaMoeConfig.max_tokens_per_rank`, `tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py`);
 larger counts are rejected.
+
+`--rows ROWS.csv OUT.json [OUT.json ...]` writes one CSV row per profile x routing x mode x tokens x
+repetition (the repetition's max-over-ranks median, min and max over its calls, per-rank medians),
+from output JSONs of any version, so `numerics/range_compare.py summarize` gives the median and range
+over repetitions; `--summary` prints a markdown table of one JSON.
 
 ```bash
 # on 4 idle gfx950 GPUs (for example as a board/gpu-queue job), TokenSpeed importable by python3
 python3 -m torch.distributed.run --standalone --nproc-per-node=4 petit_layer.py --ts-src "$TS_SRC" \
     --profile dsv41_flash --mode both --reps 3 --warmup 10 --iters 50 --routing test --seed 0 \
     --out petit-layer-dsv41_flash.json
+python3 petit_layer.py --rows petit-rows.csv petit-layer-dsv41_flash.json petit-layer-dsv41_flash_dspark.json
+python3 ../../numerics/range_compare.py summarize petit-rows.csv --key profile,mode,tokens_per_gpu \
+    --metric max_over_ranks_median_ms
 TS_SRC=<checkout> python3 -m pytest test_petit_layer.py -q    # no GPU required
 ```
