@@ -130,9 +130,9 @@ timed layers, as instrumented, are slower than the average layer, so projected s
 `project --marker-us US` adds `projected_ms_marker` (each component net of US per marker before
 projecting) and, on the `remainder` row, the projection's closure: `overshoot_ms` (sum - graph),
 `overshoot_marker_vs_clean_ms` (marker-free sum - clean step) and the per-marker cost that would close
-it (`closing_marker_us_clean`, `closing_marker_us_graph`). In the campaign's EP4-Petit 50k run the
-closing cost had medians of 5.0-6.4 us per marker (range 4.7-7.0) at every batch, near the smoke's 4.84 us: the overshoot is
-mostly marker cost multiplied by the projection, and `petit_share_marker` is the closest reading.
+it (`closing_marker_us_clean`, `closing_marker_us_graph`). When that closing cost is near the
+per-node cost `profiling/graph_event_smoke.py` measures, the overshoot is marker cost multiplied by
+the projection, and `petit_share_marker` is the closest reading.
 
 To port the patch to a newer TokenSpeed, apply it in a clone at that commit (`git apply --reject`),
 fix the rejected hunks so each marker sits at the same boundary, `python3 -m py_compile` every
@@ -140,5 +140,5 @@ patched file, then regenerate it with `git -C "$INSTR" add -N python/tokenspeed/
 and `git -C "$INSTR" diff > instrumentation.diff`.
 
 Check first that timing events survive graph capture on your stack (`profiling/graph_event_smoke.py`),
-then measure with as few timed layers as possible (`STRIDE`): in the campaign, timing every layer
-added 30-50 % to the step and timing one layer in 40 added 1-11 %.
+then measure with as few timed layers as possible (`STRIDE`): every timed layer adds its markers'
+cost to the step, so compare the instrumented step with the clean one (`overhead`) before using it.

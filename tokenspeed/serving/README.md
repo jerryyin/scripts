@@ -1,18 +1,13 @@
 # tokenspeed/serving/ — measuring a running TokenSpeed server
 
 Tools that drive a `ts serve` server over HTTP and read its log (`ts_control::batch_log` lines).
-They were built and validated in the triton-investigations campaign
-`investigations/tokenspeed-dsv41-ep4-decode/` (DeepSeek V4.1 Flash, MI350X, TokenSpeed `0dd8d477`);
-its `REPORT.md` and evidence show every number they produced and how.
 Server flags, server start/stop, fixed-batch decode, serving load, prefill and the real-token prompt
 bank are owned by [lightseekorg/amd-tracking](https://github.com/lightseekorg/amd-tracking): the
 recipes in `apps/inference_engine_benchmark/recipes/`, `skills/inference_engine/benchmark/scripts/manage_server.py`,
 `apps/inference_engine_benchmark/scripts/run_nightly_tiered.py` (retained-KV harness),
 `skills/inference_engine/benchmark/scripts/run_evalscope_matrix.py` (with `--output-tokens 1
 --prefill-summary` for prefill) and `skills/inference_engine/retained-kv/scripts/prepare_token_corpus.py`
-(`--format git-docs` builds the natural-prose text from a Git tree's documentation). The campaign's
-former copies here (`dsv41_args.sh`, `dsv41_serve.sh`, `decode/`, `prefill/`) were removed; they
-remain at toolkit commit `bf876107ffd6ac5b25085c6d7b26af1929ce5715`.
+(`--format git-docs` builds the natural-prose text from a Git tree's documentation).
 
 | Path | Measures |
 | --- | --- |
@@ -28,7 +23,7 @@ Tests (CPU, synthetic logs from `log_fixtures.py`): `test_batch_log.py`, `test_e
 `correctness/test_correctness.py`.
 
 Requirements: the model directory in `MODEL` (or `--tokenizer`), a client Python with `aiohttp`,
-`numpy` and `transformers` (the campaign used an EvalScope virtual environment), for
+`numpy` and `transformers` (an EvalScope virtual environment has them), for
 `sustained/` the `evalscope` executable in `EVALSCOPE`, and a checkout of
 [lightseekorg/amd-tracking](https://github.com/lightseekorg/amd-tracking) in `AT`: servers are
 started, guarded and stopped with its `manage_server.py`, which waits for the GPU set to be idle.
