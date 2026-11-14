@@ -40,7 +40,9 @@ several configurations and the question is which is faster.
   `overlap`. `LABEL=a.csv+b.csv` (or `--pool` for one table) pools several rows of a key; otherwise a table with
   two rows for one key is refused. `--alias`, `--where`,
   `--key-divide` and `--scale` align tables whose keys differ (for example per-rank batch and
-  per-GPU throughput across rank counts). Tests: `test_range_compare.py`.
+  per-GPU throughput across rank counts). `--metric` repeats: one table per metric in the given
+  order, each under a `### <metric>` heading (`--format json`: one object keyed by metric name);
+  a single `--metric` prints the bare table (JSON: the row list). Tests: `test_range_compare.py`.
 
   ```bash
   python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \

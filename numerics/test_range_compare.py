@@ -131,6 +131,51 @@ def test_where_is_one_filter_with_clear_errors() -> None:
             raise AssertionError(argv)
 
 
+# Fixture and outputs for --metric: PINNED_* were produced by range_compare.py at toolkit commit
+# 381de41a29794b22e1fa3e5c22f77a4084eaf7a7 (compare took one --metric then) on these two tables.
+METRIC_A = "B,v_median,v_min,v_max,w_median,w_min,w_max\n1,10,9,11,3,2,4\n2,20,19,21,6,5,7\n"
+METRIC_B = "B,v_median,v_min,v_max,w\n1,5,4,6,3\n2,30,25,35,4\n"
+PINNED_SINGLE_MD = '| B | A med [min,max] | B med [min,max] | A/B |\n|---|---|---|---|\n| 1 | 10.0 [9.0,11.0] | 5.0 [4.0,6.0] | 2.00 [1.50,2.75] higher |\n| 2 | 20.0 [19.0,21.0] | 30.0 [25.0,35.0] | 0.67 [0.54,0.84] lower |\n'
+PINNED_SINGLE_JSON = '[\n {\n  "key": [\n   1\n  ],\n  "values": {\n   "A": [\n    10.0,\n    9.0,\n    11.0\n   ],\n   "B": [\n    5.0,\n    4.0,\n    6.0\n   ]\n  },\n  "ratios": {\n   "A/B": {\n    "ratio": 2.0,\n    "lo": 1.5,\n    "hi": 2.75,\n    "verdict": "higher"\n   }\n  }\n },\n {\n  "key": [\n   2\n  ],\n  "values": {\n   "A": [\n    20.0,\n    19.0,\n    21.0\n   ],\n   "B": [\n    30.0,\n    25.0,\n    35.0\n   ]\n  },\n  "ratios": {\n   "A/B": {\n    "ratio": 0.6666666666666666,\n    "lo": 0.5428571428571428,\n    "hi": 0.84,\n    "verdict": "lower"\n   }\n  }\n }\n]\n'
+
+
+def run_compare(*metrics: str, fmt: str = "md", bounds: bool = True) -> str:
+    a, b = write("a.csv", METRIC_A), write("b.csv", METRIC_B)
+    argv = ["compare", "--key", "B", "--table", f"A={a}", "--table", f"B={b}", "--ratio", "A/B", "--format", fmt]
+    for m in metrics:
+        argv += ["--metric", m]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc.main(argv + (["--bounds"] if bounds else []))
+    return buf.getvalue()
+
+
+def test_single_metric_is_byte_identical_to_381de41() -> None:
+    assert run_compare("v") == PINNED_SINGLE_MD
+    assert run_compare("v", fmt="json", bounds=False) == PINNED_SINGLE_JSON
+
+
+def test_repeated_metric_prints_every_table_in_order() -> None:
+    out = run_compare("w", "v")
+    w_table = ("| B | A med [min,max] | B med [min,max] | A/B |\n|---|---|---|---|\n"
+               "| 1 | 3.0 [2.0,4.0] | 3.0 | 1.00 [0.67,1.33] overlap |\n"
+               "| 2 | 6.0 [5.0,7.0] | 4.0 | 1.50 [1.25,1.75] higher |\n")
+    assert out == "### w\n\n" + w_table + "\n### v\n\n" + PINNED_SINGLE_MD
+    data = json.loads(run_compare("w", "v", fmt="json", bounds=False))
+    assert list(data) == ["w", "v"]
+    assert data["v"] == json.loads(PINNED_SINGLE_JSON)
+    assert [r["ratios"]["A/B"]["verdict"] for r in data["w"]] == ["overlap", "higher"]
+
+
+def test_repeated_metric_is_refused_twice() -> None:
+    try:
+        run_compare("v", "v")
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a metric given twice must be refused")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

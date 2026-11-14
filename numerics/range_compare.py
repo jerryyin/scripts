@@ -8,7 +8,10 @@ list under --rows-field):
              <metric>_median/_min/_max/_n per group
   compare    join labelled summary tables on --key; for each --ratio A/B print the ratio of
              medians, its conservative bounds [A_min/B_max, A_max/B_min] and a verdict:
-             'higher' or 'lower' only when the [min,max] ranges are disjoint, else 'overlap'
+             'higher' or 'lower' only when the [min,max] ranges are disjoint, else 'overlap'.
+             --metric repeats: one table per metric in the given order, each under a
+             "### <metric>" heading (JSON: an object keyed by metric); a single --metric prints
+             the bare table (JSON: the row list)
 
 A metric without _median/_min/_max columns is read as a single value (min = median = max).
 Metric names may be dotted paths into nested JSON objects (summary.Req Throughput (req/s)).
@@ -246,6 +249,31 @@ def write_rows(rows: list[dict], fmt: str, out) -> None:
     w.writerows(rows)
 
 
+def write_compare(results: dict[str, tuple[list[str], list[dict]]], key: list[str], ratios: list[str], fmt: str,
+                  digits: int, ratio_digits: int, bounds: bool, out) -> None:
+    """Write compare_tables results per metric ({metric: (labels, rows)}, in order).
+
+    One metric: the bare table (Markdown) or row list (JSON). Several: in Markdown one table per
+    metric under a "### <metric>" heading, in JSON one object keyed by metric name."""
+    def rows_json(rows: list[dict]) -> list[dict]:
+        return [{**r, "key": list(r["key"])} for r in rows]
+
+    if fmt == "json":
+        if len(results) == 1:
+            (_, rows), = results.values()
+            json.dump(rows_json(rows), out, indent=1)
+        else:
+            json.dump({m: rows_json(rows) for m, (_, rows) in results.items()}, out, indent=1)
+        out.write("\n")
+        return
+    if len(results) == 1:
+        (labels, rows), = results.values()
+        out.write(markdown(rows, key, labels, ratios, digits, ratio_digits, bounds))
+        return
+    out.write("\n".join(f"### {m}\n\n" + markdown(rows, key, labels, ratios, digits, ratio_digits, bounds)
+                         for m, (labels, rows) in results.items()))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -260,7 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("compare")
     c.add_argument("--table", action="append", required=True, help="LABEL=PATH")
     c.add_argument("--key", required=True)
-    c.add_argument("--metric", required=True)
+    c.add_argument("--metric", action="append", required=True,
+                   help="metric to compare (repeatable: one table per metric, in the given order)")
     c.add_argument("--ratio", action="append", default=[], help="A/B, labels of --table")
     c.add_argument("--scale", action="append", default=[], help="LABEL=FACTOR applied to that table's values")
     c.add_argument("--rows-field")
@@ -283,29 +312,31 @@ def main(argv: list[str] | None = None) -> int:
         rows = [r for p in a.inputs for r in read_rows(p, a.rows_field) if keep(r, where)]
         write_rows(summarize(rows, key, a.metric), a.format, sys.stdout)
         return 0
+    dup = sorted({m for m in a.metric if a.metric.count(m) > 1})
+    if dup:
+        ap.error(f"--metric {dup[0]!r} given more than once")
     aliases = dict(x.split("=", 1) for x in a.alias)
-    try:
-        tables = dict(load_table(t, key, a.rows_field, a.metric, aliases, where, a.pool) for t in a.table)
-    except ValueError as exc:
-        ap.error(str(exc))
-    for spec in a.key_divide:
-        label, rest = spec.split("=", 1)
-        col, n = rest.split("/")
-        i = key.index(col)
-        tables[label] = {k[:i] + (k[i] / float(n) if k[i] / float(n) != int(k[i] / float(n)) else int(k[i] / float(n)),)
-                         + k[i + 1:]: v for k, v in tables[label].items()}
     ratios = [tuple(r.split("/", 1)) for r in a.ratio]
-    for a_, b_ in ratios:
-        if a_ not in tables or b_ not in tables:
-            ap.error(f"--ratio {a_}/{b_}: unknown label")
     scales = {k: float(v) for k, v in (x.split("=", 1) for x in a.scale)}
-    rows = compare_tables(tables, a.metric, ratios, scales)
-    if a.format == "json":
-        json.dump([{**r, "key": list(r["key"])} for r in rows], sys.stdout, indent=1)
-        sys.stdout.write("\n")
-    else:
-        sys.stdout.write(markdown(rows, key, list(tables), [f"{x}/{y}" for x, y in ratios],
-                                  a.digits, a.ratio_digits, a.bounds))
+    results: dict[str, tuple[list[str], list[dict]]] = {}
+    for metric in a.metric:
+        # Tables are loaded per metric: pooling ("+" or --pool) writes only that metric's columns.
+        try:
+            tables = dict(load_table(t, key, a.rows_field, metric, aliases, where, a.pool) for t in a.table)
+        except ValueError as exc:
+            ap.error(str(exc))
+        for spec in a.key_divide:
+            label, rest = spec.split("=", 1)
+            col, n = rest.split("/")
+            i = key.index(col)
+            tables[label] = {k[:i] + (k[i] / float(n) if k[i] / float(n) != int(k[i] / float(n)) else int(k[i] / float(n)),)
+                             + k[i + 1:]: v for k, v in tables[label].items()}
+        for a_, b_ in ratios:
+            if a_ not in tables or b_ not in tables:
+                ap.error(f"--ratio {a_}/{b_}: unknown label")
+        results[metric] = (list(tables), compare_tables(tables, metric, ratios, scales))
+    write_compare(results, key, [f"{x}/{y}" for x, y in ratios], a.format, a.digits, a.ratio_digits, a.bounds,
+                  sys.stdout)
     return 0
 
 
