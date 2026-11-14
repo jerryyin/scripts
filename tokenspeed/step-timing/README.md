@@ -127,6 +127,12 @@ each draft-stage component by 3 / timed stages and step-level ones by 1, leaves 
 `layer tail` (it holds the untimed layers) and overlapped aux-stream draft rows, and reports
 `remainder` = instrumented graph span - sum of projected components. A negative `remainder` means the
 timed layers, as instrumented, are slower than the average layer, so projected shares lean high.
+`project --marker-us US` adds `projected_ms_marker` (each component net of US per marker before
+projecting) and, on the `remainder` row, the projection's closure: `overshoot_ms` (sum - graph),
+`overshoot_marker_vs_clean_ms` (marker-free sum - clean step) and the per-marker cost that would close
+it (`closing_marker_us_clean`, `closing_marker_us_graph`). In the campaign's EP4-Petit 50k run the
+closing cost had medians of 5.0-6.4 us per marker (range 4.7-7.0) at every batch, near the smoke's 4.84 us: the overshoot is
+mostly marker cost multiplied by the projection, and `petit_share_marker` is the closest reading.
 
 To port the patch to a newer TokenSpeed, apply it in a clone at that commit (`git apply --reject`),
 fix the rejected hunks so each marker sits at the same boundary, `python3 -m py_compile` every

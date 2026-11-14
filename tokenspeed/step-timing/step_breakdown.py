@@ -249,18 +249,25 @@ def project_group(name):
     return "other"
 
 
-def project(t, target_layers=40, draft_layers=3, fields=None):
+def project(t, target_layers=40, draft_layers=3, fields=None, marker_us=None):
     """Rows (rank x component) of a whole decode step from one `table` result (its --json): each per-layer
     component of the instrumented target layers x target_layers / timed target layers, each per-stage
     draft component x draft_layers / timed draft stages, step-level ones x 1. The layer tails of timed
     layers hold the untimed layers, so they are left out and `remainder` = graph span - sum of projected
     components (the true per-layer tails, the draft stages' own tails and the projection error). Overlapped
-    aux-stream draft categories (`other: draft:aux.*`) are left out like the target's aux rows."""
+    aux-stream draft categories (`other: draft:aux.*`) are left out like the target's aux rows.
+
+    marker_us (e.g. profiling/graph_event_smoke.py per_event_node_overhead_us) adds, to every row,
+    projected_ms_marker = (raw - markers x marker_us) x factor, and on the remainder row the closure of
+    the projection: projected_sum_ms, graph_ms, clean_ms, overshoot_ms (sum - graph),
+    projected_sum_marker_ms, overshoot_marker_vs_clean_ms (marker-free sum - clean step) and the
+    per-marker cost that would close it, closing_marker_us_clean = (sum - clean) / sum(markers x factor)
+    and closing_marker_us_graph = (sum - graph) / (sum(markers x factor) - main markers per step)."""
     stride = int(t["stride"])
     timed = {"target": -(-target_layers // stride), "draft": -(-draft_layers // stride)}
     rows = []
     for rank, graph in sorted(t["graph"].items(), key=lambda kv: int(kv[0])):
-        total = 0.0
+        total = total_m = marked = 0.0
         for name, c in t["comp"].items():
             if any(name.startswith(x) for x in UNTIMED_TAILS) or ":aux." in name:
                 continue  # untimed layers' tails; overlapped aux-stream draft parts (not on the step's path)
@@ -277,12 +284,29 @@ def project(t, target_layers=40, draft_layers=3, fields=None):
             row.update(rank=int(rank), role=t["role"][rank], component=name, group=project_group(name), raw_ms=raw,
                        factor=factor, projected_ms=raw * factor, share_of_graph=raw * factor / graph,
                        share_of_clean=raw * factor / t["clean_ms"] if t.get("clean_ms") else None)
+            if marker_us is not None:
+                m = c.get("markers") or 0
+                row.update(markers=m, projected_ms_marker=(raw - m * marker_us / 1000.0) * factor)
+                total_m += row["projected_ms_marker"]
+                marked += m * factor
             rows.append(row)
             total += raw * factor
         row = dict(fields or {})
         row.update(rank=int(rank), role=t["role"][rank], component="remainder (graph - projected)", group="remainder",
                    raw_ms=None, factor=None, projected_ms=graph - total, share_of_graph=(graph - total) / graph,
                    share_of_clean=(graph - total) / t["clean_ms"] if t.get("clean_ms") else None)
+        if marker_us is not None:
+            clean, main = t.get("clean_ms"), t.get("main_markers_per_step")
+            row.update(markers=None, projected_ms_marker=None, marker_us=marker_us, projected_sum_ms=total,
+                       graph_ms=graph, clean_ms=clean, overshoot_ms=total - graph, projected_sum_marker_ms=total_m,
+                       overshoot_marker_vs_clean_ms=total_m - clean if clean else None,
+                       closing_marker_us_clean=(total - clean) / marked * 1000.0 if clean and marked else None,
+                       closing_marker_us_graph=(total - graph) / (marked - main) * 1000.0
+                       if main is not None and marked > main else None)
+            for r in rows:
+                if r["rank"] == int(rank) and "marker_us" not in r:
+                    r.update({k: None for k in row if k not in r})
+                    r["marker_us"] = marker_us
         rows.append(row)
     return rows
 
@@ -296,10 +320,15 @@ def project_groups(rows):
             o = {k: v for k, v in r.items() if k not in ("component", "raw_ms", "factor")}
             o.update(components=0, projected_ms=0.0, share_of_graph=0.0,
                      share_of_clean=0.0 if r["share_of_clean"] is not None else None)
+            if r.get("markers") is not None:
+                o.update(markers=0, projected_ms_marker=0.0)
             out[key] = o
         o = out[key]
         o["components"] += 1
         o["projected_ms"] += r["projected_ms"]
+        if r.get("markers") is not None:
+            o["markers"] += r["markers"]
+            o["projected_ms_marker"] += r["projected_ms_marker"]
         o["share_of_graph"] += r["share_of_graph"]
         if o["share_of_clean"] is not None:
             o["share_of_clean"] += r["share_of_clean"]
@@ -348,6 +377,9 @@ def main(argv=None):
     pj.add_argument("--field", action="append", default=[], help="NAME=VALUE column added to every row")
     pj.add_argument("--append-csv", help="append the rows to this CSV (header written when new)")
     pj.add_argument("--groups", action="store_true", help="one row per (rank, group), summed over its components")
+    pj.add_argument("--marker-us", type=float, help="also project each component net of this fixed cost per marker "
+                    "(projected_ms_marker) and give the projection's closure on the remainder row (overshoot_ms, "
+                    "overshoot_marker_vs_clean_ms, closing_marker_us_clean/_graph)")
     a = ap.parse_args(argv)
     if a.cmd == "table":
         res = table(a.analysis_dir, a.dump_dir, a.label, a.clean_ms, a.components)
@@ -363,7 +395,7 @@ def main(argv=None):
         sys.stdout.write("\n")
     elif a.cmd == "project":
         rows = project(json.load(open(a.table_json)), a.target_layers, a.draft_layers,
-                       dict(f.split("=", 1) for f in a.field))
+                       dict(f.split("=", 1) for f in a.field), a.marker_us)
         if a.groups:
             rows = project_groups(rows)
         if a.append_csv:
