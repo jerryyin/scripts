@@ -48,7 +48,7 @@ class StructureTests(unittest.TestCase):
         self.assertFalse((ROOT / 'unattended').exists())
         self.assertFalse((ROOT / 'bench').exists())
         self.assertTrue((ROOT / 'iree/thirdparty_bench').is_dir())
-        self.assertTrue((ROOT / 'triton/studies').is_dir())
+        self.assertFalse((ROOT / 'triton/studies').exists())  # study records live in triton-investigations
         for name in ('claude', 'cursor', 'unattended'):
             with self.subTest(agent=name):
                 self.assertTrue((ROOT / 'agent' / name).is_dir())
