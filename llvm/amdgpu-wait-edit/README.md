@@ -14,7 +14,8 @@ amdgpu-wait-edit/
 ├── make-null-drain.py           # same insertions, every added wait waits for NOTHING (control)
 ├── make-half-drain.py           # drain a SELECTED subset of sites: --sites LO:HI[,LO:HI]
 ├── make-class-drain.py          # + --wait-form all|none|only:CLASS|allbut:CLASS
-└── make-distance-drain.py       # + --wait-form dist:N   (va_vdst distance 0-15)
+├── make-distance-drain.py       # + --wait-form dist:N   (va_vdst distance 0-15)
+└── vadst_inflation.py           # how far each va_vdst(N) over-counts: VALU counted vs VGPR writers
 ```
 
 ## The chain, and why each step exists
@@ -126,3 +127,10 @@ python3 make-distance-drain.py     <control.s> <drained.s> <output.s> --sites 52
 Every script raises rather than writing out an object it cannot account for. A transform that
 silently produced a *slightly* different instruction stream would invalidate the comparison
 without telling you, so anything unexpected is a hard failure.
+
+## How far a `va_vdst` wait over-counts
+
+`python3 vadst_inflation.py FILE.s ...` lists every `s_wait_alu depctr_va_vdst(N)` with N > 0
+and, among the N VALU instructions before it, how many actually write a vector register; the
+difference is the wait's inflation (instructions it waits for that cannot be what the next
+instruction depends on). It runs a known-answer self-test first. Tests: `test_vadst_inflation.py`.

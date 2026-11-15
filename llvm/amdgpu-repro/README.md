@@ -13,6 +13,10 @@ Everything is overridable.
 amdgpu-repro/
 ├── README.md                     # this file
 ├── reproduce.sh                  # the driver: codegen | build | run | all
+├── capture/                      # record one real launch as the capture `run` replays
+│   ├── capture_kernargs.py       # argument table from the code object; one buffer per pointer
+│   ├── capture_kernargs_by_storage.py  # pointer arguments that are views into shared allocations
+│   └── test_capture_kernargs.py  # CPU tests
 └── driver/
     ├── replay.cpp                # loads a code object, replays recorded kernel args, hashes output
     ├── check-manifest-fixture.sh # proves replay's manifest validation actually refuses (no GPU)
@@ -58,7 +62,12 @@ it means `classify_diff` needs retuning for the instructions your flag touches.
 
 ## What you need for the device half
 
-`replay.cpp` **replays recorded kernel arguments; it does not synthesise them.** `run` needs
+`replay.cpp` **replays recorded kernel arguments; it does not synthesise them.** Record them at
+the real launch site with `capture/`: `capture_kernargs.py offsets --asm kernel.s` prints the
+argument table llc emitted (check its count first), and `Recorder(asm=..., outdir=...).record(args,
+grid, block, lds)` called with the launch's own argument tuple writes the capture directory;
+`capture_kernargs_by_storage.py` does the same when pointer arguments are windows into one
+allocation. `run` needs
 a capture directory containing a `manifest.txt` with a SHA-256 per buffer.
 
 Each module needs **its own** capture. Two modules can share a kernel name and an argument
