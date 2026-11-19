@@ -36,7 +36,7 @@ $priorClipboard=if($Clipboard){Get-Clipboard -Raw}else{$null}
 try {
     $env:HOME=$fixture; $env:USERPROFILE=$fixture; $env:LOCALAPPDATA=Join-Path $fixture 'AppData/Local'; $env:APPDATA=Join-Path $fixture 'AppData/Roaming'
     Invoke-RcSetup $rc @('apply', '--package', 'tmux', '--home', $fixture)
-    $configuration = 'source-file "' + $(if ($ConfigurationPath) { $ConfigurationPath } else { Join-Path $fixture '.psmux.conf' }).Replace('\','/') + '"' + [char]10 + 'set -g default-shell "' + $shell.Replace('\','/') + ' -NoProfile"' + [char]10
+    $configuration = 'source-file "' + $(if ($ConfigurationPath) { $ConfigurationPath } else { Join-Path $fixture '.psmux.conf' }).Replace('\','/') + '"' + [char]10 + 'set -g default-shell "' + $shell.Replace('\','/') + '"' + [char]10
     $configurationFile = Join-Path $fixture 'test.conf'
     Save-Text $configurationFile $configuration ''
     $command='"'+$exe+'" -L '+$socket+' -f "'+$configurationFile+'" new-session -s habits -c "'+$fixture+'" -- "'+$shell+'" -NoProfile -NoExit -EncodedCommand '+$encoded
@@ -59,10 +59,29 @@ try {
     Key 'j'; Assert ((Field 'pane_id') -eq $bottom) 'backtick j moves down'
     Key ([string][char]11); Assert ((Field 'pane_id') -eq $left) 'backtick Ctrl-k moves up'
     Key ([string][char]10); Assert ((Field 'pane_id') -eq $bottom) 'backtick Ctrl-j moves down'
-    $width=[int](Field 'pane_width'); Key 'L'; $actualWidth=[int](Field 'pane_width'); Assert ($actualWidth -gt $width) 'backtick Shift-L grows the pane'; Difference ($actualWidth -eq $width+5) ("five-column resize: before=$width after=$actualWidth")
-    Key 'H'; Assert ([int](Field 'pane_width') -eq $width) 'backtick Shift-H reverses resize'
-    $height=[int](Field 'pane_height'); Key 'K'; $actualHeight=[int](Field 'pane_height'); Assert ($actualHeight -gt $height) 'backtick Shift-K grows the pane'; Difference ($actualHeight -eq $height+5) ("five-row resize: before=$height after=$actualHeight")
-    Key 'J'; Assert ([int](Field 'pane_height') -eq $height) 'backtick Shift-J reverses resize'
+    Key 't'
+    $width=[int](Field 'pane_width'); $console.Key([char]'l',$false)
+    Assert (Until { [int](Field 'pane_width') -gt $width }) 'resize mode l grows the pane'
+    $actualWidth=[int](Field 'pane_width'); Difference ($actualWidth -eq $width+5) ("five-column resize: before=$width after=$actualWidth")
+    $console.Key([char]'h',$false); Assert (Until { [int](Field 'pane_width') -eq $width }) 'resize mode h reverses resize'
+    $height=[int](Field 'pane_height'); $console.Key([char]'k',$false)
+    Assert (Until { [int](Field 'pane_height') -gt $height }) 'resize mode k grows the bottom pane'
+    $actualHeight=[int](Field 'pane_height'); Difference ($actualHeight -eq $height+5) ("five-row resize: before=$height after=$actualHeight")
+    $console.Key([char]'j',$false); Assert (Until { [int](Field 'pane_height') -eq $height }) 'resize mode j reverses resize'
+    $console.Key([char]'q',$false)
+    $stack = Mux @('list-panes','-F','#{pane_id} #{pane_top} #{pane_height} #{pane_active}')
+    $leftWidth = [math]::Floor((([int](Field 'window_width')) - 1) / 2)
+    foreach ($mode in @('prefix','resize')) {
+        [void](Mux @('resize-pane','-R','7'))
+        Assert ([int](Field 'pane_width') -ne $leftWidth) 'columns start unequal'
+        if ($mode -eq 'resize') { Key 't'; $console.Key([char]'=', $false) } else { Key '=' }
+        Assert (Until { [int](Field 'pane_width') -eq $leftWidth }) "equal columns from $mode"
+        Assert ((Mux @('list-panes','-F','#{pane_id} #{pane_top} #{pane_height} #{pane_active}')) -eq $stack) 'equalizing preserves stacked panes and focus'
+        if ($mode -eq 'resize') {
+            Assert ((Field 'client_key_table') -eq 'resize') 'equalizing keeps resize mode active'
+            $console.Key([char]'q', $false)
+        }
+    }
     foreach($split in @('v','S','s','|','\','-','_','%','"')){
         Key 'c'; $window=Field 'window_index'
         Key $split
