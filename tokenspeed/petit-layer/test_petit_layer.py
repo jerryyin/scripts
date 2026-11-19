@@ -87,8 +87,9 @@ def test_summary_table() -> None:
         "per_rank": [{"first_call": {"compiled": True}}, {"first_call": {"compiled": False}}],
         "timing_ms": {"eager": _timing(0.25), "graph": _timing(0.125)}}]}
     table = petit_layer.summary_table(record).splitlines()
-    assert table[0].startswith("| tokens/GPU | pass |") and "graph per-rank medians" in table[0]
-    assert table[2] == ("| 6 | PASS | 0 | 0 | True | 1/2 | 0.2500 [0.2500, 0.2500] | 0.2500 / 0.2500 "
+    assert table[0].startswith("| tokens/GPU | candidate | launched | pass |") and "graph per-rank medians" in table[0]
+    # results without candidate/launched (Petit's own choice, older JSON) read as "petit" and ""
+    assert table[2] == ("| 6 | petit |  | PASS | 0 | 0 | True | 1/2 | 0.2500 [0.2500, 0.2500] | 0.2500 / 0.2500 "
                         "| 0.1250 [0.1250, 0.1250] | 0.1250 / 0.1250 |")
 
 
@@ -112,6 +113,7 @@ def test_rows_one_per_repetition_and_range_compare_reads_them(tmp_path) -> None:
     assert len(rows) == 6 and {r["mode"] for r in rows} == {"graph", "eager"}
     assert [r["repetition"] for r in rows if r["mode"] == "graph"] == ["0", "1", "2"]
     assert rows[0]["active_ranks"] == "4" and rows[0]["tokens_per_gpu"] == "6"
+    assert rows[0]["candidate"] == "petit" and rows[0]["launched"] == "" and rows[0]["layers"] == "1"
     summary = subprocess.run(
         [sys.executable, str(RANGE_COMPARE), "summarize", str(out), "--key", "profile,mode,tokens_per_gpu",
          "--metric", "max_over_ranks_median_ms", "--where", "mode=graph"],
@@ -121,3 +123,29 @@ def test_rows_one_per_repetition_and_range_compare_reads_them(tmp_path) -> None:
     assert row["max_over_ranks_median_ms_n"] == "3"
     assert float(row["max_over_ranks_median_ms_median"]) == 0.21
     assert (float(row["max_over_ranks_median_ms_min"]), float(row["max_over_ranks_median_ms_max"])) == (0.20, 0.22)
+
+
+def test_parse_candidates_layers_weights_and_skew() -> None:
+    base = ["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "256"]
+    a = petit_layer.parse_args(base)
+    assert a.candidates is None and a.layers == 1 and a.weights == "test" and a.skew == 0.5
+    f = petit_layer.parse_args(base + ["--candidates", "cta192/m32,cta56/m64w8", "--layers", "8",
+                                       "--weights", "random", "--routing", "skew", "--skew", "1.0"])
+    assert f.candidates == "cta192/m32,cta56/m64w8" and f.layers == 8 and f.routing == "skew"
+    for bad in (["--candidates", "cta57/m32"], ["--candidates", "cta56/m48"], ["--layers", "0"],
+                ["--weights", "dense"]):
+        with pytest.raises(SystemExit):
+            petit_layer.parse_args(base + bad)
+
+
+def test_candidate_names_and_expected_launch() -> None:
+    assert petit_layer.candidate_names(None, 384) is None
+    flash = petit_layer.candidate_names("all", 384)
+    assert len(flash) == 12 and flash[0] == "cta56/m32" and "cta192/m64w8" in flash
+    # with 128 experts cta192 is cta128 (kProducerBlocks = min(blocks, experts)), so 'all' drops it
+    dspark = petit_layer.candidate_names("all", 128)
+    assert len(dspark) == 9 and not any(n.startswith("cta192") for n in dspark)
+    with pytest.raises(ValueError, match="unknown candidates"):
+        petit_layer.candidate_names("cta192/m32", 128)
+    assert petit_layer.expected_launch("cta192/m64w4", 384) == (192, True, False)
+    assert petit_layer.expected_launch("cta192/m32", 128) == (128, False, False)

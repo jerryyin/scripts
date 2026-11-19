@@ -45,10 +45,36 @@ idle: `--tokens 1024 --active-ranks 1`). Petit holds at most 1024 tokens per ran
 (`MegaMoeConfig.max_tokens_per_rank`, `tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py`);
 larger counts are rejected.
 
+**Petit's launch choices.** Per call Petit picks a producer geometry (`cta56`, `cta64`, `cta128`,
+`cta192`: the dispatch's producer blocks, `_select_mega_moe_producer_geometry`) and a stage-1 tile
+(`m32`; `m64w4` and `m64w8`, the 64-row tile with 4 or 8 warps; thresholds `kM64MinTokens` and
+`kM64W8MinTokens`). Without `--candidates` the tool times Petit's own choice and records what it
+launched as (producer blocks, 64-row, 8-warp). `--candidates all` or a comma list such as
+`cta192/m32,cta192/m64w8` forces each candidate in turn by patching those two choices in this process
+only, asserts after every capture that the launch path received exactly the forced choice, runs the
+test's check for each, and interleaves the candidates within each timed repetition, so candidates are
+compared within one process (absolute times differ by up to a few percent between processes). With
+128 experts `cta192` equals `cta128` and `all` leaves it out. `--layers N` times N calls per graph
+replay on N layers, as a decode step replays consecutive layers (reported time = replay / N);
+`--weights random` gives those layers distinct random MXFP4 weights (the test's check still runs on the
+test's weights, and the timed inputs then have no reference). `--routing skew --skew S` draws expert i
+of a fixed permutation with weight (i+1)^-S, the same hot experts on every rank. A stage-1 tile sweep
+(Gluon Petit EP4 thresholds, triton-investigations
+`investigations/tokenspeed-dsv41-four-gpu-layouts/review-3317/`) uses:
+
+```bash
+torchrun --nnodes=1 --nproc-per-node=4 --master-addr=127.0.0.1 --master-port=29651 petit_layer.py \
+    --ts-src "$TS_SRC" --profile dsv41_flash --tokens 256,448,480,512 --candidates all \
+    --mode graph --layers 8 --weights random --routing uniform --reps 3 --warmup 5 --out sweep.json
+```
+
 `--rows ROWS.csv OUT.json [OUT.json ...]` writes one CSV row per profile x routing x mode x tokens x
-repetition (the repetition's max-over-ranks median, min and max over its calls, per-rank medians),
+candidate x repetition (the repetition's max-over-ranks median, min and max over its calls, per-rank medians),
 from output JSONs of any version, so `numerics/range_compare.py summarize` gives the median and range
-over repetitions; `--summary` prints a markdown table of one JSON.
+over repetitions (add `candidate` to `--key` for a candidate sweep, and `--where candidate=NAME` to
+pull one candidate's summary for `compare`); `--summary` prints a markdown table of one JSON.
+`torchrun --standalone` needs a resolvable hostname; in a container without one, pass
+`--master-addr=127.0.0.1` and a fixed `--master-port` instead.
 
 ```bash
 # on 4 idle gfx950 GPUs (for example as a board/gpu-queue job), TokenSpeed importable by python3

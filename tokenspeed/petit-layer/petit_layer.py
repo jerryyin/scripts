@@ -17,6 +17,16 @@ exactly. The timed inputs (--routing) are checked the same way. Then each mode i
 profiling/dist_timing.py: warmup, then --reps blocks of --iters calls, events around every call
 (graph replay in graph mode), a barrier before each block; per rank and max over ranks.
 
+--candidates forces Petit's launch choice instead of timing its own: each candidate is a producer
+geometry (cta56/64/128/192, the dispatch's producer blocks) and a stage-1 tile (m32; m64w4 and m64w8,
+the 64-row tile with 4 or 8 warps), set by patching petit_kernel._select_mega_moe_producer_geometry
+and MegaMoESolutionAdapter.Kernels in this process only. Every capture asserts that the launch path
+received exactly the forced choice; without --candidates the launch Petit chose is recorded. Each
+candidate passes the test's check before it is timed, and repetitions interleave the candidates.
+--layers N times N calls per graph replay on N layers (per-call time = replay / N), as a decode step
+replays consecutive layers; --weights random gives those layers distinct random MXFP4 weights (no
+reference then for the timed inputs; the test's check still runs on the test's weights).
+
 Pure logic (argument parsing, limits, result rows) runs without a GPU: test_petit_layer.py.
 """
 from __future__ import annotations
@@ -26,6 +36,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import random
 import sys
 import textwrap
 import time
@@ -40,7 +51,13 @@ TEST_REL = "tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distribut
 # (tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py:251,
 # enforced at :375 "invalid MegaMoE token capacity" and :420 "invalid MegaMoE token count").
 PETIT_MAX_TOKENS_PER_RANK = 1024
-ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "repetition",
+GEOMETRIES = ("cta56", "cta64", "cta128", "cta192")
+# Stage-1 tile -> the (m64, w8) arguments of MegaMoESolutionAdapter.Kernels.
+STAGE1_TILES = {"m32": (False, False), "m64w4": (True, False), "m64w8": (True, True)}
+PRODUCER_BLOCKS = {"cta56": 56, "cta64": 64, "cta128": 128, "cta192": 192}
+SKEW_PERMUTATION_SEED = 12345  # fixed: the same experts are popular on every rank
+ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "candidate", "launched",
+              "layers", "repetition",
               "max_over_ranks_median_ms", "max_over_ranks_min_ms", "max_over_ranks_max_ms",
               "per_rank_median_ms", "pass", "iters", "tokenspeed_commit", "test_sha256", "source")
 
@@ -57,7 +74,9 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                 rows.append({
                     "profile": record["profile"]["name"], "routing": args.get("routing", "test"),
                     "seed": args.get("seed", 0), "mode": mode, "tokens_per_gpu": r["tokens_per_gpu"],
-                    "active_ranks": r.get("active_ranks", record.get("world_size")), "repetition": k,
+                    "active_ranks": r.get("active_ranks", record.get("world_size")),
+                    "candidate": r.get("candidate", "petit"), "launched": r.get("launched", ""),
+                    "layers": args.get("layers", 1), "repetition": k,
                     "max_over_ranks_median_ms": rep["max_over_ranks_median_ms"],
                     "max_over_ranks_min_ms": rep["max_over_ranks_min_ms"],
                     "max_over_ranks_max_ms": rep["max_over_ranks_max_ms"],
@@ -89,6 +108,59 @@ def check_tokens(tokens: list[int]) -> list[int]:
     return tokens
 
 
+def candidate_names(text: str | None, experts: int) -> list[str] | None:
+    """--candidates: None (Petit's own choice), 'all', or a comma list of GEOMETRY/TILE names.
+
+    kProducerBlocks = min(producer blocks, experts), so with 128 or fewer experts cta192 is cta128
+    and is left out of 'all'.
+    """
+    if text is None:
+        return None
+    geometries = [g for g in GEOMETRIES if not (experts <= 128 and g == "cta192")]
+    valid = [f"{g}/{t}" for g in geometries for t in STAGE1_TILES]
+    if text == "all":
+        return valid
+    names = text.split(",")
+    unknown = [n for n in names if n not in valid]
+    if unknown:
+        raise ValueError(f"unknown candidates {unknown}; valid: {', '.join(valid)}")
+    return names
+
+
+def expected_launch(name: str, experts: int) -> tuple[int, bool, bool]:
+    geometry, tile = name.split("/")
+    return (min(PRODUCER_BLOCKS[geometry], experts), *STAGE1_TILES[tile])
+
+
+class Forcing:
+    """The forced candidate (None: Petit's own choice) and the (producer blocks, m64, w8) launched."""
+    candidate: str | None = None
+    launched: set = set()
+
+
+def install_forcing() -> None:
+    """Patch Petit's two per-call choices in this process; with Forcing.candidate None they pass through."""
+    from tokenspeed_kernel.thirdparty.gluon_petit import load_petit_kernel
+    petit = load_petit_kernel()
+    import lib.moe.rocm.mega_moe as mega_moe  # importable once load_petit_kernel() set up Petit's root
+
+    select, kernels = petit._select_mega_moe_producer_geometry, mega_moe.MegaMoESolutionAdapter.Kernels
+
+    def forced_select(num_experts, activation_function, num_tokens):
+        if Forcing.candidate is None:
+            return select(num_experts, activation_function, num_tokens)
+        return petit._MegaMoeProducerGeometry[Forcing.candidate.split("/")[0]]
+
+    def forced_kernels(self, external, m64, w8, *rest):  # *rest: later Petit adds arguments (reduce_routes)
+        if Forcing.candidate is not None:
+            m64, w8 = STAGE1_TILES[Forcing.candidate.split("/")[1]]
+        Forcing.launched.add((self.Config.kProducerBlocks, m64, w8))
+        return kernels(self, external, m64, w8, *rest)
+
+    petit._select_mega_moe_producer_geometry = forced_select
+    mega_moe.MegaMoESolutionAdapter.Kernels = forced_kernels
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ts-src", default=os.environ.get("TS_SRC"), help="TokenSpeed checkout (default $TS_SRC)")
@@ -104,9 +176,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--iters", type=int, default=50, help="timed calls per repetition")
     ap.add_argument("--reps", type=int, default=3, help="timed repetitions (>= 3)")
     ap.add_argument("--mode", choices=("eager", "graph", "both"), default="both")
-    ap.add_argument("--routing", choices=("test", "uniform"), default="test",
+    ap.add_argument("--routing", choices=("test", "uniform", "skew"), default="test",
                     help="timed routing: the test's _routing (balanced over destination ranks, rank offset "
-                         "+seed) or uniform random distinct experts per token (seeded)")
+                         "+seed), uniform random distinct experts per token (seeded), or skew: expert i of a "
+                         "fixed global permutation drawn with weight (i+1)^-S (--skew), the same hot experts "
+                         "on every rank")
+    ap.add_argument("--skew", type=float, default=0.5, help="exponent S of --routing skew")
+    ap.add_argument("--candidates", default=None,
+                    help="force Petit's launch: 'all' or comma list of GEOMETRY/TILE (cta56..cta192 / m32, "
+                         "m64w4, m64w8); default: time Petit's own choice and record it")
+    ap.add_argument("--layers", type=int, default=1,
+                    help="calls per timed graph replay or eager block, on that many layers (time / N)")
+    ap.add_argument("--weights", choices=("test", "random"), default="test",
+                    help="timed layers' weights: the test's sparse exact-oracle weights, or distinct random "
+                         "MXFP4 codes per layer (no reference for the timed inputs)")
     ap.add_argument("--seed", type=int, default=0, help="routing seed (see --routing)")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
@@ -118,6 +201,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--iters and --warmup must be >= 1 (warmup excludes the JIT-compiling first call)")
     if a.active_ranks is not None and a.active_ranks < 1:
         ap.error("--active-ranks must be >= 1")
+    if a.layers < 1:
+        ap.error("--layers must be >= 1")
+    if a.candidates is not None and a.candidates != "all":
+        bad = [n for n in a.candidates.split(",") if n.count("/") != 1 or n.split("/")[0] not in GEOMETRIES
+               or n.split("/")[1] not in STAGE1_TILES]
+        if bad:
+            ap.error(f"--candidates {bad}: use GEOMETRY/TILE with {GEOMETRIES} and {tuple(STAGE1_TILES)}")
     try:
         a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens))
     except ValueError as error:
@@ -172,13 +262,15 @@ def routing_summary(ids, profile, ws):
 def summary_table(record: dict) -> str:
     """Markdown table of one output JSON: verdicts and max-over-ranks / per-rank timings (ms)."""
     modes = [m for m in ("eager", "graph") if m in record["results"][0]["timing_ms"]]
-    head = ["tokens/GPU", "pass", "max abs err", "max rel err", "graph==eager", "1st call compiled (ranks)"]
+    head = ["tokens/GPU", "candidate", "launched", "pass", "max abs err", "max rel err", "graph==eager",
+            "1st call compiled (ranks)"]
     for m in modes:
         head += [f"{m} max-over-ranks median [min, max]", f"{m} per-rank medians"]
     rows = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in record["results"]:
         compiled = sum(v["first_call"]["compiled"] for v in r["per_rank"])
-        cells = [str(r["tokens_per_gpu"]), "PASS" if r["pass"] else "FAIL", f"{r['max_abs_err']:.3g}",
+        cells = [str(r["tokens_per_gpu"]), r.get("candidate", "petit"), r.get("launched", ""),
+                 "PASS" if r["pass"] else "FAIL", f"{r['max_abs_err']:.3g}",
                  f"{r['max_rel_err']:.3g}", str(r["graph_equals_eager"]), f"{compiled}/{len(r['per_rank'])}"]
         for m in modes:
             t = r["timing_ms"][m]
@@ -246,88 +338,157 @@ def main(argv=None) -> int:
                 "finite": bool(torch.isfinite(actual).all())}
 
     active = ws if a.active_ranks is None else min(a.active_ranks, ws)
+    install_forcing()
+    names = candidate_names(a.candidates, profile.experts) or [None]
+
+    def timed_layers():
+        """--layers layers for timing: the test layer itself, or distinct random MXFP4 weights."""
+        if a.weights == "test" and a.layers == 1:
+            return [layer]
+        out = []
+        for i in range(a.layers):
+            timed = mod._TestMoeLayer(profile, ws, device)
+            if a.weights == "test":
+                mod._weights(timed, profile, rank, ws)
+            else:
+                gen = torch.Generator(device=device).manual_seed(i * 101 + rank)
+                for wname in ("w13_weight", "w2_weight"):
+                    w = getattr(timed, wname)
+                    w.data.copy_(torch.randint(0, 256, w.shape, dtype=torch.uint8, device=device, generator=gen))
+                timed.w13_weight_scale.data.fill_(120)
+                timed.w2_weight_scale.data.fill_(120)
+            mod.kernel_moe_process_weights(plan, timed)
+            out.append(timed)
+        return out
+
+    layers = timed_layers()
+
+    def timed_routing(count):
+        if a.routing == "test":
+            return mod._routing(count, rank + a.seed, profile, ws, device)
+        gen = torch.Generator(device="cpu").manual_seed(a.seed * 1009 + rank)
+        if a.routing == "skew":
+            order = torch.randperm(profile.experts, generator=torch.Generator().manual_seed(SKEW_PERMUTATION_SEED))
+            weight = torch.empty(profile.experts)
+            weight[order] = torch.arange(1, profile.experts + 1, dtype=torch.float32) ** -a.skew
+            new_ids = torch.multinomial(weight.expand(count, -1), profile.top_k, replacement=False, generator=gen)
+        else:
+            new_ids = torch.rand((count, profile.experts), generator=gen).argsort(dim=1)[:, :profile.top_k]
+        new_w = torch.softmax(torch.rand((count, profile.top_k), generator=gen), dim=1)
+        return new_ids.to(torch.int32).to(device).contiguous(), new_w.to(device)
+
     for tokens in a.tokens:
         counts = [tokens if r < active else 0 for r in range(ws)]
         count = counts[rank]
         x = torch.empty((count, profile.hidden), device=device, dtype=torch.bfloat16)
         ids, weights = mod._routing(count, rank, profile, ws, device)
         refresh, run = mod._closures(x, ids, weights, profile, rank, ws, device, count, counts, plan, layer)
-        # --- the test's check, unchanged in order: eager, capture, replay steps 0..2 ---
-        refresh(0)
-        eager_out, first = dist_timing.first_call(run, cache_dir)
-        eager = eager_out.clone()
-        torch.cuda.synchronize()
-        dist.barrier()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            captured = run()
-        steps = []
-        for step in (0, 1, 2):
-            refresh(step)
-            graph.replay()
-            actual = captured.clone()
-            expected = mod._reference(x, ids, weights, profile)
-            v = check(actual, expected)
-            v["step"] = step
-            v["graph_equals_eager"] = bool(torch.equal(actual, eager if step == 0 else run()))
-            steps.append(v)
+        runs = [mod._closures(x, ids, weights, profile, rank, ws, device, count, counts, plan, timed)[1]
+                for timed in layers]
+        per = {}  # candidate -> its graphs, checks and launch
+        for name in names:
+            Forcing.candidate, Forcing.launched = name, set()
+            # --- the test's check, unchanged in order: eager, capture, replay steps 0..2 ---
+            refresh(0)
+            eager_out, first = dist_timing.first_call(run, cache_dir)
+            eager = eager_out.clone()
+            torch.cuda.synchronize()
             dist.barrier()
-        # --- timed inputs ---
-        refresh(0)
-        if a.routing == "test":
-            new_ids, new_w = mod._routing(count, rank + a.seed, profile, ws, device)
-        else:
-            gen = torch.Generator(device="cpu").manual_seed(a.seed * 1009 + rank)
-            new_ids = torch.rand((count, profile.experts), generator=gen).argsort(dim=1)[:, :profile.top_k]
-            new_ids = new_ids.to(torch.int32).to(device).contiguous()
-            new_w = torch.softmax(torch.rand((count, profile.top_k), generator=gen), dim=1).to(device)
-        ids.copy_(new_ids)
-        weights.copy_(new_w)
-        graph.replay()
-        actual = captured.clone()
-        timed_check = check(actual, mod._reference(x, ids, weights, profile))
-        timed_check["graph_equals_eager"] = bool(torch.equal(actual, run()))
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = run()
+            steps = []
+            for step in (0, 1, 2):
+                refresh(step)
+                graph.replay()
+                actual = captured.clone()
+                expected = mod._reference(x, ids, weights, profile)
+                v = check(actual, expected)
+                v["step"] = step
+                v["graph_equals_eager"] = bool(torch.equal(actual, eager if step == 0 else run()))
+                steps.append(v)
+                dist.barrier()
+            del graph, captured
+            # --- timed inputs: one graph over the timed layers ---
+            refresh(0)
+            new_ids, new_w = timed_routing(count)
+            ids.copy_(new_ids)
+            weights.copy_(new_w)
+            for fn in runs:  # eager warmup compiles anything new before capture
+                fn()
+            torch.cuda.synchronize()
+            dist.barrier()
+            timed_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(timed_graph):
+                timed_out = [fn() for fn in runs]
+            timed_graph.replay()
+            torch.cuda.synchronize()
+            timed_check = None
+            if a.weights == "test":
+                timed_check = check(timed_out[0].clone(), mod._reference(x, ids, weights, profile))
+                timed_check["graph_equals_eager"] = bool(torch.equal(timed_out[0], runs[0]()))
+            launched = sorted(Forcing.launched)
+            if name is not None and launched != [expected_launch(name, profile.experts)]:
+                raise RuntimeError(f"forcing {name} launched {launched}, expected "
+                                   f"{[expected_launch(name, profile.experts)]}")
+            per[name] = {"graph": timed_graph, "steps": steps, "timed_check": timed_check, "first": first,
+                         "launched": launched}
+            dist.barrier()
         dest, load = routing_summary(ids, profile, ws)
         dist.all_reduce(load)
         dests = [None] * ws
         dist.all_gather_object(dests, dest)
         load_list = load.cpu().tolist()
-        timing = {}
+        timing = {name: {} for name in names}
         for mode in modes:
-            fn = run if mode == "eager" else graph.replay
-            for _ in range(a.warmup):
-                fn()
-            reps = []
-            for _ in range(a.reps):
-                calls = dist_timing.time_calls(fn, a.iters, barrier=dist.barrier)
-                gathered = [None] * ws
-                dist.all_gather_object(gathered, calls)
-                reps.append(dist_timing.reduce_repetition(gathered))
-            timing[mode] = {**dist_timing.aggregate(reps), "per_repetition": reps}
-        verdicts = [None] * ws
-        dist.all_gather_object(verdicts, {"check_steps": steps, "timed_inputs_check": timed_check,
-                                          "first_call": first})
-        ok = all(s["reference_pass"] and s["graph_equals_eager"] and s["finite"]
-                 for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]])
-        results.append({
-            "tokens_per_gpu": tokens, "active_ranks": active, "counts": counts,
-            "num_tokens_global": sum(counts), "pass": ok,
-            "max_abs_err": max(s["max_abs_err"] for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]]),
-            "max_rel_err": max(s["max_rel_err"] for v in verdicts for s in v["check_steps"] + [v["timed_inputs_check"]]),
-            "graph_equals_eager": all(s["graph_equals_eager"] for v in verdicts
-                                      for s in v["check_steps"] + [v["timed_inputs_check"]]),
-            "per_rank": verdicts,
-            "routing": {"routes_by_source_rank_to_destination_rank": dests,
-                        "expert_load": dist_timing.summarize([float(c) for c in load_list]),
-                        "experts_hit": sum(1 for c in load_list if c)},
-            "timing_ms": timing,
-        })
-        if rank == 0:
-            t = {m: round(timing[m]["max_over_ranks_ms"]["median"], 4) for m in timing}
-            print(f"[petit_layer] {a.profile} tokens/gpu={tokens} active_ranks={active} pass={ok} max_abs={results[-1]['max_abs_err']:.3g} "
-                  f"graph==eager={results[-1]['graph_equals_eager']} first_call_compiled={first['compiled']} "
-                  f"max-over-ranks median ms={t}", flush=True)
-        del graph, captured
+            for name in names:  # warmup
+                Forcing.candidate = name
+                fn = per[name]["graph"].replay if mode == "graph" else (lambda: [f() for f in runs])
+                for _ in range(a.warmup):
+                    fn()
+            reps = {name: [] for name in names}
+            for k in range(a.reps):
+                order = list(names)
+                random.Random(k * 7919 + tokens).shuffle(order)  # the same order on every rank
+                for name in order:
+                    Forcing.candidate = name
+                    fn = per[name]["graph"].replay if mode == "graph" else (lambda: [f() for f in runs])
+                    calls = [c / a.layers for c in dist_timing.time_calls(fn, a.iters, barrier=dist.barrier)]
+                    gathered = [None] * ws
+                    dist.all_gather_object(gathered, calls)
+                    reps[name].append(dist_timing.reduce_repetition(gathered))
+            for name in names:
+                timing[name][mode] = {**dist_timing.aggregate(reps[name]), "per_repetition": reps[name]}
+        Forcing.candidate = None
+        for name in names:
+            mine = per[name]
+            verdicts = [None] * ws
+            dist.all_gather_object(verdicts, {"check_steps": mine["steps"], "timed_inputs_check": mine["timed_check"],
+                                              "first_call": mine["first"], "launched": mine["launched"]})
+            checks = [s for v in verdicts for s in v["check_steps"] + ([v["timed_inputs_check"]]
+                                                                      if v["timed_inputs_check"] else [])]
+            ok = all(s["reference_pass"] and s["graph_equals_eager"] and s["finite"] for s in checks)
+            results.append({
+                "tokens_per_gpu": tokens, "active_ranks": active, "counts": counts,
+                "num_tokens_global": sum(counts), "candidate": name or "petit",
+                "launched": " ".join("/".join(str(x) for x in t) for t in mine["launched"]),
+                "pass": ok,
+                "max_abs_err": max(s["max_abs_err"] for s in checks),
+                "max_rel_err": max(s["max_rel_err"] for s in checks),
+                "graph_equals_eager": all(s["graph_equals_eager"] for s in checks),
+                "per_rank": verdicts,
+                "routing": {"routes_by_source_rank_to_destination_rank": dests,
+                            "expert_load": dist_timing.summarize([float(c) for c in load_list]),
+                            "experts_hit": sum(1 for c in load_list if c)},
+                "timing_ms": timing[name],
+            })
+            if rank == 0:
+                t = {m: round(timing[name][m]["max_over_ranks_ms"]["median"], 4) for m in timing[name]}
+                print(f"[petit_layer] {a.profile} tokens/gpu={tokens} active_ranks={active} "
+                      f"candidate={name or 'petit'} launched={mine['launched']} pass={ok} "
+                      f"max_abs={results[-1]['max_abs_err']:.3g} graph==eager={results[-1]['graph_equals_eager']} "
+                      f"first_call_compiled={mine['first']['compiled']} max-over-ranks median ms={t}", flush=True)
+        del per
         torch.cuda.synchronize()
         dist.barrier()
     all_pass = all(r["pass"] for r in results)  # every rank holds the gathered verdicts
