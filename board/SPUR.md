@@ -60,6 +60,57 @@ For public models, prefer the managed cache: in batch shells, run `source /etc/p
 
 Transfer source with `scp`, or create a Git bundle on an approved workstation and copy it over. A bundle contains committed history only; copy any required uncommitted files separately. This avoids leaving credentials on the cluster or requiring a workstation tunnel during unattended work. GitHub EMU access from SPUR was restricted in the supplied article; its current allow-list status has not been verified. Custom job SSH servers and agent tunnels are outside this launcher.
 
+## Example: persistent workspace in a native container
+
+Saved for later exploration: this example follows the supplied cluster guide and has not been tested live. The current `spur-run.py` launcher does not expose native-container options. No image build, import, file transfer or job submission is performed by adding this example.
+
+Prepare a MI355X-compatible development image on your existing build machine and publish it to an approved registry. Reuse that image across jobs. Matching the image, Python and dependencies helps reuse build artifacts, but MI350-specific binaries may still need rebuilding for MI355X. Keep incompatible build outputs separate.
+
+SPUR cannot directly bind-mount a folder on your workstation or MI350 machine. First transfer it to SPUR storage, then mount that SPUR directory into the container:
+
+```text
+Development machine: ./benchmark-work/
+    -> copy to SPUR: /shared_nfs/zhuoryin/benchmark-work/
+    -> container mount: /work/
+```
+
+From the development machine, copy a workspace containing your source and `run-tests.sh`. This example uses the existing `spur` SSH alias and user `zhuoryin`; adjust the destination for another account. Check space before transferring large files: `/shared_nfs` displayed 100% usage with about 2.2 TB free cluster-wide on 2026-11-20.
+
+```bash
+ssh spur 'mkdir -p /shared_nfs/zhuoryin/benchmark-work/results /shared_nfs/zhuoryin/benchmark-work/logs'
+scp -r ./benchmark-work/. spur:/shared_nfs/zhuoryin/benchmark-work/
+```
+
+On the SPUR login node, import the prepared image once and inspect the resulting image path. Replace the registry/image example below. Choose image storage with sufficient capacity; large imports should not fill home. The supplied guide describes node-local image imports as an alternative, but those require jobs to use the same node.
+
+```bash
+IMAGE='registry.example.com/team/dev:tag'
+spur image import "$IMAGE"
+spur image list
+```
+
+Use the imported `.sqsh` path, not the registry name, when submitting. Replace `IMAGE_FILE` below with the actual path returned by the import. Keep code, reusable builds/caches and results under the workspace so one parent mount covers them; the supplied guide says only one native-container mount entry works. Your test script must write reusable files beneath `/work` rather than only into the container filesystem.
+
+```bash
+WORK=/shared_nfs/$USER/benchmark-work
+IMAGE_FILE=/path/to/imported-image.sqsh
+sbatch -A amd-triton --qos=amd-triton-qos -p amd-spur-v2 \
+  --gres=gpu:mi355x:1 -c 16 -t 02:00:00 \
+  -o "$WORK/logs/%j.out" -e "$WORK/logs/%j.out" \
+  --container-image="$IMAGE_FILE" \
+  --container-mounts="$WORK:/work" \
+  --wrap 'set -eu; unset ROCR_VISIBLE_DEVICES; cd /work; bash ./run-tests.sh > "/work/results/$SPUR_JOB_ID.log" 2>&1'
+squeue -u "$USER"
+```
+
+From the development machine, retrieve results after the job finishes:
+
+```bash
+scp -r spur:/shared_nfs/zhuoryin/benchmark-work/results ./spur-results
+```
+
+The allocation and container processes end, while files written beneath the shared workspace remain for the next allocation. Container-only changes, running processes and GPU memory do not survive. Reuse the prepared image and compatible persistent builds on later runs; changes to the code or toolchain may require incremental or full rebuilding. Shared storage is not a backup or confidential storage. Validate image startup, GPU access, the mount and result persistence with a small job before relying on this workflow.
+
 ## Chosen design
 
 Keep resource assignment at the outer launch boundary. A future SPUR launcher in `board` should require GPU count, CPU count and duration, and use an explicit account/rules selection. It should submit one group, report the job id and output locations, and preserve useful failure information. Any automatic choice between Triton and burst rules would obscure different waiting and interruption behavior, so keep that choice explicit until the policies are known.
