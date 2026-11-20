@@ -24,6 +24,8 @@ board/
 
 ## Files
 
+For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Running test groups on SPUR](SPUR.md). SPUR assigns resources around a whole command or test group; the idle-GPU selection and memory holder below are for machines without a scheduler.
+
 - `gpu-wait.py N` — polls `amd-smi metric` until N GPUs show 0% graphics activity on
   `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Memory
   other processes hold does not count; on a pick it logs who holds memory there (host PIDs,
