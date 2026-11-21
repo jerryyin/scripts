@@ -48,6 +48,14 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
         windows = e2e.phase_windows(str(bj))
         paths = e2e.write_slices([str(log)], windows, str(Path(d) / "slices"))
         assert [len(Path(p).read_text().splitlines()) for p in paths] == [4, 8]
+        bj.write_text(json.dumps({"results": [  # a matrix ladder: one phase, two concurrencies
+            {"phase": "m", "concurrency": 1, "output_dir": "/o/m1", "started_at": ts(T - 1), "finished_at": ts(T + 0.35)},
+            {"phase": "m", "concurrency": 2, "output_dir": "/o/m2", "started_at": ts(T + 0.35), "finished_at": ts(T + 5)}]}))
+        windows = e2e.phase_windows(str(bj))
+        assert [w[0] for w in windows] == ["m-c1", "m-c2"]
+        paths = e2e.write_slices([str(log)], windows, str(Path(d) / "ladder"))
+        assert [Path(p).name for p in paths] == ["m-c1.log", "m-c2.log"]
+        assert [len(Path(p).read_text().splitlines()) for p in paths] == [4, 8]
         bj.write_text(json.dumps({"results": [{"phase": "w", "output_dir": "/o/w"}]}))
         try:
             e2e.phase_windows(str(bj))
@@ -55,6 +63,11 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
             assert "started_at" in str(exc)
         else:
             raise AssertionError("phases without times must be refused")
+
+
+def test_fmt_none() -> None:
+    e2e = load("e2e_decompose.py")
+    assert (e2e.fmt(None, ".1f"), e2e.fmt(2.25, ".1f")) == ("-", "2.2")
 
 
 def test_predict_terms_and_whatifs() -> None:

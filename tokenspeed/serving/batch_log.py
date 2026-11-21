@@ -364,8 +364,9 @@ def prefill_main(argv):
         # so names get "/c<concurrency>" when a phase name repeats
         names = [r["phase"] for r in bj["results"]]
         dup = len(set(names)) < len(names)
-        specs = [(f'{ph}/c{int(r["concurrency"])}' if dup else ph, s, e, int(bj["prompt_tokens"]), int(r["concurrency"]))
-                 for r, (ph, _, s, e) in zip(bj["results"], phase_windows(a.benchmark_json))]
+        # (phase_windows labels such windows PHASE-cC itself; the point name keeps this tool's PHASE/cC)
+        specs = [(f'{r["phase"]}/c{int(r["concurrency"])}' if dup else r["phase"], s, e, int(bj["prompt_tokens"]),
+                  int(r["concurrency"])) for r, (_, _, s, e) in zip(bj["results"], phase_windows(a.benchmark_json))]
     for w in a.window:
         name, s, e = parse_window(w)
         if s is None or e is None:
