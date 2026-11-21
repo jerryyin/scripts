@@ -74,7 +74,15 @@ t(x) = a + b x (x tokens in the chunk). --chunk-fit NAME=JSON[,JSON...] fits the
 per chunk size, of the busiest rank's per-size median chunk time over this tool's measured runs (labels
 measured or measured-N), least squares when more than two sizes (runs of one size give no line but
 can still be a DECODE source); --chunk-line NAME=A_MS:B_US states a line
-instead (an assumption, e.g. a bound). --chunk-scenario NAME=LINE:CHUNK:GROUPS[:DECODE] puts C prompts of
+instead (an assumption, e.g. a bound). A fitted line also reports its fixed share a / t(x) at the largest
+fitted size x (fixed_share, fixed_share_at: how much of a full chunk's time does not scale with its tokens)
+and its spread over repetitions (spread): per size one median per repetition index N (the runs of every
+input file at N together; label measured is N = 1); the line through every combination of one value per
+size (combinations) gives a, b and the fixed share as [min, max] (a_ms_range, b_us_per_token_range,
+fixed_share_range), beside each size's per-repetition values (per_repetition_points_ms, points_ms_range).
+The line table prints the points with their [min, max], the a and b ranges and the fixed share with its
+range. a, b, points and scenarios are those of the medians as before. --chunk-scenario
+NAME=LINE:CHUNK:GROUPS[:DECODE] puts C prompts of
 --prompt-tokens L round-robin on GROUPS independent prefill groups (1 = one TP group; 4 = four DP ranks),
 each group packing its prompts first come first served into CHUNK-token chunks (a prompt's tail shares a
 chunk with the next prompt's head, as TokenSpeed's chunked prefill does). Per --concurrency C it reports
@@ -98,7 +106,7 @@ over every measured row of both files and equal to the manifest's output_tokens)
 per-request TPOT = (latency - TTFT) / (O - 1), the residual is near zero when every request has O tokens;
 it is not exactly zero because the three medians are taken separately and EvalScope rounds its summary.
 """
-import argparse, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
+import argparse, collections, csv, datetime as dt, hashlib, itertools, json, os, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_log import parse_lines, parse_ts  # noqa: E402
@@ -607,6 +615,44 @@ def fit_chunk_line(runs):
     return my - b * mx, b, pts
 
 
+def run_repetition(r):
+    """Repetition index N of a measured run label measured, measured-N or measured-N-cC (measured -> 1)."""
+    head, sep, c = str(r.get("label", "")).rpartition("-c")
+    phase = head if sep and c.isdigit() else str(r.get("label", ""))
+    return _repetition(phase, "measured")
+
+
+def fit_chunk_line_spread(runs):
+    """Spread of the line over repetitions: per chunk size, the median over each repetition's runs of the busiest
+    rank's chunk time (one value per repetition index N, the runs of every input file at N together); the line
+    is fitted through every combination of one per-repetition value per size (the envelope of what the
+    repetitions allow). Returns None for fewer than two sizes, else {points_ms_range, per_repetition_points_ms,
+    a_ms_range, b_us_per_token_range, fixed_share_range, fixed_share_at} where fixed_share = a / t(x) at the
+    largest fitted size x."""
+    by = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in runs:
+        n = run_repetition(r)
+        for k, v in busiest_rank(r)["chunk_time_by_size_median_s"].items():
+            by[int(k)][n].append(v)
+    if len(by) < 2:
+        return None
+    reps = {k: {n: statistics.median(v) for n, v in sorted(d.items())} for k, d in sorted(by.items())}
+    xs, top = list(reps), max(reps)
+    mx = statistics.mean(xs)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    lines = []
+    for ys in itertools.product(*(list(reps[x].values()) for x in xs)):
+        my = statistics.mean(ys)
+        b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        a = my - b * mx
+        lines.append((a, b, a / (a + b * top)))
+    rng = lambda vals: [min(vals), max(vals)]  # noqa: E731
+    return {"per_repetition_points_ms": {x: {n: v * 1e3 for n, v in d.items()} for x, d in reps.items()},
+            "points_ms_range": {x: rng([v * 1e3 for v in d.values()]) for x, d in reps.items()},
+            "a_ms_range": rng([l[0] * 1e3 for l in lines]), "b_us_per_token_range": rng([l[1] * 1e6 for l in lines]),
+            "fixed_share_range": rng([l[2] for l in lines]), "fixed_share_at": top, "combinations": len(lines)}
+
+
 def decode_steps(runs, interval):
     """{C: (step_s, acceptance)}: medians over the runs at C of the busiest rank's full-batch line gap / interval
     and line-mean acceptance."""
@@ -641,8 +687,11 @@ def chunk_model(fits, lines, scenarios, concurrencies, tokens, output_tokens, in
         runs = measured_runs(paths.split(","))
         a, b, pts = fit_chunk_line(runs)
         if a is not None:
+            top = max(pts)
             models[name] = {"a_ms": a * 1e3, "b_us_per_token": b * 1e6, "source": "fit",
-                            "points_ms": {k: v * 1e3 for k, v in pts.items()}}
+                            "points_ms": {k: v * 1e3 for k, v in pts.items()},
+                            "fixed_share": a / (a + b * top), "fixed_share_at": top,
+                            "spread": fit_chunk_line_spread(runs)}
         else:  # one chunk size: reported, usable as DECODE only
             models.setdefault("_points", {})[name] = {k: v * 1e3 for k, v in pts.items()}
         if interval:
@@ -680,13 +729,21 @@ def chunk_model(fits, lines, scenarios, concurrencies, tokens, output_tokens, in
 
 
 def chunk_model_markdown(res):
-    out = ["| line | a ms | b us/token | source | points ms |", "|---|---|---|---|---|"]
+    out = ["| line | a ms | b us/token | source | points ms | a ms [min, max] | b us/token [min, max] | fixed share a/t(x) at x [min, max] |",
+           "|---|---|---|---|---|---|---|---|"]
     for k, m in res["models"].items():
         if k == "_points":
-            out += [f"| {n} | - | - | one chunk size | " + " ".join(f"{s}:{v:.1f}" for s, v in p.items()) + " |" for n, p in m.items()]
+            out += [f"| {n} | - | - | one chunk size | " + " ".join(f"{s}:{v:.1f}" for s, v in p.items()) + " | - | - | - |"
+                    for n, p in m.items()]
             continue
-        pts = " ".join(f"{s}:{v:.1f}" for s, v in m.get("points_ms", {}).items()) or "-"
-        out.append(f"| {k} | {m['a_ms']:.2f} | {m['b_us_per_token']:.3f} | {m['source']} | {pts} |")
+        sp = m.get("spread")
+        pts = " ".join(f"{s}:{v:.1f}" + (" [{:.1f}, {:.1f}]".format(*sp["points_ms_range"][s]) if sp else "")
+                       for s, v in m.get("points_ms", {}).items()) or "-"
+        ar = "[{:.2f}, {:.2f}]".format(*sp["a_ms_range"]) if sp else "-"
+        br = "[{:.3f}, {:.3f}]".format(*sp["b_us_per_token_range"]) if sp else "-"
+        fs = (f"{m['fixed_share']:.3f} at {m['fixed_share_at']}" + (" [{:.3f}, {:.3f}]".format(*sp["fixed_share_range"]) if sp else "")
+              if "fixed_share" in m else "-")
+        out.append(f"| {k} | {m['a_ms']:.2f} | {m['b_us_per_token']:.3f} | {m['source']} | {pts} | {ar} | {br} | {fs} |")
     out += ["", "| scenario | line | chunk | groups | C | prefill end s | TTFT own-end mean s | step ms | accept | decode s | wave tok/s | ratio to first |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in res["rows"]:
@@ -741,8 +798,9 @@ def main():
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     cm = ap.add_argument_group("--chunk-model")
-    cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit and chunk-size/placement what-ifs")
-    cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s)")
+    cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit (with its fixed share a/t(x) and [min, max] over repetitions) and chunk-size/placement what-ifs")
+    cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s); "
+                    "reports fixed_share and the a, b and fixed-share [min, max] over repetition indexes (spread)")
     cm.add_argument("--chunk-line", action="append", default=[], metavar="NAME=A_MS:B_US", help="a stated line")
     cm.add_argument("--chunk-scenario", action="append", default=[], metavar="NAME=LINE:CHUNK:GROUPS[:DECODE]")
     cm.add_argument("--concurrency-list", help="comma-separated concurrencies for --chunk-model")

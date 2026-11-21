@@ -146,6 +146,19 @@ def test_chunk_model_fit_and_waves() -> None:
         assert round(base["decode_s"], 6) == round(10 / 5.0 * 0.01, 6)
         assert slow["tok_per_s_ratio_to_first"] < 1 and base["tok_per_s_ratio_to_first"] == 1
         assert "| base | M | 1000 | 1 | 1 |" in e2e.chunk_model_markdown(res)
+        # spread: one point per size here, so the envelope is the line itself; fixed share 10 / 50 at 2000 tokens
+        sp = res["models"]["M"]["spread"]
+        assert [round(x, 6) for x in sp["a_ms_range"]] == [10.0, 10.0] and sp["fixed_share_at"] == 2000
+        assert round(res["models"]["M"]["fixed_share"], 6) == 0.2
+    # two repetitions per size: 1000 -> 30/40 ms, 2000 -> 50 ms; lines (10 ms, 20 us) and (30 ms, 10 us)
+    sp = e2e.fit_chunk_line_spread([
+        {"label": "measured-1-c1", "ranks": {"0": rank({"1000": 0.03, "2000": 0.05}, 0.4, 5.0)}},
+        {"label": "measured-2-c1", "ranks": {"0": rank({"1000": 0.04}, 0.4, 5.0)}},
+        {"label": "measured-2-c2", "ranks": {"0": rank({"2000": 0.05}, 0.4, 5.0)}}])
+    assert [round(x, 6) for x in sp["a_ms_range"]] == [10.0, 30.0]
+    assert [round(x, 6) for x in sp["b_us_per_token_range"]] == [10.0, 20.0]
+    assert [round(x, 6) for x in sp["fixed_share_range"]] == [0.2, 0.6] and sp["combinations"] == 4
+    assert e2e.run_repetition({"label": "measured"}) == 1 and e2e.run_repetition({"label": "measured-3-c16"}) == 3
 
 
 def test_predict_terms_and_whatifs() -> None:
