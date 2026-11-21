@@ -229,18 +229,18 @@ index f99473a60..c8e1dc6df 100644
              h = pending_post.finish(h)
          combined = v41_hc_pre(h, pre_mix)
 diff --git a/python/tokenspeed/runtime/models/deepseek_v41_moe.py b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
-index 62abc5892..d5f5690b7 100644
+index ac3a2bc1a..dd3c60215 100644
 --- a/python/tokenspeed/runtime/models/deepseek_v41_moe.py
 +++ b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
 @@ -50,6 +50,7 @@ from tokenspeed.runtime.utils import add_prefix
  from tokenspeed.runtime.utils.cuda_stream import StreamFork
- from tokenspeed.runtime.utils.env import global_server_args_dict
+ from tokenspeed.runtime.utils.env import envs, global_server_args_dict
  from tokenspeed.runtime.utils.nvtx import nvtx_range
 +from tokenspeed.runtime.utils import step_timing as _st  # TS_STEP_TIMING test-only
  
  logger = logging.getLogger(__name__)
  
-@@ -484,8 +485,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -500,8 +501,10 @@ class DeepseekV4MoE(nn.Module):
          ctx: ForwardContext,
          comm_manager: CommManager,
      ) -> torch.Tensor:
@@ -251,7 +251,7 @@ index 62abc5892..d5f5690b7 100644
          if self.shared_expert_fused:
              # The routed output already includes the shared expert.
              with nvtx_range("moe_mega_experts"):
-@@ -507,11 +510,14 @@ class DeepseekV4MoE(nn.Module):
+@@ -523,11 +526,14 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=True,
                  )
              with fork.branch():
@@ -266,7 +266,7 @@ index 62abc5892..d5f5690b7 100644
          return routed + shared if shared is not None else routed
  
      def forward_normal(
-@@ -528,8 +534,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -544,8 +550,10 @@ class DeepseekV4MoE(nn.Module):
          """
          if hidden_states.shape[0] == 0 and not self.use_gluon_petit:
              return hidden_states if out is None else out.copy_(hidden_states)
@@ -277,7 +277,7 @@ index 62abc5892..d5f5690b7 100644
          deferred_finalize = (
              hidden_states.dtype == torch.bfloat16
              and self.experts.supports_deferred_cuda_finalize
-@@ -545,7 +553,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -561,7 +569,10 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=not deferred_finalize,
                  )
              with fork.branch():
@@ -562,41 +562,45 @@ index 000000000..c3723209c
 +        raise RuntimeError("TS_STEP_TIMING=1 requires TS_STEP_TIMING_DIR")
 +    atexit.register(flush)
 diff --git a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-index 4be80cac7..1d1c4668e 100644
+index 01f583f38..70f7f276e 100644
 --- a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
 +++ b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-@@ -214,7 +214,12 @@ class MegaMoESolutionAdapter:
-         import torch
-         from lib.streams import native_stream
+@@ -228,7 +228,16 @@ class MegaMoESolutionAdapter:
+             # warmup() takes the grid as a keyword; a launch takes it above.
+             return {"grid": blocks} if compile_only else {}
  
 +        import sys as _sys  # TS_STEP_TIMING test-only
 +
 +        _st = _sys.modules.get("tokenspeed.runtime.utils.step_timing")
-+        _mk = _st.mark if _st is not None and _st.ENABLED else (lambda _n: None)
++        _mk = (
++            _st.mark
++            if _st is not None and _st.ENABLED and not compile_only
++            else (lambda _n: None)
++        )
          with torch.cuda.stream(native_stream(p.stream, p.workspace.device)):
 +            _mk("petit.s1")
-             MegaMoEStage1[(C.kNumSMs,)](
+             Launch(MegaMoEStage1, (C.kNumSMs,))(
                  p.w13,
                  p.scales_w13,
-@@ -229,6 +234,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=stage1.kNumWarps,
+@@ -244,6 +253,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
+                 **Grid((C.kNumSMs,)),
              )
 +            _mk("petit.s2")
-             MegaMoEStage2[(stage2.kStage2GridBlocks,)](
+             Launch(MegaMoEStage2, (stage2.kStage2GridBlocks,))(
                  p.w2,
                  p.scales_w2,
-@@ -239,6 +245,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=stage2.kNumWarps,
+@@ -255,6 +265,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
+                 **Grid((stage2.kStage2GridBlocks,)),
              )
 +            _mk("petit.comb")
-             MegaMoECombine[(combine.kNumSMs,)](
+             Launch(MegaMoECombine, (combine.kNumSMs,))(
                  p.out,
                  p.num_tokens,
-@@ -249,6 +256,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=combine.kNumWarps,
+@@ -266,6 +277,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
+                 **Grid((combine.kNumSMs,)),
              )
 +            _mk("petit.post")
          return 0
