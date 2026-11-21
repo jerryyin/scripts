@@ -381,3 +381,37 @@ def test_samples_unobserved_gpu_is_not_called_idle() -> None:
     act = e2e.window_activity(s, 10.0, 12.0, e2e.own_kfd_pids(s))
     st = e2e.window_state(act)
     assert st["per_gpu"]["3"] == "unobserved" and st["state"] == "all-busy" and st["idle_gpus"] == []
+
+
+def test_activity_window_reports_stated_window_and_unobserved_gpu() -> None:
+    """--activity-window: a stall with no Decode line (a 1-output prefill request) gets the same activity
+    record from stated UTC bounds, and a GPU no own process was seen on is 'unobserved' over all samples."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    samples = []
+    for k in range(0, 40):  # every 0.5 s for 20 s; rank 1 idle and peers spinning from T + 5 to T + 15
+        t = T + 0.5 * k
+        if T + 5 <= t <= T + 15:
+            samples.append(_sample(t, [100, 0, 100, 100], [32, 0, 32, 32]))
+        else:
+            samples.append(_sample(t, [100, 100, 100, 100], [40, 60, 30, 50]))
+    for x in samples:
+        del x["kfd"]["103"]
+    with tempfile.TemporaryDirectory() as d:
+        sj, out = Path(d) / "samples.jsonl", Path(d) / "out.json"
+        sj.write_text("".join(json.dumps(s) + "\n" for s in samples))
+        argv = sys.argv
+        sys.argv = ["e2e_decompose.py", "--samples", str(sj), "--out-json", str(out),
+                    "--activity-window", f"stall={ts(T + 5)},{ts(T + 15)}", "--samples-margin", "1"]
+        try:
+            e2e.main()
+        finally:
+            sys.argv = argv
+        res = json.loads(out.read_text())
+    assert res["observed"]["per_gpu"]["3"] == "unobserved"
+    assert [res["observed"]["per_gpu"][g] for g in "012"] == ["busy"] * 3
+    w = res["windows"][0]
+    assert w["label"] == "stall" and w["idle_gpus"] == ["1"] and w["busy_gpus"] == ["0", "2"]
+    assert w["per_gpu"]["3"] == "unobserved" and w["gpus"]["0"]["cu_occupancy_mean"] == 32
+    assert w["n_samples"] == 17  # T + 6 .. T + 14 every 0.5 s
+    assert [x["gpus"]["1"] for x in w["timeline"]] == [[False, 0]]

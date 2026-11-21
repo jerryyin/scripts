@@ -289,6 +289,41 @@ def attach_samples(runs, samples, window_s=2.0, margin_s=1.0):
     return runs
 
 
+def activity_windows(samples, specs, margin_s=0.0):
+    """--activity-window LABEL=START_UTC,END_UTC: the stall gpu_activity of any stated window (e.g. a stall
+    the log shows as a gap between a prefill-only request's last Prefill line and its finish line, which has
+    no Decode line and so no prefill_to_decode_gap_s record): per window, window_activity and window_state
+    from START + margin to END - margin and window_timeline over [START, END]; plus 'observed', the state of
+    every GPU over all samples, so a GPU no own KFD process was seen on is reported 'unobserved'."""
+    own = own_kfd_pids(samples)
+    out = {"own_kfd_pids": sorted(own), "windows": []}
+    if samples:
+        whole = window_activity(samples, samples[0]["t"], samples[-1]["t"], own)
+        out["observed"] = {**whole, **window_state(whole, busy_share=0.0)}
+    for label, spec in specs:
+        a, b = (parse_iso(x.strip()) for x in spec.split(","))
+        act = window_activity(samples, a + margin_s, max(a + margin_s, b - margin_s), own)
+        out["windows"].append({"label": label, "start_utc": spec.split(",")[0].strip(),
+                               "end_utc": spec.split(",")[1].strip(), **act, **window_state(act),
+                               "timeline": window_timeline(samples, a, b, own)})
+    return out
+
+
+def activity_window_lines(res):
+    """One stdout line per --activity-window and one for 'observed'."""
+    def cells(v):
+        return " ".join(f"g{g}:busy={r['busy_share']:.2f}/cu={r.get('cu_occupancy_mean', float('nan')):.1f}"
+                        f"/sdma={(r.get('sdma_share') or 0):.3f}" for g, r in v.get("gpus", {}).items())
+    out = []
+    if "observed" in res:
+        o = res["observed"]
+        out.append(f"observed n={o['n_samples']} " + " ".join(f"g{g}:{v}" for g, v in o["per_gpu"].items()))
+    for w in res["windows"]:
+        out.append(f"{w['label']:<16} {w['duration_s']:6.1f}s n={w['n_samples']:<3} {w['state']:<9} "
+                   f"idle={','.join(w['idle_gpus']) or '-'} {cells(w)}")
+    return out
+
+
 def stall_activity_lines(runs):
     """One stdout line per stall and window: state and per GPU busy share / own cu_occupancy mean / SDMA share."""
     out = []
@@ -963,6 +998,10 @@ def main():
     ap.add_argument("--samples-window", type=float, default=2.0, help="seconds of the before/after windows (default 2)")
     ap.add_argument("--samples-margin", type=float, default=1.0,
                     help="seconds trimmed from each end of the stall window (default 1)")
+    ap.add_argument("--activity-window", action="append", default=[], metavar="LABEL=START_UTC,END_UTC",
+                    help="with --samples and --out-json, instead of a decomposition: GPU activity, state and "
+                    "timeline of each stated window (trimmed by --samples-margin at both ends; e.g. a stall with no "
+                    "Decode line), and every GPU's observed/unobserved state over all samples")
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     cm = ap.add_argument_group("--chunk-model")
@@ -982,6 +1021,14 @@ def main():
     pr.add_argument("--output-tokens", type=int)
     pr.add_argument("--concurrency", type=int)
     a = ap.parse_args()
+    if a.activity_window:
+        if not a.samples or not a.out_json:
+            ap.error("--activity-window needs --samples and --out-json")
+        res = activity_windows(load_samples(a.samples), [split_spec(x, "--activity-window") for x in a.activity_window],
+                               a.samples_margin)
+        json.dump(res, open(a.out_json, "w"), indent=1)
+        print("\n".join(activity_window_lines(res)))
+        return
     if a.gap_split:
         res = gap_split([split_spec(x, "--gap-split") for x in a.gap_split])
         if a.out_json:
