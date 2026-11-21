@@ -33,7 +33,8 @@ consecutive Decode lines at the rank's full batch with no prefill between them (
 of decode rounds; --decode-log-interval converts it to a per-round time).
 
 With --benchmark-json (amd-tracking run_evalscope_matrix.py output) the whole server log is
-cut into one slice per phase first, from the phases' recorded start and finish times.
+cut into one slice per phase first, from the phases' recorded start and finish times; a phase with
+one result per concurrency (a matrix ladder) is cut per point and labelled PHASE-cC.
 
 --predict models a closed-loop benchmark of R requests of L prompt and O output tokens at
 concurrency C (R/C waves) from the fixed-batch measurements, and swaps measured terms between
@@ -74,6 +75,11 @@ import argparse, collections, csv, datetime as dt, hashlib, json, os, statistics
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_log import parse_lines, parse_ts  # noqa: E402
+
+
+def fmt(value, spec):
+    """value formatted with spec, '-' when it is None (a prefill-only run has no decode rate)."""
+    return "-" if value is None else format(value, spec)
 
 
 def sha256(p):
@@ -257,7 +263,16 @@ def phase_windows(benchmark_json):
     if missing:
         raise SystemExit(f"{benchmark_json}: phases {missing} have no started_at/finished_at "
                          "(recorded by amd-tracking's run_evalscope_matrix.py)")
-    return [(r["phase"], r["output_dir"], parse_iso(r["started_at"]), parse_iso(r["finished_at"]))
+    # A phase of a matrix ladder holds one result per concurrency: name each window PHASE-cC then, so the
+    # slices of one phase do not overwrite each other (a phase with one result keeps the name PHASE).
+    count = collections.Counter(r["phase"] for r in bj["results"])
+    label = lambda r: (f"{r['phase']}-c{r['concurrency']}" if count[r["phase"]] > 1 and "concurrency" in r
+                       else r["phase"])
+    labels = [label(r) for r in bj["results"]]
+    dup = [k for k, n in collections.Counter(labels).items() if n > 1]
+    if dup:
+        raise SystemExit(f"{benchmark_json}: results {dup} share a phase and concurrency")
+    return [(label(r), r["output_dir"], parse_iso(r["started_at"]), parse_iso(r["finished_at"]))
             for r in bj["results"]]
 
 
@@ -616,8 +631,8 @@ def main():
         print("==", r["label"], "span %.2f s" % r["server_span_s"], json.dumps(r.get("reconciliation"), default=str))
         for k, x in r["ranks"].items():
             print(f" rank{k}: req={x['requests_by_prefill_tokens']} chunks={x['prefill_chunks']} "
-                  f"prefill={x['prefill_time_s']:.2f}s ({x['prefill_tok_per_s_while_prefilling']:.0f} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms) "
-                  f"decode={x['decode_time_s']:.2f}s ({x['decode_tok_per_s_while_decoding']:.1f} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
+                  f"prefill={x['prefill_time_s']:.2f}s ({fmt(x['prefill_tok_per_s_while_prefilling'], '.0f')} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms) "
+                  f"decode={x['decode_time_s']:.2f}s ({fmt(x['decode_tok_per_s_while_decoding'], '.1f')} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
                   f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
