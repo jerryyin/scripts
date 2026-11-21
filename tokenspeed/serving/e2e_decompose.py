@@ -59,6 +59,23 @@ Error: per prefill->decode boundary at most |actual chunk - c_med| (chunk times
 are tight, see chunk_time stats); the tail estimate is bounded by
 decode_log_interval rounds. Mixed batches (if any) are counted as prefill time.
 
+--chunk-model what-ifs prefill chunk sizes and placements from a two-parameter chunk-time line
+t(x) = a + b x (x tokens in the chunk). --chunk-fit NAME=JSON[,JSON...] fits the line through the medians,
+per chunk size, of the busiest rank's per-size median chunk time over this tool's measured runs (labels
+measured or measured-N), least squares when more than two sizes (runs of one size give no line but
+can still be a DECODE source); --chunk-line NAME=A_MS:B_US states a line
+instead (an assumption, e.g. a bound). --chunk-scenario NAME=LINE:CHUNK:GROUPS[:DECODE] puts C prompts of
+--prompt-tokens L round-robin on GROUPS independent prefill groups (1 = one TP group; 4 = four DP ranks),
+each group packing its prompts first come first served into CHUNK-token chunks (a prompt's tail shares a
+chunk with the next prompt's head, as TokenSpeed's chunked prefill does). Per --concurrency C it reports
+  prefill_end_s = chunks of the busiest group x t(CHUNK) (the last partial chunk at t(remainder));
+  ttft_own_mean_s = mean over prompts of the end of the chunk holding the prompt's last token;
+and, with DECODE (a --chunk-fit NAME whose runs give, per concurrency, the busiest rank's full-batch
+Decode-line gap / --decode-log-interval and its line-mean acceptance),
+  decode_s = (--output-tokens - 1) / acceptance x step;  tok_per_s = C x O / (prefill_end_s + decode_s),
+the throughput of one wave whose first tokens wait for the whole wave's prefill. Ratios are printed
+against the first scenario.
+
 --gap-split A=BENCHMARK_JSON --gap-split B=BENCHMARK_JSON (two amd-tracking matrix benchmark.json files
 of the same workload) splits A's extra mean end-to-end latency per request over B, per concurrency, into
   ttft_part_ms   = TTFT_A - TTFT_B                       (EvalScope "Avg TTFT (ms)")
@@ -525,6 +542,130 @@ def gap_split_markdown(res):
     return "\n".join(lines) + "\n"
 
 
+def measured_runs(paths):
+    """this tool's JSON runs of the measured phases (label measured, measured-N or measured-N-cC)."""
+    out = []
+    for path in paths:
+        out += [r for r in json.load(open(path)) if str(r.get("label", "")).startswith("measured")]
+    if not out:
+        raise SystemExit(f"{paths}: no measured runs")
+    return out
+
+
+def run_concurrency(r):
+    """C from a PHASE-cC label, else None."""
+    head, sep, c = str(r.get("label", "")).rpartition("-c")
+    return int(c) if sep and c.isdigit() else None
+
+
+def busiest_rank(r):
+    return max(r["ranks"].values(), key=lambda x: x["prefill_time_s"])
+
+
+def fit_chunk_line(runs):
+    """(a_s, b_s_per_token, points {size: median s}) of t = a + b x over the runs' busiest ranks."""
+    bysize = collections.defaultdict(list)
+    for r in runs:
+        for k, v in busiest_rank(r)["chunk_time_by_size_median_s"].items():
+            bysize[int(k)].append(v)
+    pts = {k: statistics.median(v) for k, v in sorted(bysize.items())}
+    if len(pts) < 2:
+        return None, None, pts  # one chunk size: no line (the runs can still give decode steps)
+    xs, ys = list(pts), list(pts.values())
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
+    return my - b * mx, b, pts
+
+
+def decode_steps(runs, interval):
+    """{C: (step_s, acceptance)}: medians over the runs at C of the busiest rank's full-batch line gap / interval
+    and line-mean acceptance."""
+    by = collections.defaultdict(list)
+    for r in runs:
+        c, x = run_concurrency(r), busiest_rank(r)
+        if c is not None and x["full_batch_line_gap_s"]["median"] and x["full_batch_accept_len_line_mean"]:
+            by[c].append((x["full_batch_line_gap_s"]["median"] / interval, x["full_batch_accept_len_line_mean"]))
+    return {c: (statistics.median(v[0] for v in vals), statistics.median(v[1] for v in vals)) for c, vals in by.items()}
+
+
+def chunk_wave(a, b, chunk, groups, c, tokens):
+    """(prefill_end_s, ttft_own_mean_s) of C prompts of TOKENS spread round-robin over GROUPS groups."""
+    t = lambda x: a + b * x  # noqa: E731
+    ends, own = [], []
+    for g in range(groups):
+        n = len(range(g, c, groups))
+        if not n:
+            continue
+        total = n * tokens
+        full, rem = divmod(total, chunk)
+        ends.append(full * t(chunk) + (t(rem) if rem else 0.0))
+        for i in range(1, n + 1):
+            k = -(-i * tokens // chunk)  # 1-based index of the chunk holding the prompt's last token
+            own.append(ends[-1] if k > full else k * t(chunk))
+    return max(ends), statistics.mean(own)
+
+
+def chunk_model(fits, lines, scenarios, concurrencies, tokens, output_tokens, interval):
+    models, steps = {}, {}
+    for name, paths in fits:
+        runs = measured_runs(paths.split(","))
+        a, b, pts = fit_chunk_line(runs)
+        if a is not None:
+            models[name] = {"a_ms": a * 1e3, "b_us_per_token": b * 1e6, "source": "fit",
+                            "points_ms": {k: v * 1e3 for k, v in pts.items()}}
+        else:  # one chunk size: reported, usable as DECODE only
+            models.setdefault("_points", {})[name] = {k: v * 1e3 for k, v in pts.items()}
+        if interval:
+            steps[name] = decode_steps(runs, interval)
+    for name, spec in lines:
+        am, sep, bu = spec.partition(":")
+        if not sep:
+            raise SystemExit(f"--chunk-line {name}={spec!r}: expected NAME=A_MS:B_US")
+        models[name] = {"a_ms": float(am), "b_us_per_token": float(bu), "source": "stated"}
+    rows = []
+    for name, spec in scenarios:
+        parts = spec.split(":")
+        if len(parts) not in (3, 4) or parts[0] not in models or parts[0] == "_points":
+            raise SystemExit(f"--chunk-scenario {name}={spec!r}: expected NAME=LINE:CHUNK:GROUPS[:DECODE], LINE one of {sorted(models)}")
+        m = models[parts[0]]
+        chunk, groups = int(parts[1]), int(parts[2])
+        dec = parts[3] if len(parts) == 4 else None
+        if dec is not None and dec not in steps:
+            raise SystemExit(f"--chunk-scenario {name}: DECODE {dec!r} needs a --chunk-fit of that name and --decode-log-interval")
+        for c in concurrencies:
+            end, own = chunk_wave(m["a_ms"] / 1e3, m["b_us_per_token"] / 1e6, chunk, groups, c, tokens)
+            row = {"scenario": name, "line": parts[0], "chunk": chunk, "groups": groups, "concurrency": c,
+                   "prefill_end_s": end, "ttft_own_mean_s": own}
+            if dec is not None and c in steps[dec]:
+                step, acc = steps[dec][c]
+                row.update(decode_step_ms=step * 1e3, acceptance=acc, decode_s=(output_tokens - 1) / acc * step)
+                row["tok_per_s"] = c * output_tokens / (end + row["decode_s"])
+            rows.append(row)
+    base = {r["concurrency"]: r for r in rows if r["scenario"] == scenarios[0][0]}
+    for r in rows:
+        b0 = base.get(r["concurrency"])
+        if b0 and r.get("tok_per_s") and b0.get("tok_per_s"):
+            r["tok_per_s_ratio_to_first"] = r["tok_per_s"] / b0["tok_per_s"]
+    return {"models": models, "rows": rows, "prompt_tokens": tokens, "output_tokens": output_tokens}
+
+
+def chunk_model_markdown(res):
+    out = ["| line | a ms | b us/token | source | points ms |", "|---|---|---|---|---|"]
+    for k, m in res["models"].items():
+        if k == "_points":
+            out += [f"| {n} | - | - | one chunk size | " + " ".join(f"{s}:{v:.1f}" for s, v in p.items()) + " |" for n, p in m.items()]
+            continue
+        pts = " ".join(f"{s}:{v:.1f}" for s, v in m.get("points_ms", {}).items()) or "-"
+        out.append(f"| {k} | {m['a_ms']:.2f} | {m['b_us_per_token']:.3f} | {m['source']} | {pts} |")
+    out += ["", "| scenario | line | chunk | groups | C | prefill end s | TTFT own-end mean s | step ms | accept | decode s | wave tok/s | ratio to first |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in res["rows"]:
+        out.append(f"| {r['scenario']} | {r['line']} | {r['chunk']} | {r['groups']} | {r['concurrency']} | {r['prefill_end_s']:.3f} | "
+                   f"{r['ttft_own_mean_s']:.3f} | {fmt(r.get('decode_step_ms'), '.2f')} | {fmt(r.get('acceptance'), '.2f')} | "
+                   f"{fmt(r.get('decode_s'), '.3f')} | {fmt(r.get('tok_per_s'), '.1f')} | {fmt(r.get('tok_per_s_ratio_to_first'), '.2f')} |")
+    return "\n".join(out) + "\n"
+
+
 def split_spec(spec, flag):
     name, sep, value = spec.partition("=")
     if not sep or not name or not value:
@@ -569,6 +710,12 @@ def main():
     ap.add_argument("--out-json")
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
+    cm = ap.add_argument_group("--chunk-model")
+    cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit and chunk-size/placement what-ifs")
+    cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s)")
+    cm.add_argument("--chunk-line", action="append", default=[], metavar="NAME=A_MS:B_US", help="a stated line")
+    cm.add_argument("--chunk-scenario", action="append", default=[], metavar="NAME=LINE:CHUNK:GROUPS[:DECODE]")
+    cm.add_argument("--concurrency-list", help="comma-separated concurrencies for --chunk-model")
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
     pr.add_argument("--runs", action="append", default=[], help="CFG=JSON written by this tool (repeatable)")
@@ -584,6 +731,18 @@ def main():
         if a.out_json:
             json.dump(res, open(a.out_json, "w"), indent=1)
         print(gap_split_markdown(res), end="")
+        return
+    if a.chunk_model:
+        if not a.chunk_scenario or not a.prompt_tokens or not a.output_tokens or not a.concurrency_list:
+            ap.error("--chunk-model needs --chunk-scenario, --prompt-tokens, --output-tokens and --concurrency-list")
+        res = chunk_model([split_spec(x, "--chunk-fit") for x in a.chunk_fit],
+                          [split_spec(x, "--chunk-line") for x in a.chunk_line],
+                          [split_spec(x, "--chunk-scenario") for x in a.chunk_scenario],
+                          [int(c) for c in a.concurrency_list.split(",")], a.prompt_tokens, a.output_tokens,
+                          a.decode_log_interval)
+        if a.out_json:
+            json.dump(res, open(a.out_json, "w"), indent=1)
+        print(chunk_model_markdown(res), end="")
         return
     if a.predict:
         missing = [f for f in ("runs", "prefill", "requests", "prompt_tokens", "output_tokens", "concurrency",
