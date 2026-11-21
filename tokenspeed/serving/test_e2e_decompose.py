@@ -65,6 +65,58 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
             raise AssertionError("phases without times must be refused")
 
 
+def test_prefill_to_decode_gap_reports_stall_lines() -> None:
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = []
+    for r, stall in ((0, 0.0), (1, 19.0)):  # rank 1: 19 s between its last chunk and its first Decode line
+        for i in range(4):
+            lines.append(batch(T + 0.05 * i, "Prefill", r, new_seq=1, new_token=1000, running_req=1))
+        for i in range(5):
+            lines.append(batch(T + 0.2 + stall + 0.5 * i, "Decode", r, running_req=1, gen=80.0))
+    lines += [finish(T + 22.0, "a", 4000, 0, out=11), finish(T + 22.1, "b", 4000, 0, out=11)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(sorted(lines, key=lambda s: s.split()[1])))
+        r = e2e.decompose(str(log), 4000)
+        g0, g1 = r["ranks"]["0"]["prefill_to_decode_gap_s"], r["ranks"]["1"]["prefill_to_decode_gap_s"]
+        assert g0["n"] == 1 and g0["stalls"] == [] and abs(g0["max"] - 0.05) < 1e-6
+        assert abs(g1["max"] - 19.05) < 1e-6 and len(g1["stalls"]) == 1
+        assert g1["max_prefill_line_utc"] == ts(T + 0.15) and g1["stalls"][0]["decode_line_utc"] == ts(T + 19.2)
+
+
+
+def test_prefill_to_decode_gap_per_ladder_point_slice() -> None:
+    """--benchmark-json slices a matrix ladder per (phase, concurrency); each slice carries its own record."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = []
+    for t, stall in ((T, 0.0), (T + 100.0, 19.0)):  # c1 at T without a stall, c2 at T + 100 s with a 19 s stall
+        for i in range(4):
+            lines.append(batch(t + 0.05 * i, "Prefill", 0, new_seq=1, new_token=1000, running_req=1))
+        for i in range(5):
+            lines.append(batch(t + 0.2 + stall + 0.5 * i, "Decode", 0, running_req=1, gen=80.0))
+        lines.append(finish(t + stall + 3.0, f"r{t}", 4000, 0, out=11))
+    with tempfile.TemporaryDirectory() as d:
+        log, bj, out = Path(d) / "server.log", Path(d) / "benchmark.json", Path(d) / "out.json"
+        log.write_text("".join(lines))
+        bj.write_text(json.dumps({"results": [
+            {"phase": "measured-1", "concurrency": c, "output_dir": str(Path(d) / f"c{c}"),
+             "started_at": ts(t - 1), "finished_at": ts(t + 50)} for c, t in ((1, T), (2, T + 100.0))]}))
+        argv = sys.argv
+        sys.argv = ["e2e_decompose.py", "--benchmark-json", str(bj), "--server-log", str(log),
+                    "--slices-dir", str(Path(d) / "slices"), "--out-json", str(out)]
+        try:
+            e2e.main()
+        finally:
+            sys.argv = argv
+        runs = {r["label"]: r["ranks"]["0"]["prefill_to_decode_gap_s"] for r in json.loads(out.read_text())}
+        assert sorted(runs) == ["measured-1-c1", "measured-1-c2"]
+        assert runs["measured-1-c1"]["n"] == 1 and runs["measured-1-c1"]["stalls"] == []
+        c2 = runs["measured-1-c2"]
+        assert c2["n"] == 1 and abs(c2["max"] - 19.05) < 1e-6
+        assert [x["decode_line_utc"] for x in c2["stalls"]] == [ts(T + 100.0 + 19.2)]
+
 def test_fmt_none() -> None:
     e2e = load("e2e_decompose.py")
     assert (e2e.fmt(None, ".1f"), e2e.fmt(2.25, ".1f")) == ("-", "2.2")

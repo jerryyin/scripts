@@ -32,6 +32,16 @@ i.e. waiting while the rank decodes) and the gap between
 consecutive Decode lines at the rank's full batch with no prefill between them (one log interval
 of decode rounds; --decode-log-interval converts it to a per-round time).
 
+prefill_to_decode_gap_s (per rank): every Prefill/Mix line followed by a Decode line of the same rank is
+a boundary between a prefill and the decode rounds after it (the first Decode line can come up to one
+--decode-log-interval of rounds after the chunk). Per rank it gives n (boundaries), median and max
+gap (s), the max gap's two line timestamps (max_prefill_line_utc, max_decode_line_utc) and stalls:
+every boundary whose gap exceeds max(2 x (c_med(chunk) + Decode-line interval median), 1 s), with its
+gap_s, prefill_line_utc and decode_line_utc. A long one is a request stalled between its last prefill
+chunk and its first decode round (e.g. the first decode after a 50,000-token prefill). With
+--benchmark-json each (phase, concurrency) slice gets its own record; a boundary whose two lines fall
+in different slices is in neither. The per-rank stdout line prints it as p2d=n/median/max s, stalls N.
+
 With --benchmark-json (amd-tracking run_evalscope_matrix.py output) the whole server log is
 cut into one slice per phase first, from the phases' recorded start and finish times; a phase with
 one result per concurrency (a matrix ladder) is cut per point and labelled PHASE-cC.
@@ -114,6 +124,21 @@ def pct(xs, q):
     return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
 
 
+def prefill_to_decode_gaps(p2d, cmed, dmed):
+    """Gaps between a rank's last Prefill/Mix line and its next Decode line: count, median, the
+    largest with both line timestamps, and the ones longer than expected (a chunk + one Decode-line
+    interval, times 2, and at least 1 s) as stalls."""
+    if not p2d:
+        return {"n": 0, "median": None, "max": None, "max_prefill_line_utc": None,
+                "max_decode_line_utc": None, "stalls": []}
+    iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    g, a, b = max(p2d, key=lambda x: x[0])
+    stalls = [{"gap_s": x, "prefill_line_utc": iso(pa["ts"]), "decode_line_utc": iso(pb["ts"])}
+              for x, pa, pb in p2d if x > max(2 * (cmed(pa.get("new_token", 0)) + (dmed or 0)), 1.0)]
+    return {"n": len(p2d), "median": statistics.median(x for x, _, _ in p2d), "max": g,
+            "max_prefill_line_utc": iso(a["ts"]), "max_decode_line_utc": iso(b["ts"]), "stalls": stalls}
+
+
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
     ev = parse_lines(open(log, errors="replace"))
     fin = [e for e in ev if e["kind"] == "Finish"]
@@ -173,6 +198,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
         dd = [g for a, b, g in gaps if a["kind"] == "Decode" and b["kind"] == "Decode"]
         dmed = statistics.median(dd) if dd else None
         tp = td = gap_idle = 0.0; nb = 0; stall_n = 0; stall_s = 0.0
+        p2d = []  # (gap, last Prefill/Mix line, first Decode line) per prefill->decode boundary
         for a, b, g in gaps:
             if a["kind"] in ("Prefill", "Mix"):
                 if b["kind"] in ("Prefill", "Mix"):
@@ -182,6 +208,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
                         stall_n += 1; stall_s += g - c
                 else:
                     c = min(g, cmed(a.get("new_token", 0))); tp += c; td += g - c; nb += 1
+                    p2d.append((g, a, b))
             elif b["kind"] == "Decode" or dmed is None:
                 td += g
             else:  # Decode -> Prefill/Mix: at most one log interval of decode, rest waiting for arrivals
@@ -250,6 +277,9 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
             "decode_line_interval_median_s": dmed, "decode_lines_without_reference": unref,
             "estimated_rank_end_uncapped_s": rank_end_uncapped - t0, "tail_after_last_line_s": tail,
             "prefill_stalls": {"n_gaps_gt_2x_median": stall_n, "excess_s": stall_s},
+            # a request stalled between its last prefill chunk and its first decode round shows as a long
+            # Prefill/Mix -> Decode gap: at most one chunk plus one Decode-line interval is expected
+            "prefill_to_decode_gap_s": prefill_to_decode_gaps(p2d, cmed, dmed),
             "fractions": {"prefill": tp / span, "decode": td / span, "idle": idle / span}}
     R = res["ranks"].values()
     res["sum"] = {"prefill_tokens": sum(x["prefill_tokens"] for x in R),
@@ -789,10 +819,12 @@ def main():
     for r in runs:
         print("==", r["label"], "span %.2f s" % r["server_span_s"], json.dumps(r.get("reconciliation"), default=str))
         for k, x in r["ranks"].items():
+            p2d = x["prefill_to_decode_gap_s"]
             print(f" rank{k}: req={x['requests_by_prefill_tokens']} chunks={x['prefill_chunks']} "
                   f"prefill={x['prefill_time_s']:.2f}s ({fmt(x['prefill_tok_per_s_while_prefilling'], '.0f')} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms) "
                   f"decode={x['decode_time_s']:.2f}s ({fmt(x['decode_tok_per_s_while_decoding'], '.1f')} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
-                  f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
+                  f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s "
+                  f"p2d={p2d['n']}/{fmt(p2d['median'], '.2f')}/{fmt(p2d['max'], '.2f')}s stalls {len(p2d['stalls'])} tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
 
