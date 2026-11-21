@@ -289,6 +289,82 @@ def attach_samples(runs, samples, window_s=2.0, margin_s=1.0):
     return runs
 
 
+def activity_windows(samples, specs, margin_s=0.0):
+    """--activity-window LABEL=START_UTC,END_UTC: the stall gpu_activity of any stated window (e.g. a stall
+    the log shows as a gap between a prefill-only request's last Prefill line and its finish line, which has
+    no Decode line and so no prefill_to_decode_gap_s record): per window, window_activity and window_state
+    from START + margin to END - margin and window_timeline over [START, END]; plus 'observed', the state of
+    every GPU over all samples, so a GPU no own KFD process was seen on is reported 'unobserved'."""
+    own = own_kfd_pids(samples)
+    out = {"own_kfd_pids": sorted(own), "windows": []}
+    if samples:
+        whole = window_activity(samples, samples[0]["t"], samples[-1]["t"], own)
+        out["observed"] = {**whole, **window_state(whole, busy_share=0.0)}
+    for label, spec in specs:
+        a, b = (parse_iso(x.strip()) for x in spec.split(","))
+        act = window_activity(samples, a + margin_s, max(a + margin_s, b - margin_s), own)
+        out["windows"].append({"label": label, "start_utc": spec.split(",")[0].strip(),
+                               "end_utc": spec.split(",")[1].strip(), **act, **window_state(act),
+                               "timeline": window_timeline(samples, a, b, own)})
+    return out
+
+
+def load_cache_listing(paths):
+    """Cache listings written by `find DIR -type f -printf '%T@ %s %p\\n'` (mtime epoch, bytes, path), merged."""
+    rows = {}
+    for path in paths:
+        with open(path) as f:
+            for line in f:
+                parts = line.rstrip("\n").split(" ", 2)
+                if len(parts) == 3:
+                    rows[parts[2]] = (float(parts[0]), int(parts[1]), parts[2])
+    return sorted(rows.values())
+
+
+def cache_writes(listing, t0, t1):
+    """Files of a Triton-style cache (DIR/HASH/NAME.EXT) modified in [t0, t1], grouped per (HASH, kernel NAME):
+    first and last mtime, their span (the compile from the .source write to the binary), the .source bytes and
+    the files written (__grp__ index files left out). A compile inside a stall names the kernel the stall waits on."""
+    groups = {}
+    for t, size, path in listing:
+        if not t0 <= t <= t1:
+            continue
+        parts = path.split("/")
+        name = parts[-1]
+        if name.startswith("__grp__") or len(parts) < 2:
+            continue
+        g = groups.setdefault((parts[-2], name.split(".")[0]), {"hash_dir": parts[-2], "kernel": name.split(".")[0],
+                                                                 "first": t, "last": t, "source_bytes": None, "files": []})
+        g["first"], g["last"] = min(g["first"], t), max(g["last"], t)
+        g["files"].append(name)
+        if name.endswith(".source"):
+            g["source_bytes"] = size
+    out = []
+    for g in sorted(groups.values(), key=lambda x: x["first"]):
+        out.append({**g, "span_s": g["last"] - g["first"],
+                    "first_utc": dt.datetime.fromtimestamp(g["first"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    "last_utc": dt.datetime.fromtimestamp(g["last"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")})
+    return out
+
+
+def activity_window_lines(res):
+    """One stdout line per --activity-window and one for 'observed'."""
+    def cells(v):
+        return " ".join(f"g{g}:busy={r['busy_share']:.2f}/cu={r.get('cu_occupancy_mean', float('nan')):.1f}"
+                        f"/sdma={(r.get('sdma_share') or 0):.3f}" for g, r in v.get("gpus", {}).items())
+    out = []
+    if "observed" in res:
+        o = res["observed"]
+        out.append(f"observed n={o['n_samples']} " + " ".join(f"g{g}:{v}" for g, v in o["per_gpu"].items()))
+    for w in res["windows"]:
+        out.append(f"{w['label']:<16} {w['duration_s']:6.1f}s n={w['n_samples']:<3} {w['state']:<9} "
+                   f"idle={','.join(w['idle_gpus']) or '-'} {cells(w)}")
+        for c in w.get("cache_writes", []):
+            out.append(f"   cache {c['hash_dir'][:8]} {c['kernel']:<34} {c['first_utc'][11:23]} -> {c['last_utc'][11:23]} "
+                       f"({c['span_s']:.1f} s) source {c['source_bytes'] if c['source_bytes'] is not None else '-'} B")
+    return out
+
+
 def stall_activity_lines(runs):
     """One stdout line per stall and window: state and per GPU busy share / own cu_occupancy mean / SDMA share."""
     out = []
@@ -963,6 +1039,13 @@ def main():
     ap.add_argument("--samples-window", type=float, default=2.0, help="seconds of the before/after windows (default 2)")
     ap.add_argument("--samples-margin", type=float, default=1.0,
                     help="seconds trimmed from each end of the stall window (default 1)")
+    ap.add_argument("--activity-window", action="append", default=[], metavar="LABEL=START_UTC,END_UTC",
+                    help="with --samples and --out-json, instead of a decomposition: GPU activity, state and "
+                    "timeline of each stated window (trimmed by --samples-margin at both ends; e.g. a stall with no "
+                    "Decode line), and every GPU's observed/unobserved state over all samples")
+    ap.add_argument("--cache-listing", action="append", default=[], metavar="LISTING",
+                    help="with --activity-window: a Triton cache listing (find DIR -type f -printf '%%T@ %%s %%p\\n', "
+                    "repeatable); each window gets cache_writes, the files modified in it grouped per kernel")
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     cm = ap.add_argument_group("--chunk-model")
@@ -982,6 +1065,18 @@ def main():
     pr.add_argument("--output-tokens", type=int)
     pr.add_argument("--concurrency", type=int)
     a = ap.parse_args()
+    if a.activity_window:
+        if not a.samples or not a.out_json:
+            ap.error("--activity-window needs --samples and --out-json")
+        res = activity_windows(load_samples(a.samples), [split_spec(x, "--activity-window") for x in a.activity_window],
+                               a.samples_margin)
+        if a.cache_listing:
+            listing = load_cache_listing(a.cache_listing)
+            for w in res["windows"]:
+                w["cache_writes"] = cache_writes(listing, parse_iso(w["start_utc"]), parse_iso(w["end_utc"]))
+        json.dump(res, open(a.out_json, "w"), indent=1)
+        print("\n".join(activity_window_lines(res)))
+        return
     if a.gap_split:
         res = gap_split([split_spec(x, "--gap-split") for x in a.gap_split])
         if a.out_json:
