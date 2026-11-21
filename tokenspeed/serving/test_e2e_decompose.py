@@ -435,3 +435,50 @@ def test_cache_writes_group_compiles_inside_window() -> None:
     assert [(x["hash_dir"], x["kernel"]) for x in w] == [("BBB", "MegaMoEStage1"), ("CCC", "MegaMoECombine")]
     assert abs(w[0]["span_s"] - 27.0) < 1e-6 and w[0]["source_bytes"] == 48_000_000 and len(w[0]["files"]) == 3
     assert w[1]["span_s"] == 0 and w[1]["source_bytes"] == 182_000
+
+
+def test_point_table_busiest_rank_upper_median_round_and_p2d_max() -> None:
+    e2e = load("e2e_decompose.py")
+
+    def rank(tp, td, chunks, cmed, gap, p2d):
+        return {"prefill_time_s": tp, "decode_time_s": td, "prefill_chunks": chunks,
+                "chunk_time_s": {"median": cmed}, "full_batch_line_gap_s": {"median": gap},
+                "prefill_to_decode_gap_s": {"max": p2d}}
+
+    runs = [{"label": "measured-1-c4", "ranks": {
+        "0": rank(1.0, 2.0, 13, 0.1, 0.8, 0.4), "1": rank(1.5, 2.0, 14, 0.11, 0.6, 2.5),
+        "2": rank(1.0, 1.0, 12, 0.1, None, None), "3": rank(1.0, 1.0, 12, 0.1, 0.7, 0.3)}},
+        {"label": "load", "ranks": {}}]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "runs.json"
+        p.write_text(json.dumps(runs))
+        rows = e2e.point_table([str(p)], 40)
+    assert len(rows) == 1  # a run without ranks is skipped
+    x = rows[0]
+    assert (x["busiest_rank"], x["prefill_chunks"]) == ("1", 14)
+    assert abs(x["chunks_x_median_s"] - 14 * 0.11) < 1e-12
+    # ranks with a gap: 0.6, 0.7, 0.8 s / 40 -> upper median (element 3 // 2) = 0.7 / 40
+    assert set(x["decode_round_s_by_rank"]) == {"0", "1", "3"}
+    assert abs(x["decode_round_s_upper_median"] - 0.7 / 40) < 1e-12
+    assert (x["prefill_to_decode_gap_max_s"], x["prefill_to_decode_gap_max_rank"]) == (2.5, "1")
+    text = "\n".join(e2e.point_table_lines(rows))
+    assert "| 1 | 14 x 110.0 = 1.54 | 17.5 (0:20.0, 1:15.0, 3:17.5) | 2.50 (1) |" in text
+
+
+def test_line_gaps_per_rank_with_log_timestamps() -> None:
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = [batch(T, "Prefill", 0, new_token=4096), batch(T + 0.1, "Prefill", 1, new_token=4096),
+             batch(T + 0.2, "Prefill", 0, new_token=4096),  # rank 0: 0.2 s, below threshold
+             finish(T + 1.0, "a", 4096, 0),  # not a batch line
+             batch(T + 1.6, "Decode", 1, running_req=1),  # rank 1: 1.5 s after its Prefill line
+             batch(T + 1.7, "Decode", 0, running_req=1)]  # rank 0: 1.5 s
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "measured-1-c2.log"
+        log.write_text("".join(lines))
+        gaps = e2e.line_gaps([str(log)], 1.0)
+        assert e2e.line_gaps([str(log)], 2.0) == []
+    assert [(g["rank"], g["from_kind"], g["to_kind"]) for g in gaps] == [(1, "Prefill", "Decode"), (0, "Prefill", "Decode")]
+    assert gaps[0]["from_utc"] == ts(T + 0.1) and gaps[0]["to_utc"] == ts(T + 1.6)
+    assert abs(gaps[1]["gap_s"] - 1.5) < 1e-6
+    assert e2e.line_gap_lines(gaps)[0] == f"measured-1-c2.log rank 1 Prefill -> Decode {ts(T + 0.1)} -> {ts(T + 1.6)} 1.50s"
