@@ -115,7 +115,8 @@ def stage_window(path, selected=False):
 
     selected=True narrows it to the harness's selected decode forwards (the steps its
     decode_gpu_mean_ms is taken over): from the earliest first to the latest last selected forward's
-    wall_unix over ranks (stage.json selected_decode_indices_by_rank; forwards-rank<r>.jsonl in the
+    wall_unix over ranks (stage.json selected_decode_indices_by_rank, or selected_decode_indices as
+    rank 0 when attention DP is 1; forwards-rank<r>.jsonl in the
     attempt directory two levels above stages/<label>/), plus one mean step period at the end because
     a step's timing record is harvested after its submit. Without this the window also holds the
     stage's tail, where the last requests finish at a smaller batch and can outnumber the full-batch
@@ -126,7 +127,11 @@ def stage_window(path, selected=False):
         return lo, hi
     attempt = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path))))
     firsts, lasts, periods = [], [], []
-    for rank, idx in (st.get("selected_decode_indices_by_rank") or {}).items():
+    by_rank = st.get("selected_decode_indices_by_rank")
+    if not by_rank and st.get("selected_decode_indices"):
+        # attention DP 1 (TP4): the harness records one index list, taken from rank 0's forwards
+        by_rank = {"0": st["selected_decode_indices"]}
+    for rank, idx in (by_rank or {}).items():
         if not idx:
             continue
         want, walls = {min(idx), max(idx)}, {}

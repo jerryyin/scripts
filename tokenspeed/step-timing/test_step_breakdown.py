@@ -119,6 +119,11 @@ def test_stage_window_selected_forwards() -> None:
         # rank 0: 5..7 -> walls 120..122; rank 1: 8..10 -> 123.5, 124.5, 120.5 (wall order need not follow
         # index; first/last are the selected first and last forwards); period = max over ranks
         assert lo == 120.0 and abs(hi - (122.0 + 1.0)) < 1e-9, (lo, hi)
+        # attention DP 1: one index list (selected_decode_indices) read against rank 0's forwards
+        st.pop("selected_decode_indices_by_rank"); st["selected_decode_indices"] = [5, 6, 7]
+        (stage / "stage.json").write_text(json.dumps(st))
+        lo, hi = ast.stage_window(str(stage / "stage.json"), selected=True)
+        assert lo == 120.0 and abs(hi - 123.0) < 1e-9, (lo, hi)
 
 
 def test_project_whole_step() -> None:
