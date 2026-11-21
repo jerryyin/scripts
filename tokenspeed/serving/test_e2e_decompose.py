@@ -367,6 +367,9 @@ def test_samples_attach_gpu_activity_to_stall() -> None:
         assert stall["n_samples"] == len([s for s in samples[:10] + samples[11:]
                                           if T + 0.15 + 1.0 <= s["t"] <= T + 19.2 - 1.0 - 0.5])
         assert ga["before_prefill"]["n_samples"] == 4  # T - 1.85 .. T + 0.15
+        tl = ga["stall_timeline"]
+        assert [x["gpus"]["1"] for x in tl] == [[True, 60], [False, 0], [True, 60]]
+        assert tl[1]["utc"] == ts(T + 0.5) and tl[2]["utc"] == ts(T + 19.5) and tl[1]["gpus"]["0"] == [True, 32]
 
 
 def test_samples_unobserved_gpu_is_not_called_idle() -> None:

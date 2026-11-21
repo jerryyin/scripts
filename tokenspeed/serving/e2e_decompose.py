@@ -49,7 +49,8 @@ and the measurement window's) adds gpu_activity to every stall record: for three
 (--samples-window s from the first Decode line), per GPU the device busy (mean, max, share of samples > 0)
 and, summed over the server's own KFD processes there (KFD VRAM within 5 % of an own process's DRM VRAM),
 cu_occupancy (mean, max, share > 0), queues [min, max] and the SDMA time added (sdma_us_delta, sdma_share
-of wall time), with each GPU busy (busy or cu_occupancy > 0 in >= half the samples), idle or unobserved (no
+of wall time), stall_timeline (from before_prefill to after_decode, every sample where a GPU's pair (device
+busy > 0, own cu_occupancy) changes, with all GPUs' pairs), with each GPU busy (busy or cu_occupancy > 0 in >= half the samples), idle or unobserved (no
 own KFD process seen) and the window's state: all-busy, all-idle or mixed with busy_gpus and idle_gpus.
 A stall with one GPU idle and the others busy at a constant cu_occupancy is one rank held up on the host
 while its peers wait in a device-side exchange. One stdout line per stall window is printed.
@@ -231,6 +232,23 @@ def window_activity(samples, t0, t1, own):
     return out
 
 
+def window_timeline(samples, t0, t1, own):
+    """The samples with t0 <= t <= t1 at which any GPU's (device busy > 0, own cu_occupancy) pair changes, with
+    every GPU's pair there: when, inside a stall, each rank went idle or started spinning."""
+    out, prev = [], None
+    for s in samples:
+        if not t0 <= s["t"] <= t1:
+            continue
+        state = {}
+        for g in sorted(s.get("busy", {}), key=int):
+            cu = [row[g].get("cu_occupancy") or 0 for pid, row in s.get("kfd", {}).items() if pid in own and g in row]
+            state[g] = [bool(s["busy"].get(g)), sum(cu) if cu else None]
+        if state != prev:
+            out.append({"utc": s["utc"], "gpus": state})
+            prev = state
+    return out
+
+
 def window_state(act, busy_share=0.5):
     """'busy' / 'idle' per GPU (busy when device busy > 0 or own cu_occupancy > 0 in at least `busy_share` of
     the window's samples; 'unobserved' when no own KFD process was seen on it, e.g. the sampler could not
@@ -267,6 +285,7 @@ def attach_samples(runs, samples, window_s=2.0, margin_s=1.0):
                         "after_decode": window_activity(samples, b, b + window_s, own)}
                 st["gpu_activity"] = {k: {**v, **window_state(v)} for k, v in acts.items()}
                 st["gpu_activity"]["own_kfd_pids"] = sorted(own)
+                st["gpu_activity"]["stall_timeline"] = window_timeline(samples, a - window_s, b + window_s, own)
     return runs
 
 
