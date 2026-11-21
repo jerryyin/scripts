@@ -6,6 +6,9 @@ Run one rank per GPU under torchrun:
   python3 -m torch.distributed.run --standalone --nproc-per-node=4 petit_layer.py \
       --ts-src $TS_SRC --profile dsv41_flash --tokens 1,6,12,24 --mode both --reps 3 --out petit.json
 
+--capacity N sets Petit's per-rank capacity in the plan (plan["gluon_petit_max_tokens_per_rank"], as a
+server with a raised chunk passes it at TokenSpeed 46671ec2 and later) so --tokens may go up to N.
+
 Everything about the layer comes from TokenSpeed's distributed test
 (tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py in --ts-src), imported
 by path, never copied: the profiles (_PROFILES), _TestMoeLayer, _weights, _make_plan, _routing,
@@ -113,14 +116,23 @@ def write_rows_csv(out: str, inputs: list[str]) -> int:
     return len(rows)
 
 
-def check_tokens(tokens: list[int]) -> list[int]:
-    bad = [t for t in tokens if t < 1 or t > PETIT_MAX_TOKENS_PER_RANK]
+def check_tokens(tokens: list[int], capacity: int = PETIT_MAX_TOKENS_PER_RANK) -> list[int]:
+    bad = [t for t in tokens if t < 1 or t > capacity]
     if bad:
         raise ValueError(
-            f"tokens per GPU {bad} outside 1..{PETIT_MAX_TOKENS_PER_RANK}: Petit's per-rank capacity is "
-            "MegaMoeConfig.max_tokens_per_rank=1024 (tokenspeed_kernel/thirdparty/gluon_petit/"
-            "petit_kernel/__init__.py:251)")
+            f"tokens per GPU {bad} outside 1..{capacity}: Petit's per-rank capacity is "
+            f"MegaMoeConfig.max_tokens_per_rank={capacity} (default 1024, tokenspeed_kernel/thirdparty/gluon_petit/"
+            "petit_kernel/__init__.py:251; raise it with --capacity at a TokenSpeed that reads "
+            "plan['gluon_petit_max_tokens_per_rank'])")
     return tokens
+
+
+def apply_capacity(plan: dict, capacity: int) -> dict:
+    """--capacity: the server's per-rank capacity in the MoE plan, as the runtime sets it
+    (python/tokenspeed/runtime/layers/moe/expert.py at TokenSpeed 46671ec2); 1024 leaves the plan as is."""
+    if capacity != PETIT_MAX_TOKENS_PER_RANK:
+        plan["gluon_petit_max_tokens_per_rank"] = capacity
+    return plan
 
 
 def candidate_names(text: str | None, experts: int) -> list[str] | None:
@@ -206,8 +218,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="timed layers' weights: the test's sparse exact-oracle weights, or distinct random "
                          "MXFP4 codes per layer (no reference for the timed inputs)")
     ap.add_argument("--seed", type=int, default=0, help="routing seed (see --routing)")
+    ap.add_argument("--capacity", type=int, default=PETIT_MAX_TOKENS_PER_RANK,
+                    help="Petit's per-rank token capacity: set as plan['gluon_petit_max_tokens_per_rank'] "
+                         "(what the server passes from ServerArgs.gluon_petit_max_tokens_per_rank(), "
+                         "TokenSpeed 46671ec2 and later) when not 1024, and checked against the layer "
+                         "state; --tokens may go up to it (default 1024: the plan is unchanged)")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
+    if a.capacity < 1 or a.capacity % 32:
+        ap.error("--capacity must be a positive multiple of 32 (Petit rounds capacities to 32-row blocks)")
     if not a.ts_src:
         ap.error("--ts-src (or $TS_SRC) is required")
     if a.reps < 3:
@@ -224,7 +243,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         if bad:
             ap.error(f"--candidates {bad}: use GEOMETRY/TILE with {GEOMETRIES} and {tuple(STAGE1_TILES)}")
     try:
-        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens))
+        a.tokens = check_tokens(dist_timing.parse_int_list(a.tokens), a.capacity)
     except ValueError as error:
         ap.error(str(error))
     return a
@@ -399,8 +418,12 @@ def main(argv=None) -> int:
     tol = test_info["tolerance"]
     layer = mod._TestMoeLayer(profile, ws, device)
     mod._weights(layer, profile, rank, ws)
-    plan = mod._make_plan(profile, ws)
+    plan = apply_capacity(mod._make_plan(profile, ws), a.capacity)
     mod.kernel_moe_process_weights(plan, layer)
+    state_capacity = getattr(getattr(layer, "_moe_backend_state", None), "max_tokens_per_rank", None)
+    if a.capacity != PETIT_MAX_TOKENS_PER_RANK and state_capacity != a.capacity:
+        raise SystemExit(f"--capacity {a.capacity}: the Petit layer state holds {state_capacity}; this "
+                         "TokenSpeed does not read plan['gluon_petit_max_tokens_per_rank']")
     cache_dir = os.environ.get("TRITON_CACHE_DIR")
     modes = ("eager", "graph") if a.mode == "both" else (a.mode,)
     results = []
@@ -582,6 +605,7 @@ def main(argv=None) -> int:
                            "tokenspeed_kernel": str(Path(mod.tokenspeed_kernel.__file__).resolve())},
             "runtime": dist_timing.runtime_versions(),
             "args": {k: v for k, v in vars(a).items()},
+            "petit_capacity": state_capacity,
             "world_size": ws,
             "profile": {"name": profile.name, "hidden": profile.hidden, "experts": profile.experts,
                         "top_k": profile.top_k, "experts_per_rank": profile.experts // ws,
