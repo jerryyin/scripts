@@ -47,6 +47,21 @@ def test_check_tokens_cites_capacity() -> None:
         petit_layer.check_tokens([6, 2048])
 
 
+def test_capacity_raises_token_limit_and_sets_plan() -> None:
+    base = ["--ts-src", "/ts", "--out", "o.json", "--profile", "x"]
+    p = petit_layer.parse_args([*base, "--tokens", "1024,2048,3072,4096", "--capacity", "4096"])
+    assert p.tokens == [1024, 2048, 3072, 4096] and p.capacity == 4096
+    assert petit_layer.parse_args([*base, "--tokens", "1024"]).capacity == 1024
+    for bad in (["--tokens", "4097", "--capacity", "4096"], ["--tokens", "2048"],
+                ["--tokens", "1", "--capacity", "1000"], ["--tokens", "1", "--capacity", "0"]):
+        with pytest.raises(SystemExit):
+            petit_layer.parse_args([*base, *bad])
+    with pytest.raises(ValueError, match="max_tokens_per_rank=4096"):
+        petit_layer.check_tokens([4097], 4096)
+    assert petit_layer.apply_capacity({"a": 1}, 1024) == {"a": 1}  # default: plan unchanged
+    assert petit_layer.apply_capacity({"a": 1}, 4096) == {"a": 1, "gluon_petit_max_tokens_per_rank": 4096}
+
+
 SAMPLE = '''
     for case in cases:
         def refresh(step):
