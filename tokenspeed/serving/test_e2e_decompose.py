@@ -139,3 +139,76 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("ok")
+
+
+def _gap_bench(ttft, tpot, lat, out=11, phases=None, top_out=None):
+    """A matrix benchmark.json with one warmup row and one measured row per repetition at C=1."""
+    def summ(t, p, l):
+        return {"Avg TTFT (ms)": t, "Avg TPOT (ms)": p, "Avg Latency (s)": l, "Avg Output Tokens": out}
+    res = [{"phase": "warmup-1", "concurrency": 1, "summary": summ(1.0, 1.0, 1.0)}]
+    phases = phases or [f"measured-{i + 1}" for i in range(len(ttft))]
+    for ph, t, p, l in zip(phases, ttft, tpot, lat):
+        res.append({"phase": ph, "concurrency": 1, "summary": summ(t, p, l)})
+    return {"prompt_tokens": 100, "output_tokens": out if top_out is None else top_out, "results": res}
+
+
+def test_gap_split_ttft_and_decode_parts() -> None:
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.json", Path(d) / "b.json"
+        a.write_text(json.dumps(_gap_bench([300, 310, 320], [12, 12, 13], [0.43, 0.44, 0.45])))
+        b.write_text(json.dumps(_gap_bench([100, 100, 100], [10, 10, 10], [0.2, 0.2, 0.2])))
+        r = e2e.gap_split([("A", str(a)), ("B", str(b))])
+        row = r["rows"][0]
+        assert r["output_tokens"] == 11
+        assert abs(row["ttft_part_ms"] - 210) < 1e-9 and abs(row["decode_part_ms"] - 20) < 1e-9
+        assert row["larger_part"] == "ttft" and row["n_a"] == 3
+        assert row["ttft_part_ms_paired_range"] == [200, 220]
+        assert row["decode_part_ms_paired_range"] == [20, 30]
+        assert abs(row["residual_ms"] - (240 - 230)) < 1e-9
+        assert "| 1 |" in e2e.gap_split_markdown(r)
+
+
+def test_gap_split_uses_file_output_length_and_pairs_by_repetition() -> None:
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.json", Path(d) / "b.json"
+        # O = 501 from the file: decode part = 500 x dTPOT. Phases listed out of order, and
+        # measured-10 must pair with measured-10 (not by lexical sort).
+        a.write_text(json.dumps(_gap_bench([5, 7, 6], [2.0, 2.2, 2.1], [1.0, 1.0, 1.0], out=501,
+                                           phases=["measured-2", "measured-10", "measured-1"])))
+        b.write_text(json.dumps(_gap_bench([1, 1, 4], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0], out=501,
+                                           phases=["measured-1", "measured-2", "measured-10"])))
+        row = e2e.gap_split([("A", str(a)), ("B", str(b))])["rows"][0]
+        assert row["paired_repetitions"] == [1, 2, 10]
+        # pairs: rep1 6-1=5, rep2 5-1=4, rep10 7-4=3
+        assert row["ttft_part_ms_paired_range"] == [3, 5]
+        assert abs(row["decode_part_ms"] - 500 * 0.1) < 1e-9
+        # a single unsuffixed "measured" phase (--repetitions 1) is repetition 1
+        a.write_text(json.dumps(_gap_bench([5], [2.0], [1.0], phases=["measured"])))
+        b.write_text(json.dumps(_gap_bench([1], [2.0], [1.0], phases=["measured"])))
+        assert e2e.gap_split([("A", str(a)), ("B", str(b))])["rows"][0]["ttft_part_ms"] == 4
+        # differing output lengths are refused, not split with a constant
+        a.write_text(json.dumps(_gap_bench([5], [2.0], [1.0], out=500)))
+        b.write_text(json.dumps(_gap_bench([1], [2.0], [1.0], out=11)))
+        try:
+            e2e.gap_split([("A", str(a)), ("B", str(b))])
+            raise AssertionError("expected SystemExit")
+        except SystemExit:
+            pass
+
+
+def test_gap_split_cli_writes_json() -> None:
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        a, b, out = Path(d) / "a.json", Path(d) / "b.json", Path(d) / "gap.json"
+        a.write_text(json.dumps(_gap_bench([300], [12], [0.43])))
+        b.write_text(json.dumps(_gap_bench([100], [10], [0.2])))
+        argv = sys.argv
+        sys.argv = ["e2e_decompose.py", "--gap-split", f"EP4={a}", "--gap-split", f"TP4={b}", "--out-json", str(out)]
+        try:
+            e2e.main()
+        finally:
+            sys.argv = argv
+        r = json.loads(out.read_text())
+        assert r["a"] == "EP4" and r["b"] == "TP4" and r["rows"][0]["ttft_part_ms"] == 200
