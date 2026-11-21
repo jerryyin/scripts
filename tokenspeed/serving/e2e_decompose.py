@@ -42,6 +42,18 @@ chunk and its first decode round (e.g. the first decode after a 50,000-token pre
 --benchmark-json each (phase, concurrency) slice gets its own record; a boundary whose two lines fall
 in different slices is in neither. The per-rank stdout line prints it as p2d=n/median/max s, stalls N.
 
+--samples SAMPLES_JSONL (repeatable; amd-tracking apps/shared/gpu_admission.py samples, e.g. the load window's
+and the measurement window's) adds gpu_activity to every stall record: for three windows, before_prefill
+(--samples-window s before the last Prefill/Mix line), stall (from --samples-margin s after that line to
+--samples-margin s plus one Decode-line interval before the first Decode line) and after_decode
+(--samples-window s from the first Decode line), per GPU the device busy (mean, max, share of samples > 0)
+and, summed over the server's own KFD processes there (KFD VRAM within 5 % of an own process's DRM VRAM),
+cu_occupancy (mean, max, share > 0), queues [min, max] and the SDMA time added (sdma_us_delta, sdma_share
+of wall time), with each GPU busy (busy or cu_occupancy > 0 in >= half the samples), idle or unobserved (no
+own KFD process seen) and the window's state: all-busy, all-idle or mixed with busy_gpus and idle_gpus.
+A stall with one GPU idle and the others busy at a constant cu_occupancy is one rank held up on the host
+while its peers wait in a device-side exchange. One stdout line per stall window is printed.
+
 With --benchmark-json (amd-tracking run_evalscope_matrix.py output) the whole server log is
 cut into one slice per phase first, from the phases' recorded start and finish times; a phase with
 one result per concurrency (a matrix ladder) is cut per point and labelled PHASE-cC.
@@ -145,6 +157,136 @@ def prefill_to_decode_gaps(p2d, cmed, dmed):
               for x, pa, pb in p2d if x > max(2 * (cmed(pa.get("new_token", 0)) + (dmed or 0)), 1.0)]
     return {"n": len(p2d), "median": statistics.median(x for x, _, _ in p2d), "max": g,
             "max_prefill_line_utc": iso(a["ts"]), "max_decode_line_utc": iso(b["ts"]), "stalls": stalls}
+
+
+def load_samples(paths):
+    """Admission samples (amd-tracking apps/shared/gpu_admission.py samples.jsonl: one JSON object per ~0.5 s
+    with t, busy {gpu: DRM gpu_busy_percent}, kfd {KFD host PID: {gpu: vram, queues, cu_occupancy, sdma_us}}
+    and own {PID: comm, pgid, kfd_open, drm_vram}) from one or more files, merged by time, duplicates dropped."""
+    rows = {}
+    for path in paths:
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    x = json.loads(line)
+                    rows[x["t"]] = x
+    return [rows[t] for t in sorted(rows)]
+
+
+def own_kfd_pids(samples, tolerance=0.05):
+    """KFD host PIDs of the measured server: a KFD PID whose largest VRAM on a GPU is within `tolerance`
+    (relative) of the DRM VRAM of an own process with /dev/kfd open and >= 1 MiB DRM VRAM, in any sample
+    (gpu_admission.py's first-pass match; the verdict's matching is the authority, this only labels)."""
+    own = set()
+    for s in samples:
+        drm = [p.get("drm_vram") or 0 for p in s.get("own", {}).values()
+               if p.get("kfd_open") and (p.get("drm_vram") or 0) >= 1 << 20]
+        for pid, row in s.get("kfd", {}).items():
+            vram = max((g.get("vram") or 0) for g in row.values()) if row else 0
+            if vram and any(abs(vram - d) <= tolerance * d for d in drm):
+                own.add(pid)
+    return own
+
+
+def window_activity(samples, t0, t1, own):
+    """Per GPU over the samples with t0 <= t <= t1: device busy (mean, max, share of samples > 0) and, summed
+    over the server's own KFD processes on that GPU, cu_occupancy (mean, max, share of samples > 0), queues
+    [min, max] and the SDMA time added (sdma_us delta between the window's first and last sample, and as
+    a share of the window's wall time); foreign KFD processes active on the GPU are counted."""
+    xs = [s for s in samples if t0 <= s["t"] <= t1]
+    out = {"t0_utc": dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+           "duration_s": t1 - t0, "n_samples": len(xs), "gpus": {}}
+    if not xs:
+        return out
+    gpus = sorted({g for s in xs for g in s.get("busy", {})}, key=lambda g: int(g))
+    for g in gpus:
+        busy = [s["busy"].get(g) or 0 for s in xs]
+        cu, q, sd, foreign = [], [], [], 0
+        for s in xs:
+            c = qq = d = 0
+            seen = False
+            for pid, row in s.get("kfd", {}).items():
+                v = row.get(g)
+                if v is None:
+                    continue
+                if pid in own:
+                    seen = True
+                    c += v.get("cu_occupancy") or 0
+                    qq += v.get("queues") or 0
+                    d += v.get("sdma_us") or 0
+                elif v.get("cu_occupancy"):
+                    foreign += 1
+            if seen:
+                cu.append(c); q.append(qq); sd.append(d)
+        span = xs[-1]["t"] - xs[0]["t"]
+        row = {"busy_mean": statistics.mean(busy), "busy_max": max(busy),
+               "busy_share": sum(1 for b in busy if b > 0) / len(busy), "foreign_active_samples": foreign}
+        if cu:
+            sdma = sd[-1] - sd[0]
+            row.update({"cu_occupancy_mean": statistics.mean(cu), "cu_occupancy_max": max(cu),
+                        "cu_occupancy_share": sum(1 for c in cu if c > 0) / len(cu),
+                        "queues_min": min(q), "queues_max": max(q), "sdma_us_delta": sdma,
+                        "sdma_share": sdma / 1e6 / span if span > 0 else None})
+        out["gpus"][g] = row
+    return out
+
+
+def window_state(act, busy_share=0.5):
+    """'busy' / 'idle' per GPU (busy when device busy > 0 or own cu_occupancy > 0 in at least `busy_share` of
+    the window's samples; 'unobserved' when no own KFD process was seen on it, e.g. the sampler could not
+    read that GPU) and a summary over the observed GPUs: all-busy, all-idle or mixed (busy and idle listed)."""
+    per = {}
+    for g, r in act.get("gpus", {}).items():
+        if "cu_occupancy_share" not in r:
+            per[g] = "unobserved"
+            continue
+        share = max(r["busy_share"], r["cu_occupancy_share"])
+        per[g] = "busy" if share >= busy_share else "idle"
+    busy = [g for g, v in per.items() if v == "busy"]
+    idle = [g for g, v in per.items() if v == "idle"]
+    if not busy and not idle:
+        return {"state": "no-samples", "busy_gpus": [], "idle_gpus": [], "per_gpu": per}
+    state = "all-busy" if not idle else "all-idle" if not busy else "mixed"
+    return {"state": state, "busy_gpus": busy, "idle_gpus": idle, "per_gpu": per}
+
+
+def attach_samples(runs, samples, window_s=2.0, margin_s=1.0):
+    """Add gpu_activity to every prefill_to_decode_gap_s stall record: the window before the stall (prefill:
+    window_s before the last Prefill/Mix line), the stall itself (from margin_s after that line to the
+    first Decode line minus margin_s plus one Decode-line interval, since that line is logged after up to
+    --decode-log-interval decode rounds) and after it (decode: window_s from the first Decode line)."""
+    own = own_kfd_pids(samples)
+    for r in runs:
+        for x in r["ranks"].values():
+            dli = x.get("decode_line_interval_median_s") or 0.0
+            for st in x["prefill_to_decode_gap_s"]["stalls"]:
+                a, b = parse_iso(st["prefill_line_utc"]), parse_iso(st["decode_line_utc"])
+                stall_end = max(a + margin_s, b - margin_s - dli)
+                acts = {"before_prefill": window_activity(samples, a - window_s, a, own),
+                        "stall": window_activity(samples, a + margin_s, stall_end, own),
+                        "after_decode": window_activity(samples, b, b + window_s, own)}
+                st["gpu_activity"] = {k: {**v, **window_state(v)} for k, v in acts.items()}
+                st["gpu_activity"]["own_kfd_pids"] = sorted(own)
+    return runs
+
+
+def stall_activity_lines(runs):
+    """One stdout line per stall and window: state and per GPU busy share / own cu_occupancy mean / SDMA share."""
+    out = []
+    for r in runs:
+        for k, x in r["ranks"].items():
+            for st in x["prefill_to_decode_gap_s"]["stalls"]:
+                ga = st.get("gpu_activity")
+                if not ga:
+                    continue
+                out.append(f" stall {r['label']} rank{k} {st['prefill_line_utc']} -> {st['decode_line_utc']} ({st['gap_s']:.2f} s)")
+                for w in ("before_prefill", "stall", "after_decode"):
+                    v = ga[w]
+                    cells = " ".join(
+                        f"g{g}:busy{c['busy_share']:.2f}/cu{fmt(c.get('cu_occupancy_mean'), '.0f')}/sdma{fmt(c.get('sdma_share'), '.3f')}"
+                        for g, c in v["gpus"].items())
+                    out.append(f"   {w:<15} n={v['n_samples']:<3} {v['state']:<9} idle={','.join(v['idle_gpus']) or '-'} {cells}")
+    return out
 
 
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
@@ -795,6 +937,13 @@ def main():
     ap.add_argument("--decode-log-interval", type=int, help="rounds per Decode line, for per-round times")
     ap.add_argument("--markdown", action="store_true", help="also print one table row per run")
     ap.add_argument("--out-json")
+    ap.add_argument("--samples", action="append", default=[], metavar="SAMPLES_JSONL",
+                    help="amd-tracking gpu_admission.py samples.jsonl (repeatable: load window and measurement windows): "
+                    "add gpu_activity (per GPU busy, own cu_occupancy, queues, SDMA delta) before, during and after "
+                    "every prefill_to_decode_gap_s stall")
+    ap.add_argument("--samples-window", type=float, default=2.0, help="seconds of the before/after windows (default 2)")
+    ap.add_argument("--samples-margin", type=float, default=1.0,
+                    help="seconds trimmed from each end of the stall window (default 1)")
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     cm = ap.add_argument_group("--chunk-model")
@@ -873,6 +1022,8 @@ def main():
                     "req_per_s_server_span": n / r["server_span_s"],
                     "req_per_s_predicted_busiest_rank": n / pred}
         runs.append(r)
+    if a.samples:
+        attach_samples(runs, load_samples(a.samples), a.samples_window, a.samples_margin)
     json.dump(runs, open(a.out_json, "w"), indent=1, default=str)
     for r in runs:
         print("==", r["label"], "span %.2f s" % r["server_span_s"], json.dumps(r.get("reconciliation"), default=str))
@@ -883,6 +1034,8 @@ def main():
                   f"decode={x['decode_time_s']:.2f}s ({fmt(x['decode_tok_per_s_while_decoding'], '.1f')} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
                   f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s "
                   f"p2d={p2d['n']}/{fmt(p2d['median'], '.2f')}/{fmt(p2d['max'], '.2f')}s stalls {len(p2d['stalls'])} tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
+    for line in stall_activity_lines(runs):
+        print(line)
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
 

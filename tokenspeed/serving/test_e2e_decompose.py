@@ -316,3 +316,65 @@ def test_gap_split_cli_writes_json() -> None:
             sys.argv = argv
         r = json.loads(out.read_text())
         assert r["a"] == "EP4" and r["b"] == "TP4" and r["rows"][0]["ttft_part_ms"] == 200
+
+
+def _sample(t, busy, cu, sdma=0):
+    """One gpu_admission.py sample: 4 GPUs, one own KFD process per GPU (KFD PID 100+g, own PID 200+g)."""
+    return {"t": t, "utc": ts(t), "busy": {str(g): busy[g] for g in range(4)},
+            "kfd": {str(100 + g): {str(g): {"cu_occupancy": cu[g], "queues": 6, "sdma_us": sdma, "vram": 285 << 30}}
+                    for g in range(4)},
+            "own": {str(200 + g): {"comm": "tokenspeed::sch", "drm_vram": 289 << 30, "kfd_open": True, "pgid": 1}
+                    for g in range(4)} | {"300": {"comm": "foreign", "drm_vram": 10 << 30, "kfd_open": True, "pgid": 2}}}
+
+
+def test_samples_attach_gpu_activity_to_stall() -> None:
+    """--samples: during a 19 s stall of rank 1, GPU 1 is idle and the other three spin at cu_occupancy 32."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = []
+    for i in range(4):
+        lines.append(batch(T + 0.05 * i, "Prefill", 1, new_seq=1, new_token=1000, running_req=1))
+    for i in range(5):
+        lines.append(batch(T + 0.2 + 19.0 + 0.5 * i, "Decode", 1, running_req=1, gen=80.0))
+    lines.append(finish(T + 22.0, "a", 4000, 0, out=11))
+    samples = []
+    for k in range(-6, 48):  # every 0.5 s from T - 3 s to T + 23.5 s
+        t = T + 0.5 * k
+        if T + 0.15 < t < T + 19.2:  # stall: rank 1's GPU idle, its peers in a spinning exchange kernel
+            samples.append(_sample(t, [100, 0, 100, 100], [32, 0, 32, 32], sdma=5))
+        else:
+            samples.append(_sample(t, [100, 100, 100, 100], [40, 60, 30, 50], sdma=5))
+    samples.insert(10, samples[10])  # a duplicate (two files covering the same time) is dropped
+    with tempfile.TemporaryDirectory() as d:
+        log, sj, out = Path(d) / "server.log", Path(d) / "samples.jsonl", Path(d) / "out.json"
+        log.write_text("".join(lines))
+        sj.write_text("".join(json.dumps(s) + "\n" for s in samples))
+        argv = sys.argv
+        sys.argv = ["e2e_decompose.py", "--log", str(log), "--prompt-tokens", "4000", "--samples", str(sj),
+                    "--out-json", str(out)]
+        try:
+            e2e.main()
+        finally:
+            sys.argv = argv
+        st = json.loads(out.read_text())[0]["ranks"]["1"]["prefill_to_decode_gap_s"]["stalls"][0]
+        ga = st["gpu_activity"]
+        assert ga["own_kfd_pids"] == ["100", "101", "102", "103"]
+        assert ga["before_prefill"]["state"] == "all-busy" and ga["after_decode"]["state"] == "all-busy"
+        stall = ga["stall"]
+        assert stall["state"] == "mixed" and stall["idle_gpus"] == ["1"] and stall["busy_gpus"] == ["0", "2", "3"]
+        assert stall["gpus"]["1"]["cu_occupancy_max"] == 0 and stall["gpus"]["1"]["busy_mean"] == 0
+        assert stall["gpus"]["0"]["cu_occupancy_mean"] == 32 and stall["gpus"]["0"]["sdma_us_delta"] == 0
+        assert stall["n_samples"] == len([s for s in samples[:10] + samples[11:]
+                                          if T + 0.15 + 1.0 <= s["t"] <= T + 19.2 - 1.0 - 0.5])
+        assert ga["before_prefill"]["n_samples"] == 4  # T - 1.85 .. T + 0.15
+
+
+def test_samples_unobserved_gpu_is_not_called_idle() -> None:
+    """A GPU with no own KFD process in the samples (the sampler could not read it) is unobserved."""
+    e2e = load("e2e_decompose.py")
+    s = [_sample(10.0 + 0.5 * k, [100, 100, 100, 0], [32, 32, 32, 0]) for k in range(4)]
+    for x in s:
+        del x["kfd"]["103"]
+    act = e2e.window_activity(s, 10.0, 12.0, e2e.own_kfd_pids(s))
+    st = e2e.window_state(act)
+    assert st["per_gpu"]["3"] == "unobserved" and st["state"] == "all-busy" and st["idle_gpus"] == []
