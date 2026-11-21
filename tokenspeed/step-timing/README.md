@@ -8,7 +8,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `46671ec2c8286eeb6fc7efad4a7e76d4aed57f15` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); earlier versions are this file at a toolkit commit: against `e8fd096ed80112d6108725bad1fbdc3accb0a559` at toolkit `8592e72043703c70cada18dd7690102c29c6fc10`, against `0dd8d477` at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation.diff` | The patch, against TokenSpeed `4b76ebccdbac7880f367280552e5757a63b23c8d` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); earlier versions are this file at a toolkit commit: against `46671ec2c8286eeb6fc7efad4a7e76d4aed57f15` at toolkit `865074dd0439832497c3a7043355f6ecc940d4dd`, against `e8fd096ed80112d6108725bad1fbdc3accb0a559` at toolkit `8592e72043703c70cada18dd7690102c29c6fc10`, against `0dd8d477` at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
@@ -18,7 +18,7 @@ Make the patched copy in a clone (never a worktree or an edit of the checkout yo
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 46671ec2c8286eeb6fc7efad4a7e76d4aed57f15
+git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 4b76ebccdbac7880f367280552e5757a63b23c8d
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
@@ -89,7 +89,12 @@ inside the timed capture), the replay markers sit inside the replay's `try` arou
 auxiliary stream) and `model.end` follows `end_indexer_forward()` (after the geometry join), and
 `final` precedes `finish_forward`. The MoE file `deepseek_v41_moe.py` is unchanged from e8fd096e (the
 MegaMoE path with a fused shared expert, `shared_expert_fused`, returns inside `moe.experts`, so
-`shared.*` and `moe.join` do not fire there; Gluon Petit does not take that path). The Petit MoE of
+`shared.*` and `moe.join` do not fire there; Gluon Petit does not take that path). At 4b76ebcc (Petit
+compile-at-startup `73c3b0e8b`, opt-in shared-expert aux stream `4b76ebccd`) two hunks were re-ported, same
+markers at the same boundaries: the `_st` import in `deepseek_v41_moe.py` (its `env` import line changed; the
+`forward_normal` markers apply unchanged, `shared.b`/`shared.e` still bracket the `fork.branch()` body, which runs
+on the aux stream only with `TOKENSPEED_PETIT_SHARED_EXPERT_AUX_STREAM=on`), and the four `petit.*` markers in
+`mega_moe.py` `Invoke`, now around the `Launch(...)` calls; they are no-ops when `compile_only` (startup compile). The Petit MoE of
 one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
 shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
 
