@@ -70,6 +70,32 @@ def test_fmt_none() -> None:
     assert (e2e.fmt(None, ".1f"), e2e.fmt(2.25, ".1f")) == ("-", "2.2")
 
 
+def test_chunk_model_fit_and_waves() -> None:
+    e2e = load("e2e_decompose.py")
+    rank = lambda sizes, gap, acc: {"prefill_time_s": 1.0, "chunk_time_by_size_median_s": sizes,  # noqa: E731
+                                    "full_batch_line_gap_s": {"median": gap}, "full_batch_accept_len_line_mean": acc}
+    runs = [{"label": "measured-1-c1", "ranks": {"0": rank({"1000": 0.03}, 0.4, 5.0)}},
+            {"label": "measured-2-c1", "ranks": {"0": rank({"2000": 0.05}, 0.4, 5.0)}},
+            {"label": "warmup-1-c1", "ranks": {"0": rank({"2000": 9.0}, 9.0, 1.0)}}]
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "runs.json"
+        path.write_text(json.dumps(runs))
+        a, b, pts = e2e.fit_chunk_line(e2e.measured_runs([str(path)]))
+        assert (round(a * 1e3, 6), round(b * 1e6, 6), pts) == (10.0, 20.0, {1000: 0.03, 2000: 0.05})
+        # 2 prompts of 2500 tokens, 1000-token chunks, one group: chunks end at 30,60,90,120,(rem 1000)150 ms;
+        # prompt 1 ends in chunk 3 (90 ms), prompt 2 in chunk 5 (150 ms)
+        end, own = e2e.chunk_wave(0.01, 20e-6, 1000, 1, 2, 2500)
+        assert (round(end, 6), round(own, 6)) == (0.15, 0.12)
+        # two groups: one prompt each, 3 chunks: 2 x 30 + t(500) = 20 ms -> 80 ms
+        assert [round(x, 6) for x in e2e.chunk_wave(0.01, 20e-6, 1000, 2, 2, 2500)] == [0.08, 0.08]
+        res = e2e.chunk_model([("M", str(path))], [("S", "10:40")], [("base", "M:1000:1:M"), ("slow", "S:1000:1:M")],
+                              [1], 2500, 11, 40)
+        base, slow = res["rows"]
+        assert round(base["decode_s"], 6) == round(10 / 5.0 * 0.01, 6)
+        assert slow["tok_per_s_ratio_to_first"] < 1 and base["tok_per_s_ratio_to_first"] == 1
+        assert "| base | M | 1000 | 1 | 1 |" in e2e.chunk_model_markdown(res)
+
+
 def test_predict_terms_and_whatifs() -> None:
     e2e = load("e2e_decompose.py")
     rank = lambda p, d, i, gap: {"prefill_time_s": p, "decode_time_s": d, "idle_s": i,
