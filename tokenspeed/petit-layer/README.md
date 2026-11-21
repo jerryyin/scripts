@@ -42,8 +42,11 @@ draft (`dsv41_flash_dspark`, 3 stages per step) sees 5 b and never prefill token
 `--active-ranks N` gives the tokens to ranks 0..N-1 and 0 to the others: an idle DP rank's eager
 IDLE forward enters Petit with 0 tokens (e.g. a 1024-token prefill chunk on one rank while three
 idle: `--tokens 1024 --active-ranks 1`). Petit holds at most 1024 tokens per rank
-(`MegaMoeConfig.max_tokens_per_rank`, `tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py`);
-larger counts are rejected.
+(`MegaMoeConfig.max_tokens_per_rank`, `tokenspeed_kernel/thirdparty/gluon_petit/petit_kernel/__init__.py`)
+by default; larger counts are rejected. From TokenSpeed 46671ec2 the server sizes the capacity from its
+chunk (`ServerArgs.gluon_petit_max_tokens_per_rank()`, EP4 up to 7,808) and passes it in the MoE plan as
+`gluon_petit_max_tokens_per_rank`; `--capacity N` does the same here (asserting the layer state holds N),
+so `--tokens 1024,2048,3072,4096 --capacity 4096` times calls above 1024 rows.
 
 **Petit's launch choices.** Per call Petit picks a producer geometry (`cta56`, `cta64`, `cta128`,
 `cta192`: the dispatch's producer blocks, `_select_mega_moe_producer_geometry`) and a stage-1 tile
