@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize` |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -73,6 +73,30 @@ candidate x repetition (the repetition's max-over-ranks median, min and max over
 from output JSONs of any version, so `numerics/range_compare.py summarize` gives the median and range
 over repetitions (add `candidate` to `--key` for a candidate sweep, and `--where candidate=NAME` to
 pull one candidate's summary for `compare`); `--summary` prints a markdown table of one JSON.
+
+`--fit ROWS.csv [ROWS.csv ...]` fits Petit's per-call time against the rows per call (tokens per
+GPU) from `--rows` CSVs, without a GPU. Rows are grouped by profile, routing, mode, active ranks
+and candidate; per group it prints, for each `tokens_per_gpu`, the median [min, max] over
+repetitions of `max_over_ranks_median_ms` and their count; the least-squares line t = a + b x rows
+over those medians (a in ms, b in us per row), each count's residual against the line and its fixed
+share a / median; and `--fit-layers` (default 40, the MoE layers of `dsv41_flash`) x the median,
+the Petit ms of one step whose MoE layers each see that many rows. `--fit-chunks C,C,...` adds,
+per chunk of C prefill tokens on a rank, the Petit ms of splitting it into ceil(C / `--fit-cap`)
+calls (default cap 1024, Petit's `max_tokens_per_rank`): the full calls at the measured median of
+`--fit-cap` rows (the line where that count was not measured), the remainder at the line, times
+`--fit-layers`; with the ratio to one `--fit-cap`-row chunk and the ms per 1,000 tokens. That is the
+Petit cost of a large prefill chunk, which Petit must take as several calls of at most 1024 rows.
+`--where NAME=VALUE` (repeatable, any CSV column) selects rows first; runs that differ in `--layers`
+or `--seed` share a group, so select one (`--where layers=8`), and fit runs with different
+`--weights` (not a CSV column) from separate CSVs. A group with one row count gets b = 0.
+
+```bash
+# prefill rows on one active rank, eager mode, then the fit and the split-chunk Petit cost
+python3 petit_layer.py --rows petit-prefill-rows.csv petit-prefill.json
+python3 petit_layer.py --fit petit-prefill-rows.csv --where mode=eager --where active_ranks=1 \
+    --fit-layers 40 --fit-chunks 1024,2048,4096,8192 --fit-cap 1024
+```
+
 `torchrun --standalone` needs a resolvable hostname; in a container without one, pass
 `--master-addr=127.0.0.1` and a fixed `--master-port` instead.
 

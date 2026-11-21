@@ -149,3 +149,23 @@ def test_candidate_names_and_expected_launch() -> None:
         petit_layer.candidate_names("cta192/m32", 128)
     assert petit_layer.expected_launch("cta192/m64w4", 384) == (192, True, False)
     assert petit_layer.expected_launch("cta192/m32", 128) == (128, False, False)
+
+
+def test_fit_line_and_split_chunk(tmp_path) -> None:
+    rows = tmp_path / "rows.csv"
+    fields = ["profile", "routing", "mode", "active_ranks", "candidate", "tokens_per_gpu", "repetition",
+              "max_over_ranks_median_ms"]
+    with rows.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for n in (128, 256, 512, 1024):
+            for k, d in enumerate((-0.01, 0.0, 0.01)):  # t = 0.3 + 0.0004 n, median exact
+                w.writerow({"profile": "dsv41_flash", "routing": "test", "mode": "eager", "active_ranks": 1,
+                            "candidate": "petit", "tokens_per_gpu": n, "repetition": k,
+                            "max_over_ranks_median_ms": 0.3 + 0.0004 * n + d})
+    text = petit_layer.fit_table(list(csv.DictReader(rows.open())), layers=40, chunks=(4096, 8192, 1536))
+    assert "fit t = 0.3000 ms + 0.4000 us x rows" in text
+    assert "| 1024 | 0.7096 [0.6996, 0.7196] | 3 | 0.7096 | +0.0000 | 42% | 28.38 |" in text
+    assert "| 8192 | 8 | 227.07 | 8.00x | 27.72 |" in text  # 40 x 8 x 0.7096
+    assert "| 1536 | 2 | 48.58 | 1.71x |" in text  # 40 x (0.7096 + 0.3 + 0.0004 x 512)
+    assert petit_layer.main(["--fit", str(rows), "--fit-chunks", "4096", "--where", "routing=test"]) == 0
