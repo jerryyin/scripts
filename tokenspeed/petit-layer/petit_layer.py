@@ -27,7 +27,22 @@ candidate passes the test's check before it is timed, and repetitions interleave
 replays consecutive layers; --weights random gives those layers distinct random MXFP4 weights (no
 reference then for the timed inputs; the test's check still runs on the test's weights).
 
-Pure logic (argument parsing, limits, result rows) runs without a GPU: test_petit_layer.py.
+Analysis modes (no GPU):
+  petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]   one CSV row per repetition of each result
+  petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
+  petit_layer.py --fit ROWS.csv [ROWS.csv ...] [--where NAME=VALUE ...] [--fit-layers 40]
+                 [--fit-chunks C,C,...] [--fit-cap 1024]
+--fit groups the --rows CSV rows by (profile, routing, mode, active_ranks, candidate) and per group
+gives, per tokens_per_gpu (rows per call), the median [min, max] over repetitions of
+max_over_ranks_median_ms; the least-squares line t = a + b x rows over those medians with each
+count's residual and fixed share a / median; --fit-layers x the median (the Petit ms of one step
+whose MoE layers each see that many rows); and, for each chunk C of --fit-chunks, the Petit ms of a C-token prefill
+chunk split into ceil(C / --fit-cap) calls (full calls at the measured median of --fit-cap rows, or
+the line if it was not measured; the remainder at the line) against one --fit-cap-row chunk. Runs
+that differ in --layers or --seed share a group: select one with --where (for example --where
+layers=8 --where seed=0); --weights is not a CSV column, so fit such runs from separate CSVs.
+
+Pure logic (argument parsing, limits, result rows, fit) runs without a GPU: test_petit_layer.py.
 """
 from __future__ import annotations
 
@@ -281,12 +296,78 @@ def summary_table(record: dict) -> str:
     return "\n".join(rows)
 
 
+def fit_table(rows: list[dict], layers: int = 40, chunks: tuple[int, ...] = (), cap: int = 1024) -> str:
+    """Per-call time against rows per GPU, from --rows CSV rows: per group (profile, routing, mode,
+    active_ranks, candidate) the median [min, max] over repetitions of max_over_ranks_median_ms per
+    tokens_per_gpu, the least-squares line t = a + b x rows over those medians, the fixed share a/t,
+    `layers` x t (Petit ms per step at that chunk), and for each chunk C in `chunks` the Petit ms of C
+    split into ceil(C/cap) calls (calls of `cap` rows at the measured median, the remainder at the
+    line) against one `cap`-row chunk."""
+    import math
+    import statistics
+    groups: dict[tuple, dict[int, list[float]]] = {}
+    for r in rows:
+        key = (r["profile"], r["routing"], r["mode"], str(r["active_ranks"]), r.get("candidate", "petit"))
+        groups.setdefault(key, {}).setdefault(int(r["tokens_per_gpu"]), []).append(float(r["max_over_ranks_median_ms"]))
+    out = []
+    for key, by_n in sorted(groups.items()):
+        ns = sorted(by_n)
+        med = {n: statistics.median(by_n[n]) for n in ns}
+        if len(ns) >= 2:
+            mx, my = statistics.fmean(ns), statistics.fmean(med[n] for n in ns)
+            b = sum((n - mx) * (med[n] - my) for n in ns) / sum((n - mx) ** 2 for n in ns)
+            a = my - b * mx
+        else:
+            a, b = med[ns[0]], 0.0
+        out.append(f"### {key[0]} routing={key[1]} mode={key[2]} active_ranks={key[3]} candidate={key[4]}\n")
+        out.append(f"fit t = {a:.4f} ms + {b * 1000:.4f} us x rows over rows {ns[0]}..{ns[-1]}\n")
+        out.append(f"| rows | median [min, max] ms | n | fit ms | residual ms | fixed share a/t | {layers} layers ms |")
+        out.append("|---|---|---|---|---|---|---|")
+        for n in ns:
+            v = by_n[n]
+            f = a + b * n
+            out.append(f"| {n} | {med[n]:.4f} [{min(v):.4f}, {max(v):.4f}] | {len(v)} | {f:.4f} | "
+                       f"{med[n] - f:+.4f} | {a / med[n]:.0%} | {layers * med[n]:.2f} |")
+        if chunks:
+            one = med.get(cap, a + b * cap)
+            out.append(f"\n| chunk tokens | calls of <= {cap} | Petit ms per chunk ({layers} layers) | "
+                       f"vs one {cap}-row chunk | per 1,000 tokens ms |")
+            out.append("|---|---|---|---|---|")
+            for c in chunks:
+                full, rem = divmod(c, cap)
+                calls = full + (1 if rem else 0)
+                ms = layers * (full * one + (a + b * rem if rem else 0.0))
+                out.append(f"| {c} | {calls} | {ms:.2f} | {ms / (layers * one):.2f}x | {ms / c * 1000:.2f} |")
+        out.append("")
+    return "\n".join(out)
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--rows":  # petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]
         if len(argv) < 3:
             raise SystemExit("usage: petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]")
         print(f"[petit_layer] wrote {write_rows_csv(argv[1], argv[2:])} rows to {argv[1]}")
+        return 0
+    if argv and argv[0] == "--fit":  # petit_layer.py --fit ROWS.csv [--fit-layers N] [--fit-chunks C,C]
+        import csv
+        fp = argparse.ArgumentParser(
+            prog="petit_layer.py --fit",
+            description="Fit per-call Petit time against rows per GPU from --rows CSVs (see fit_table): "
+                        "per group median [min, max], line t = a + b x rows, residuals, fixed share, "
+                        "per-step ms for --fit-layers layers, and split-chunk cost for --fit-chunks.")
+        fp.add_argument("rows_csv", nargs="+", help="CSV(s) written by petit_layer.py --rows")
+        fp.add_argument("--fit-layers", type=int, default=40, help="MoE layers per step (dsv41_flash: 40)")
+        fp.add_argument("--fit-chunks", default="", help="chunk tokens to split into <= --fit-cap calls")
+        fp.add_argument("--fit-cap", type=int, default=1024, help="rows per Petit call (max_tokens_per_rank)")
+        fp.add_argument("--where", action="append", default=[], help="NAME=VALUE row filter (repeatable)")
+        fa = fp.parse_args(argv[1:])
+        rows = [r for path in fa.rows_csv for r in csv.DictReader(open(path, newline=""))]
+        for w in fa.where:
+            k, v = w.split("=", 1)
+            rows = [r for r in rows if str(r.get(k)) == v]
+        chunks = tuple(int(c) for c in fa.fit_chunks.split(",") if c)
+        print(fit_table(rows, fa.fit_layers, chunks, fa.fit_cap))
         return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:
