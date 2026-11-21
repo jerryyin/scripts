@@ -118,11 +118,20 @@ over every measured row of both files and equal to the manifest's output_tokens)
 (A_i - B_i, measured-i of A with measured-i of B) give the [min, max] of each part. Under EvalScope's
 per-request TPOT = (latency - TTFT) / (O - 1), the residual is near zero when every request has O tokens;
 it is not exactly zero because the three medians are taken separately and EvalScope rounds its summary.
+
+--point-table JSON... --decode-log-interval N tabulates this tool's JSON (a decomposition), one row per run with ranks:
+the busiest rank (largest prefill + decode time), its prefill chunks x median chunk ms; the full-batch decode round
+(per rank the median full-batch Decode-line gap / N; over the ranks that have one, the upper median, element n // 2
+of the sorted values); and the largest prefill_to_decode_gap_s max over ranks with its rank (Markdown, --out-json).
+
+--line-gaps THRESHOLD_S --log SLICE... lists, per log and rank, every gap > THRESHOLD_S s between consecutive
+Prefill/Mix/Decode lines of that rank with both lines' kinds and log timestamps: the times of the prefill-chunk stalls
+that the decomposition only counts (prefill_stalls), e.g. as --activity-window bounds.
 """
 import argparse, collections, csv, datetime as dt, hashlib, itertools, json, os, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from batch_log import parse_lines, parse_ts  # noqa: E402
+from batch_log import TS_PATTERNS, parse_lines, parse_ts  # noqa: E402
 
 
 def fmt(value, spec):
@@ -382,6 +391,74 @@ def stall_activity_lines(runs):
                         for g, c in v["gpus"].items())
                     out.append(f"   {w:<15} n={v['n_samples']:<3} {v['state']:<9} idle={','.join(v['idle_gpus']) or '-'} {cells}")
     return out
+
+
+def point_table(paths, interval):
+    """Per run of this tool's JSON(s): the busiest rank (largest prefill + decode time), its prefill chunks x
+    median chunk time, the full-batch decode round (per rank: median full-batch Decode-line gap / interval;
+    over ranks the upper median, element n // 2 of the sorted ranks with a gap) and the largest
+    prefill_to_decode_gap_s max over ranks."""
+    out = []
+    for path in paths:
+        for r in json.load(open(path)):
+            R = r.get("ranks") or {}
+            if not R:
+                continue
+            k = max(R, key=lambda q: R[q]["prefill_time_s"] + R[q]["decode_time_s"])
+            b = R[k]
+            chunk = b["chunk_time_s"]["median"] if b.get("chunk_time_s") else None
+            rounds = {q: x["full_batch_line_gap_s"]["median"] / interval for q, x in R.items()
+                      if (x.get("full_batch_line_gap_s") or {}).get("median")}
+            vals = sorted(rounds.values())
+            p2d = {q: x["prefill_to_decode_gap_s"]["max"] or 0.0 for q, x in R.items()}
+            pk = max(p2d, key=p2d.get)
+            out.append({"file": os.path.basename(path), "label": r["label"], "busiest_rank": k,
+                        "prefill_chunks": b["prefill_chunks"], "chunk_median_s": chunk,
+                        "chunks_x_median_s": b["prefill_chunks"] * chunk if chunk is not None else None,
+                        "decode_round_s_by_rank": rounds,
+                        "decode_round_s_upper_median": vals[len(vals) // 2] if vals else None,
+                        "prefill_to_decode_gap_max_s": p2d[pk], "prefill_to_decode_gap_max_rank": pk,
+                        "decode_log_interval": interval})
+    return out
+
+
+def point_table_lines(rows):
+    out = ["| file | run | busiest rank | chunks x median chunk ms = s | full-batch decode round ms (upper median over "
+           "ranks; per rank) | prefill->decode gap max s (rank) |", "|" + "---|" * 6]
+    for x in rows:
+        per = ", ".join(f"{q}:{v * 1e3:.1f}" for q, v in sorted(x["decode_round_s_by_rank"].items()))
+        cm = x["chunk_median_s"]
+        out.append(f"| {x['file']} | {x['label']} | {x['busiest_rank']} | {x['prefill_chunks']} x "
+                   f"{fmt(None if cm is None else cm * 1e3, '.1f')} = {fmt(x['chunks_x_median_s'], '.2f')} | "
+                   f"{fmt(None if x['decode_round_s_upper_median'] is None else x['decode_round_s_upper_median'] * 1e3, '.1f')}"
+                   f" ({per or '-'}) | {x['prefill_to_decode_gap_max_s']:.2f} ({x['prefill_to_decode_gap_max_rank']}) |")
+    return out
+
+
+def line_gaps(paths, threshold):
+    """Per log and rank, every gap > threshold s between consecutive Prefill/Mix/Decode lines of that rank
+    (batch_log.parse_line; no #dp-rank -> rank 0), with both lines' kinds and timestamps as written in the log.
+    Gives timestamps to the prefill-chunk stalls the decomposition only counts (prefill_stalls), e.g. as
+    --activity-window bounds."""
+    iso = next(p for p, kind in TS_PATTERNS if kind == "iso")
+    out = []
+    for path in paths:
+        prev = {}
+        for e in parse_lines(open(path, errors="replace")):
+            if e["kind"] == "Finish" or e["ts"] is None:
+                continue
+            m = iso.search(e["line"]); r = e["dp_rank"]
+            text = m.group(0) if m else dt.datetime.fromtimestamp(e["ts"], dt.timezone.utc).isoformat()
+            if r in prev and e["ts"] - prev[r][0] > threshold:
+                out.append({"log": os.path.basename(path), "rank": r, "from_kind": prev[r][1], "to_kind": e["kind"],
+                            "from_utc": prev[r][2], "to_utc": text, "gap_s": e["ts"] - prev[r][0]})
+            prev[r] = (e["ts"], e["kind"], text)
+    return out
+
+
+def line_gap_lines(gaps):
+    return [f"{g['log']} rank {g['rank']} {g['from_kind']} -> {g['to_kind']} {g['from_utc']} -> {g['to_utc']} "
+            f"{g['gap_s']:.2f}s" for g in gaps]
 
 
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
@@ -1020,7 +1097,7 @@ def main_predict(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log", action="append", default=[], help="server log slice (repeatable)")
+    ap.add_argument("--log", action="extend", nargs="+", default=[], help="server log slice(s) (repeatable)")
     ap.add_argument("--evalscope", action="append", default=[], help="evalscope perf output dir per --log")
     ap.add_argument("--label", action="append", default=[])
     ap.add_argument("--benchmark-json", help="amd-tracking EvalScope matrix benchmark.json: slice the --server-log "
@@ -1048,6 +1125,13 @@ def main():
                     "repeatable); each window gets cache_writes, the files modified in it grouped per kernel")
     ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
                     help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
+    ap.add_argument("--point-table", action="extend", nargs="+", default=[], metavar="JSON",
+                    help="instead of a decomposition: per run of this tool's JSON(s), busiest rank's chunks x median "
+                    "chunk ms, full-batch decode round ms (Decode-line gap / --decode-log-interval, upper median over "
+                    "ranks) and max prefill_to_decode_gap_s over ranks")
+    ap.add_argument("--line-gaps", type=float, metavar="THRESHOLD_S",
+                    help="instead of a decomposition: per --log and rank, every gap > THRESHOLD_S between consecutive "
+                    "batch-log lines with both timestamps (e.g. --activity-window bounds of prefill-chunk stalls)")
     cm = ap.add_argument_group("--chunk-model")
     cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit (with its fixed share a/t(x) and [min, max] over repetitions) and chunk-size/placement what-ifs")
     cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s); "
@@ -1076,6 +1160,22 @@ def main():
                 w["cache_writes"] = cache_writes(listing, parse_iso(w["start_utc"]), parse_iso(w["end_utc"]))
         json.dump(res, open(a.out_json, "w"), indent=1)
         print("\n".join(activity_window_lines(res)))
+        return
+    if a.point_table:
+        if not a.decode_log_interval:
+            ap.error("--point-table needs --decode-log-interval")
+        rows = point_table(a.point_table, a.decode_log_interval)
+        if a.out_json:
+            json.dump(rows, open(a.out_json, "w"), indent=1)
+        print("\n".join(point_table_lines(rows)))
+        return
+    if a.line_gaps is not None:
+        if not a.log:
+            ap.error("--line-gaps needs --log")
+        gaps = line_gaps(a.log, a.line_gaps)
+        if a.out_json:
+            json.dump(gaps, open(a.out_json, "w"), indent=1)
+        print("\n".join(line_gap_lines(gaps)))
         return
     if a.gap_split:
         res = gap_split([split_spec(x, "--gap-split") for x in a.gap_split])
