@@ -57,6 +57,18 @@ not swap:
 Error: per prefill->decode boundary at most |actual chunk - c_med| (chunk times
 are tight, see chunk_time stats); the tail estimate is bounded by
 decode_log_interval rounds. Mixed batches (if any) are counted as prefill time.
+
+--gap-split A=BENCHMARK_JSON --gap-split B=BENCHMARK_JSON (two amd-tracking matrix benchmark.json files
+of the same workload) splits A's extra mean end-to-end latency per request over B, per concurrency, into
+  ttft_part_ms   = TTFT_A - TTFT_B                       (EvalScope "Avg TTFT (ms)")
+  decode_part_ms = (O - 1) x (TPOT_A - TPOT_B)           (EvalScope "Avg TPOT (ms)", O output tokens)
+from the medians over the measured phases (phase measured or measured-N), with the measured latency
+difference (EvalScope "Avg Latency (s)", converted to ms) and the residual beside them, and names the
+larger part. O is the run's output length read from the files (summary "Avg Output Tokens", one value
+over every measured row of both files and equal to the manifest's output_tokens). Per-repetition pairs
+(A_i - B_i, measured-i of A with measured-i of B) give the [min, max] of each part. Under EvalScope's
+per-request TPOT = (latency - TTFT) / (O - 1), the residual is near zero when every request has O tokens;
+it is not exactly zero because the three medians are taken separately and EvalScope rounds its summary.
 """
 import argparse, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
 
@@ -403,6 +415,101 @@ def predict_markdown(res):
     return "\n".join(lines) + "\n"
 
 
+
+def _repetition(phase, prefix):
+    """Repetition index of a measured phase: 'measured' (one repetition) -> 1, 'measured-N' -> N."""
+    rest = str(phase)[len(prefix):]
+    if rest == "":
+        return 1
+    if rest.startswith("-") and rest[1:].isdigit():
+        return int(rest[1:])
+    return None
+
+
+def gap_split(specs, phase_prefix="measured"):
+    """Per concurrency, split the mean end-to-end latency gap of the first benchmark.json over the
+    second into a TTFT part and a decode part ((O-1) x TPOT difference); medians over measured phases.
+
+    Reads, per result of an amd-tracking run_evalscope_matrix.py benchmark.json: phase, concurrency and
+    the EvalScope summary "Avg TTFT (ms)", "Avg TPOT (ms)", "Avg Latency (s)" and "Avg Output Tokens"
+    (O, the run's real output length; it must be one value over every measured row of both files)."""
+    if len(specs) != 2:
+        raise SystemExit("--gap-split needs exactly two LABEL=BENCHMARK_JSON (A then B)")
+    (la, pa), (lb, pb) = specs
+
+    def rows(path):
+        with open(path) as fh:
+            bj = json.load(fh)
+        out = collections.defaultdict(dict)
+        outs = set()
+        for r in bj["results"]:
+            rep = _repetition(r["phase"], phase_prefix) if str(r["phase"]).startswith(phase_prefix) else None
+            if rep is None:
+                continue
+            s, c = r["summary"], int(r["concurrency"])
+            if rep in out[c]:
+                raise SystemExit(f"--gap-split: {path}: two results for {r['phase']} at concurrency {c}")
+            o = float(s["Avg Output Tokens"])
+            outs.add(o)
+            out[c][rep] = {"phase": r["phase"], "ttft_ms": float(s["Avg TTFT (ms)"]),
+                           "tpot_ms": float(s["Avg TPOT (ms)"]), "latency_ms": float(s["Avg Latency (s)"]) * 1e3,
+                           "output_tokens": o}
+        if not out:
+            raise SystemExit(f"--gap-split: {path}: no results with phase {phase_prefix}[-N]")
+        return bj, out, outs
+
+    ba, ra, oa = rows(pa); bb, rb, ob = rows(pb)
+    if ba.get("prompt_tokens") != bb.get("prompt_tokens"):
+        raise SystemExit(f"--gap-split: prompt lengths differ ({ba.get('prompt_tokens')} vs {bb.get('prompt_tokens')})")
+    outs = oa | ob
+    if len(outs) != 1 or not float(next(iter(outs))).is_integer():
+        raise SystemExit(f"--gap-split: measured rows need one integral output length (Avg Output Tokens), "
+                         f"got {sorted(outs)}")
+    o = int(next(iter(outs)))
+    for bj, path in ((ba, pa), (bb, pb)):
+        if bj.get("output_tokens") is not None and int(bj["output_tokens"]) != o:
+            raise SystemExit(f"--gap-split: {path}: output_tokens {bj['output_tokens']} != Avg Output Tokens {o}")
+    med = statistics.median
+    res = {"a": la, "b": lb, "a_benchmark_json": pa, "a_sha256": sha256(pa), "b_benchmark_json": pb,
+           "b_sha256": sha256(pb), "prompt_tokens": ba.get("prompt_tokens"), "output_tokens": o,
+           "phase_prefix": phase_prefix, "concurrencies_only_in_a": sorted(set(ra) - set(rb)),
+           "concurrencies_only_in_b": sorted(set(rb) - set(ra)), "rows": []}
+    for c in sorted(set(ra) & set(rb)):
+        A, B = ra[c], rb[c]
+        row = {"concurrency": c, "n_a": len(A), "n_b": len(B)}
+        for k in ("ttft_ms", "tpot_ms", "latency_ms"):
+            row[f"a_{k}_median"] = med([x[k] for x in A.values()])
+            row[f"b_{k}_median"] = med([x[k] for x in B.values()])
+        row["ttft_part_ms"] = row["a_ttft_ms_median"] - row["b_ttft_ms_median"]
+        row["decode_part_ms"] = (o - 1) * (row["a_tpot_ms_median"] - row["b_tpot_ms_median"])
+        row["latency_gap_ms"] = row["a_latency_ms_median"] - row["b_latency_ms_median"]
+        row["residual_ms"] = row["latency_gap_ms"] - row["ttft_part_ms"] - row["decode_part_ms"]
+        reps = sorted(set(A) & set(B))  # pair repetition i of A with repetition i of B
+        row["paired_repetitions"] = reps
+        tt = [A[i]["ttft_ms"] - B[i]["ttft_ms"] for i in reps]
+        dd = [(o - 1) * (A[i]["tpot_ms"] - B[i]["tpot_ms"]) for i in reps]
+        row["ttft_part_ms_paired_range"] = [min(tt), max(tt)] if tt else None
+        row["decode_part_ms_paired_range"] = [min(dd), max(dd)] if dd else None
+        row["larger_part"] = "ttft" if abs(row["ttft_part_ms"]) >= abs(row["decode_part_ms"]) else "decode"
+        res["rows"].append(row)
+    return res
+
+
+def gap_split_markdown(res):
+    a, b, o = res["a"], res["b"], res["output_tokens"]
+    lines = [f"| C | TTFT {a} ms | TTFT {b} ms | TPOT {a} ms | TPOT {b} ms | TTFT part ms [paired min, max] "
+             f"| decode part {o - 1} x dTPOT ms [paired min, max] | latency gap ms | residual ms | larger |",
+             "|" + "---|" * 10]
+    f = lambda x: f"{x:.1f}"
+    for r in res["rows"]:
+        rng = lambda x: f"[{f(x[0])}, {f(x[1])}]" if x else "[none]"
+        lines.append(f"| {r['concurrency']} | {f(r['a_ttft_ms_median'])} | {f(r['b_ttft_ms_median'])} | "
+                     f"{r['a_tpot_ms_median']:.2f} | {r['b_tpot_ms_median']:.2f} | {f(r['ttft_part_ms'])} {rng(r['ttft_part_ms_paired_range'])} | "
+                     f"{f(r['decode_part_ms'])} {rng(r['decode_part_ms_paired_range'])} | {f(r['latency_gap_ms'])} | {f(r['residual_ms'])} | "
+                     f"{r['larger_part']} |")
+    return "\n".join(lines) + "\n"
+
+
 def split_spec(spec, flag):
     name, sep, value = spec.partition("=")
     if not sep or not name or not value:
@@ -445,6 +552,8 @@ def main():
     ap.add_argument("--decode-log-interval", type=int, help="rounds per Decode line, for per-round times")
     ap.add_argument("--markdown", action="store_true", help="also print one table row per run")
     ap.add_argument("--out-json")
+    ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
+                    help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
     pr.add_argument("--runs", action="append", default=[], help="CFG=JSON written by this tool (repeatable)")
@@ -455,6 +564,12 @@ def main():
     pr.add_argument("--output-tokens", type=int)
     pr.add_argument("--concurrency", type=int)
     a = ap.parse_args()
+    if a.gap_split:
+        res = gap_split([split_spec(x, "--gap-split") for x in a.gap_split])
+        if a.out_json:
+            json.dump(res, open(a.out_json, "w"), indent=1)
+        print(gap_split_markdown(res), end="")
+        return
     if a.predict:
         missing = [f for f in ("runs", "prefill", "requests", "prompt_tokens", "output_tokens", "concurrency",
                                "decode_log_interval") if not getattr(a, f)]
