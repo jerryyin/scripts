@@ -415,3 +415,23 @@ def test_activity_window_reports_stated_window_and_unobserved_gpu() -> None:
     assert w["per_gpu"]["3"] == "unobserved" and w["gpus"]["0"]["cu_occupancy_mean"] == 32
     assert w["n_samples"] == 17  # T + 6 .. T + 14 every 0.5 s
     assert [x["gpus"]["1"] for x in w["timeline"]] == [[False, 0]]
+
+
+def test_cache_writes_group_compiles_inside_window() -> None:
+    """--cache-listing: files modified inside a window, grouped per (hash dir, kernel), with the compile span."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    with tempfile.TemporaryDirectory() as d:
+        lst = Path(d) / "cache.txt"
+        lst.write_text("".join(f"{t:.3f} {n} /c/{h}/{f}\n" for t, n, h, f in [
+            (T - 50, 10, "AAA", "K.source"),             # before the window: left out
+            (T + 2.0, 48_000_000, "BBB", "MegaMoEStage1.source"),
+            (T + 2.5, 48_000_000, "BBB", "MegaMoEStage1.glir"),
+            (T + 29.0, 130_000, "BBB", "MegaMoEStage1.hsaco"),
+            (T + 29.0, 177, "BBB", "__grp__MegaMoEStage1.json"),
+            (T + 29.1, 182_000, "CCC", "MegaMoECombine.source")]))
+        listing = e2e.load_cache_listing([str(lst)])
+    w = e2e.cache_writes(listing, T, T + 30)
+    assert [(x["hash_dir"], x["kernel"]) for x in w] == [("BBB", "MegaMoEStage1"), ("CCC", "MegaMoECombine")]
+    assert abs(w[0]["span_s"] - 27.0) < 1e-6 and w[0]["source_bytes"] == 48_000_000 and len(w[0]["files"]) == 3
+    assert w[1]["span_s"] == 0 and w[1]["source_bytes"] == 182_000
