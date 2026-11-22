@@ -721,21 +721,21 @@ def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_ove
     groups: dict = {}
     for r in rows:
         key = (r["profile"], r["mode"], str(r["active_ranks"]), str(r["tokens_per_gpu"]), r.get("candidate", "petit"),
-               r.get("petit_switches") or "off")
+               r.get("post") or "none", r.get("petit_switches") or "off")
         groups.setdefault(key, []).append(float(r[metric]))
     med = {k: statistics.median(v) for k, v in groups.items()}
     out = []
-    for (profile, mode, act, tok, cand, sw), value in sorted(med.items()):
-        base = med.get((profile, mode, act, tok, cand, baseline))
+    for (profile, mode, act, tok, cand, post, sw), value in sorted(med.items()):
+        base = med.get((profile, mode, act, tok, cand, post, baseline))
         if sw == baseline or base is None:
             continue
         delta_us = (value - base) * 1000.0
         row = {"profile": profile, "mode": mode, "active_ranks": act, "tokens_per_gpu": tok, "candidate": cand,
-               "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
+               "post": post, "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
                "delta_us": round(delta_us, 2)}
         if profile == "dsv41_flash":
-            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, sw))
-            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, baseline))
+            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", sw))
+            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", baseline))
             draft_us = (d_draft - b_draft) * 1000.0 if d_draft is not None and b_draft is not None else None
             row["draft_delta_us"] = None if draft_us is None else round(draft_us, 2)
             row["step_delta_ms"] = (None if draft_us is None else
@@ -799,7 +799,7 @@ def main(argv=None) -> int:
         pa = pp.parse_args(argv[1:])
         rows = [r for path in pa.rows_csv for r in csv.DictReader(open(path, newline=""))]
         res = project_step(rows, pa.baseline, pa.metric, pa.draft_tokens)
-        cols = ["profile", "active_ranks", "tokens_per_gpu", "switches", "baseline_us", "call_us", "delta_us",
+        cols = ["profile", "active_ranks", "tokens_per_gpu", "post", "switches", "baseline_us", "call_us", "delta_us",
                 "draft_delta_us", "step_delta_ms"]
         print("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))
         for r in res:

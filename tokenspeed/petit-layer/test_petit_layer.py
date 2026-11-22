@@ -413,3 +413,13 @@ def test_rows_carry_post_mode():
     assert rows[0]["post"] == "add"
     record["args"] = {}
     assert petit_layer.record_rows(record, "x.json")[0]["post"] == "none"
+
+
+def test_project_step_keeps_post_modes_apart():
+    def row(post, sw, ms):
+        return {"profile": "dsv41_flash", "mode": "graph", "active_ranks": "1", "tokens_per_gpu": "6",
+                "candidate": "petit", "petit_switches": sw, "post": post, "max_over_ranks_median_ms": ms}
+    rows = [row("none", "off", 0.090), row("none", "C3=1", 0.088), row("add", "off", 0.095), row("add", "C3=1", 0.089)]
+    res = {r["post"]: r for r in petit_layer.project_step(rows)}
+    assert res["none"]["delta_us"] == -2.0 and res["add"]["delta_us"] == -6.0
+    assert res["add"]["baseline_us"] == 95.0
