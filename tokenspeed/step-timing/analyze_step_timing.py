@@ -37,6 +37,12 @@ SEG = {  # start-marker name -> (category, bucket)
     "petit.comb": ("petit.combine", "moe_combine"),
     "petit.post": ("moe.shared_join_wait", "moe_experts"),
     "moe.join": ("ffn.add+post_comm(allreduce)", "collectives"),
+    # From TokenSpeed 649a6353: moe.split opens the tp4ep4-petit row split (this rank's slice of the
+    # replicated rows, before the router); moe.comm opens the MoE output all-reduce in _forward_ffn
+    # (TP4: routed + shared partials; tp4ep4-petit: the combine/gather of the split rows), which ends
+    # the moe.join segment there (TP4: routed finalize + shared add; tp4ep4-petit: row placement).
+    "moe.split": ("moe.row_split(tp4ep4-petit)", "moe_split"),
+    "moe.comm": ("ffn.post_comm(moe allreduce)", "collectives"),
     "ffn.end": ("layer_tail", "norm/mhc"),
     "final": ("final_norm", "other"),
     "model.end": ("lm_head+sampling+outputs", "head+sample"),

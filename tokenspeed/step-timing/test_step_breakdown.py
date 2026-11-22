@@ -93,12 +93,36 @@ def test_draft_markers_counted_apart() -> None:
     assert sb.marker_name("-1:draft.end") == "draft.end"
 
 
+def test_tp4ep4_petit_markers() -> None:
+    # One tp4ep4-petit MoE layer at TokenSpeed 649a6353: ffn, moe.split, moe.router, moe.experts, the four
+    # Petit markers, shared.b/e (main stream), moe.join (row placement), moe.comm (combine all-reduce), ffn.end.
+    import analyze_step_timing as ast
+    names = ["0:ffn", "0:moe.split", "0:moe.router", "0:moe.experts", "0:petit.s1", "0:petit.s2", "0:petit.comb",
+             "0:petit.post", "0:shared.b", "0:shared.e", "0:moe.join", "0:moe.comm", "0:ffn.end"]
+    t = [0.0, 0.1, 0.11, 0.2, 0.3, 0.6, 0.8, 0.9, 0.95, 1.45, 1.5, 1.6, 2.4]
+    cats, _, aux, _ = ast.step_components({"names": names, "streams": ["main"] * len(names)}, t, 2.5)
+    assert abs(cats["moe.row_split(tp4ep4-petit)"] - 0.01) < 1e-9
+    assert abs(cats["ffn.add+post_comm(allreduce)"] - 0.1) < 1e-9  # moe.join -> moe.comm: row placement
+    assert abs(cats["ffn.post_comm(moe allreduce)"] - 0.8) < 1e-9  # moe.comm -> ffn.end: the all-reduce
+    assert abs(aux["aux.shared_expert"] - 0.5) < 1e-9
+    comps, _ = sb.load_map(str(Path(sb.HERE) / "components.json"))
+    owner = {c: comp["name"] for comp in comps for c in comp["categories"]}
+    assert sb.project_group(owner["moe.row_split(tp4ep4-petit)"]) == "row_split"
+    assert sb.project_group(owner["ffn.post_comm(moe allreduce)"]) == "moe_allreduce"
+    # groups of the components that existed before 649a6353 keep their meaning
+    assert sb.project_group(owner["ffn.add+post_comm(allreduce)"]) == "other"
+    assert sb.project_group(owner["other:shared.b"]) == "shared_expert"
+    assert sb.project_group(owner["moe.router_gate_topk"]) == "router"
+    assert sb.project_group("other: draft:ffn.post_comm(moe allreduce)") == "draft"
+
+
 if __name__ == "__main__":
     test_table_correction_and_diff()
     test_without_clean_step_there_is_no_correction()
     test_overhead_row()
     test_share_on_self_test_dumps()
     test_draft_markers_counted_apart()
+    test_tp4ep4_petit_markers()
     print("ok")
 
 

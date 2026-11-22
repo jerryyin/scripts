@@ -1,5 +1,5 @@
 {
- "_doc": "Requested components of a DeepSeek V4.1 decode step, as sums of analyze_step_timing.py categories. 'markers' are the start-marker names (from instrumentation.diff) inside the component, used for the per-marker overhead correction. Categories not listed here are reported as 'other: <category>'; 'aux' categories run overlapped on the aux stream and are shown but not summed. Draft-model (DSpark) segments are categories 'draft:<category>' and markers 'draft:<marker>' (layer id >= 1000 in the dump); the Petit MoE of a layer is the components 'MoE prep' + 'Petit Stage1/Stage2/Combine/post' (moe.experts .. petit.post, the whole kernel_moe_apply call), see step_breakdown.py share.",
+ "_doc": "Requested components of a DeepSeek V4.1 decode step, as sums of analyze_step_timing.py categories. 'markers' are the start-marker names (from instrumentation.diff) inside the component, used for the per-marker overhead correction. Categories not listed here are reported as 'other: <category>'; 'aux' categories run overlapped on the aux stream and are shown but not summed. Draft-model (DSpark) segments are categories 'draft:<category>' and markers 'draft:<marker>' (layer id >= 1000 in the dump); the Petit MoE of a layer is the components 'MoE prep' + 'Petit Stage1/Stage2/Combine/post' (moe.experts .. petit.post, the whole kernel_moe_apply call), see step_breakdown.py share. From TokenSpeed 649a6353: 'moe.split' (tp4ep4-petit only) and 'moe.comm' (every layout whose MoE output is all-reduced after the MoE call: TP4 and tp4ep4-petit, not EP4/DP4-Petit). Where moe.comm fires, 'add/post-comm (TP4 all-reduce)' (moe.join->moe.comm) holds only the work before the collective (TP4: routed finalize + shared add; tp4ep4-petit: zero/copy of the shared partial and the add of the rank's routed rows, i.e. the row placement), and the all-reduce is the 'MoE output all-reduce' component; in dumps without moe.comm (instrumentation before 649a6353) add/post-comm still holds both. With a deferred (mHC-fused) all-reduce moe.comm does not fire and the collective runs in the next layer's pre-attention mHC.",
  "components": [
   {"name": "embed/prep (+graph.pre)", "categories": ["embed+prep", "graph.pre(before model.begin)"], "markers": ["model.begin"]},
   {"name": "Engram", "categories": ["engram"], "markers": ["engram"]},
@@ -11,6 +11,7 @@
   {"name": "attn: output proj (+TP4 attn all-reduce)", "categories": ["attn.out_proj(+attn allreduce)"], "markers": ["attn.wo"]},
   {"name": "norms/mHC pre-ffn", "categories": ["mhc+norm(pre-ffn)"], "markers": ["hc_ffn"]},
   {"name": "ffn.pre_comm", "categories": ["ffn.pre_comm"], "markers": ["ffn"]},
+  {"name": "MoE row split (tp4ep4-petit: this rank's slice of the replicated rows, before routing)", "categories": ["moe.row_split(tp4ep4-petit)"], "markers": ["moe.split"]},
   {"name": "MoE router/top-k", "categories": ["moe.router_gate_topk"], "markers": ["moe.router"]},
   {"name": "MoE prep (EP: quant/prep; TP4: whole routed MoE)", "categories": ["moe.prep(quant/non-petit experts)"], "markers": ["moe.experts"]},
   {"name": "Petit Stage1 (dispatch wait + gate/up)", "categories": ["petit.stage1(dispatch_wait+gate_up)"], "markers": ["petit.s1"]},
@@ -20,6 +21,7 @@
   {"name": "shared expert (serial on main stream)", "categories": ["other:shared.b"], "markers": ["shared.b"]},
   {"name": "shared.e->moe.join (shared add/join)", "categories": ["other:shared.e"], "markers": ["shared.e"]},
   {"name": "add/post-comm (TP4 all-reduce)", "categories": ["ffn.add+post_comm(allreduce)"], "markers": ["moe.join"]},
+  {"name": "MoE output all-reduce (moe.comm->ffn.end; TP4: routed+shared partials, tp4ep4-petit: combine/gather of the split rows)", "categories": ["ffn.post_comm(moe allreduce)"], "markers": ["moe.comm"]},
   {"name": "layer tail (ffn.end->next layer)", "categories": ["layer_tail"], "markers": ["ffn.end"]},
   {"name": "final norm", "categories": ["final_norm"], "markers": ["final"]},
   {"name": "lm_head+sampling+outputs", "categories": ["lm_head+sampling+outputs"], "markers": ["model.end"]},
