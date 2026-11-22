@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for gpu-queue: add, status, serve's claim/drain/release loop, crash recovery, and the
-one-serve-per-queue lock that lets add start a serve.
+"""Tests for gpu-queue: add, status, serve's claim/drain/release loop, crash recovery, the
+one-serve-per-queue lock that lets add start a serve, and stopping the memory holder when a serve
+is signalled or fails.
 
 No GPU or docker: the queue is a local directory and the GPU wait is replaced.
 """
@@ -9,9 +10,11 @@ import os
 import importlib.machinery
 import importlib.util
 import io
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
@@ -265,6 +268,132 @@ def test_once_serve_takes_a_job_queued_as_it_stops(tmp=None):
     assert (queue / 'done' / late.name).exists(), 'the late job must run before the serve exits'
 
 
+# Stands in for gpu-hold.py (no GPU): a child in its own group, both gone after SIGTERM or SIGINT.
+FAKE_HOLDER = """import signal, subprocess, sys, time
+child = subprocess.Popen(['sleep', '300'])
+def stop(*_):
+    child.terminate()
+    child.wait()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+while True:
+    time.sleep(0.1)
+"""
+
+# A local serve with the real MemoryHold running the fake holder, on GPUs "0,1,2,3".
+SERVE_WITH_FAKE_HOLDER = """import argparse, importlib.machinery, importlib.util, sys
+from pathlib import Path
+tool, fake, queue, log = sys.argv[1:]
+loader = importlib.machinery.SourceFileLoader('gpu_queue', tool)
+gq = importlib.util.module_from_spec(importlib.util.spec_from_loader('gpu_queue', loader))
+sys.modules['gpu_queue'] = gq
+loader.exec_module(gq)
+gq.GPU_HOLD = Path(fake)
+args = argparse.Namespace(count=4, container=None, poll=0, once=True, reclaim_after=None)
+sys.exit(gq.serve(args, gq.Store(queue), Path(log), wait=lambda _a, _l: '0,1,2,3'))
+"""
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def wait_until(check, seconds: float = 20) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if check():
+            return True
+        time.sleep(0.05)
+    return check()
+
+
+def test_stop_signal_stops_the_holder_group_and_leaves_the_job(tmp=None):
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        root = Path(tmp or tempfile.mkdtemp()) / sig.name
+        queue, log = root / 'q', root / 'serve.log'
+        fake = root / 'fake-gpu-hold.py'
+        root.mkdir(parents=True)
+        fake.write_text(FAKE_HOLDER)
+        holder_file, job_file = root / 'holder.pgid', root / 'job.pid'
+        with served(queue):
+            quiet(gq.main, ['add', str(queue), '--name', 'long', '--',
+                            f'echo $GPU_ADMISSION_OWN_PGIDS > {holder_file}; echo $$ > {job_file}; '
+                            f'exec sleep 300'])
+        serve = subprocess.Popen([sys.executable, '-c', SERVE_WITH_FAKE_HOLDER, str(HERE / 'gpu-queue'),
+                                  str(fake), str(queue), str(log)],
+                                 stdout=subprocess.DEVNULL, start_new_session=True)
+        try:
+            assert wait_until(lambda: holder_file.exists() and job_file.exists()
+                              and holder_file.read_text().strip() and job_file.read_text().strip()), \
+                'the job never started'
+            holder, job = int(holder_file.read_text()), int(job_file.read_text())
+            assert group_alive(holder) and holder != serve.pid
+            started = time.monotonic()
+            serve.send_signal(sig)  # the serve process alone, not its group
+            assert serve.wait(30) == 128 + sig, sig.name
+            assert time.monotonic() - started < 30, 'the holder must stop on SIGTERM, not by the 60 s SIGKILL'
+            assert wait_until(lambda: not group_alive(holder)), f'{sig.name}: holder group {holder} survives'
+            last = log.read_text().splitlines()[-1]
+            assert f'{sig.name}: memory holder stopped' in last and 'released' in last, last
+            assert gq.serving(queue) is None, 'the serve lock must be released'
+            os.kill(job, 0)  # the job is not the serve's to stop: it still runs
+        finally:
+            if serve.poll() is None:
+                serve.kill()
+                serve.wait()
+            if group_alive(serve.pid):  # the group this test started: the left-alone job
+                os.killpg(serve.pid, signal.SIGKILL)
+        assert wait_until(lambda: not group_alive(serve.pid))
+
+
+def test_memory_hold_stop_ends_its_group_and_is_idempotent(tmp=None):
+    root = Path(tmp or tempfile.mkdtemp())
+    fake = root / 'fake-gpu-hold.py'
+    fake.write_text(FAKE_HOLDER)
+    saved, gq.GPU_HOLD = gq.GPU_HOLD, fake
+    try:
+        hold = gq.MemoryHold('0,1,2,3', root / 'serve.log', root)
+        pgid = int(hold.start()['GPU_ADMISSION_OWN_PGIDS'])
+        assert wait_until(lambda: len(subprocess.run(['pgrep', '-g', str(pgid)], capture_output=True,
+                                                     text=True).stdout.split()) == 2), 'holder and child'
+        hold.stop()
+        assert not group_alive(pgid)
+        hold.stop()  # again: nothing to stop, no error
+    finally:
+        gq.GPU_HOLD = saved
+
+
+def test_an_exception_while_draining_stops_the_holder(tmp=None):
+    root = Path(tmp or tempfile.mkdtemp())
+    queue = root / 'q'
+    events: list[str] = []
+
+    class Hold(NoHold):
+        def stop(self):
+            events.append('stop')
+
+    class Broken(gq.Store):
+        def run(self, job, hip, extra_env=None):
+            raise RuntimeError('job runner failed')
+    with served(queue):
+        quiet(gq.main, ['add', str(queue), '--name', 'job', '--', 'true'])
+    args = argparse.Namespace(count=4, container=None, poll=0, once=True, reclaim_after=None)
+    try:
+        quiet(gq.serve, args, Broken(str(queue)), root / 'serve.log', wait=lambda _a, _l: '0,1,2,3',
+              hold=Hold)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('the error must propagate')
+    assert events == ['stop'], events
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL, 'serve must restore signal handlers'
+
+
 def test_container_lock_holder_keeps_the_lock_until_stdin_closes(tmp=None):
     root = Path(tmp or tempfile.mkdtemp())
     queue = root / 'q'
@@ -290,5 +419,8 @@ if __name__ == '__main__':
     test_status_shows_waits_and_flags_a_queue_with_no_serve()
     test_one_serve_per_queue_and_add_starts_one()
     test_once_serve_takes_a_job_queued_as_it_stops()
+    test_stop_signal_stops_the_holder_group_and_leaves_the_job()
+    test_memory_hold_stop_ends_its_group_and_is_idempotent()
+    test_an_exception_while_draining_stops_the_holder()
     test_container_lock_holder_keeps_the_lock_until_stdin_closes()
     print('ok')

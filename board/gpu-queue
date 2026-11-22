@@ -13,7 +13,10 @@ check. So one claim must cover a sequence of jobs. `serve` holds no GPU while th
 empty; when a job is pending it waits for N idle GPUs (`gpu-wait.py N --hip`), then runs every
 pending job on those GPUs, oldest first, starting each the moment the previous one exits,
 including jobs added while earlier ones run. It releases the GPUs when the queue is empty and
-goes back to waiting (or exits, with --once). It signals no process of another tenant unless
+goes back to waiting (or exits, with --once). A local serve stopped by SIGTERM, SIGINT or SIGHUP
+stops its memory holder's process group, releases DIR's lock, logs one line and exits 128+signal;
+it does not signal the running job (stop the serve's process group to stop the job too), which
+the next serve moves to failed/ as interrupted. It signals no process of another tenant unless
 --reclaim-after is given.
 
 A local serve holds the claimed GPUs' free memory from the claim until the queue is empty
@@ -77,6 +80,21 @@ HOLD_LOCK = 'exec 9>>"$1" && flock -n 9 && printf "%s\\n" "$2" > "$1" && echo lo
 JOB_RE = re.compile(r'^[0-9TZ-]+-[A-Za-z0-9._-]+\.sh$')
 NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 NO_TIME_LIMIT = str(10 ** 9)  # seconds; gpu-wait.py has no "wait forever" value
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)  # a local serve cleans up on these
+
+
+class Interrupted(BaseException):
+    """A stop signal reached a local serve; raised once, so its holder is stopped as it unwinds."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _interrupt(signum, _frame):
+    for sig in STOP_SIGNALS:  # a repeated signal must not cut the cleanup short
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(signum)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,9 +130,13 @@ class Store:
 
     def run(self, job: str, hip: str, extra_env: dict[str, str] | None = None) -> int:
         env = {'HIP_VISIBLE_DEVICES': hip, 'GPU_QUEUE_HIP': hip, 'GPU_QUEUE_JOB': job, **(extra_env or {})}
-        result = self.sh('cd "$1/running" && exec bash -lc \'exec "./$0" > "./$0.log" 2>&1\' "$2"',
-                         job, check=False, env=env, capture=False)
-        return result.returncode
+        script = 'cd "$1/running" && exec bash -lc \'exec "./$0" > "./$0.log" 2>&1\' "$2"'
+        if self.container:
+            return self.sh(script, job, check=False, env=env, capture=False).returncode
+        # Not subprocess.run, which SIGKILLs the job when a stop signal interrupts the wait: a
+        # stopped local serve leaves its job alone, as a serve killed by SIGTERM always did.
+        return subprocess.Popen(['sh', '-c', script, 'gpu-queue', self.root, job],
+                                env={**os.environ, **env}).wait()
 
 
 class ServeLock:
@@ -154,6 +176,8 @@ class ServeLock:
         return False
 
     def release(self) -> None:
+        if self.holder is None:  # already released (a --once serve between its two looks)
+            return
         if self.container:
             self.holder.stdin.close()
             self.holder.wait()
@@ -191,7 +215,10 @@ def note(log: Path, message: str) -> None:
     line = f'{dt.datetime.now().astimezone():%Y-%m-%dT%H:%M:%S%z} {message}'
     with log.open('a') as fh:
         fh.write(line + '\n')
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except OSError:  # a hung-up terminal; the line is in the log
+        pass
 
 
 def wait_for_gpus(args: argparse.Namespace, log: Path) -> str | None:
@@ -317,23 +344,36 @@ class MemoryHold:
     def start(self) -> dict[str, str]:
         """Start holding; returns the job environment naming the holder's group and files."""
         self.ready.unlink(missing_ok=True)
-        self.process = subprocess.Popen(
-            [sys.executable, str(GPU_HOLD), '--hip', self.hip, '--log', str(self.log),
-             '--ready', str(self.ready), '--state', str(self.state)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
+        # A stop signal waits until the holder is recorded, so stop() always finds it; the holder
+        # itself starts with them unblocked (a child inherits the blocked mask).
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(GPU_HOLD), '--hip', self.hip, '--log', str(self.log),
+                 '--ready', str(self.ready), '--state', str(self.state)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True,
+                preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, blocked))
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
         return {'GPU_ADMISSION_OWN_PGIDS': str(self.process.pid),
                 'GPU_QUEUE_READY': str(self.ready), 'GPU_QUEUE_HOLD_STATE': str(self.state)}
 
     def stop(self) -> None:
+        """Stop the holder's group; a no-op when it is not running, so it may be called again."""
         if self.process is None:
             return
-        self.process.terminate()
+        # A stop signal arriving now waits until the holder is gone, so it cannot cut this short.
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
-            self.process.wait(60)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)  # its own group: the holder and its children
-            self.process.wait()
-        self.process = None
+            self.process.terminate()
+            try:
+                self.process.wait(60)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.process.pid, signal.SIGKILL)  # its own group: the holder and its children
+                self.process.wait()
+            self.process = None
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
 def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
@@ -343,6 +383,25 @@ def serve(args: argparse.Namespace, store: Store, log: Path, wait=wait_for_gpus,
     if not lock.acquire():
         note(log, f'another serve holds {store.root}/{LOCK}; exiting')
         return 1
+    if args.container:  # a host serve keeps the default signal actions
+        return _serve(args, store, log, wait, reclaim, lock, hold)
+    # Without these handlers SIGTERM and SIGHUP end the process at once, skipping the finally that
+    # stops the memory holder, whose own process group then keeps the GPUs' memory.
+    previous = {sig: signal.signal(sig, _interrupt) for sig in STOP_SIGNALS}
+    try:
+        return _serve(args, store, log, wait, reclaim, lock, hold)
+    except Interrupted as stop:  # _serve's finally has stopped the holder
+        lock.release()
+        note(log, f'{signal.Signals(stop.signum).name}: memory holder stopped, '
+                  f'{store.root}/{LOCK} released; running job left alone; exiting')
+        return 128 + stop.signum
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _serve(args: argparse.Namespace, store: Store, log: Path, wait, reclaim, lock: ServeLock,
+           hold) -> int:
     recover(store, log)
     note(log, f'serving {store.root} ({args.container or "local"}), {args.count} GPUs per claim')
     spare = container_id(args.container) if args.reclaim_after and args.container else None
