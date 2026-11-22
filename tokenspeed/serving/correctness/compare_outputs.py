@@ -7,10 +7,12 @@ usage: compare_outputs.py A.jsonl B.jsonl [--label-a A] [--label-b B] [--out rep
 For each prompt index: exact match of the generated text (reasoning + content for chat), the first
 token where the re-encoded outputs differ, the common token prefix, finish reasons, completion
 token counts and prefix-cache hits. Prints a summary line per pair (exact, token-identical, differing
-at token 0, median and minimum first differing token, total common prefix, mean / min / max
-acceptance length of each side) and, with --out, writes a Markdown table. --cache-free adds the
-same counts over the prompts with no prefix-cache hit on either side. Exits 0 whether or not the
-outputs match; deciding what a mismatch means is the caller's job.
+at token 0, median, minimum and maximum first differing token, first_diff_buckets: how many
+token-differing prompts first differ at token 0, 1-4, 5-31, 32-127, 128+, each such prompt counted
+once, total common prefix, mean / min / max acceptance length of each side) and, with --out,
+writes a Markdown table. --cache-free adds the same counts over the prompts with no prefix-cache
+hit on either side. Exits 0 whether or not the outputs match; deciding what a mismatch means is
+the caller's job.
 """
 import argparse
 import json
@@ -61,6 +63,11 @@ def acceptance(outputs):
     return {"n": len(v), "mean": statistics.mean(v), "min": min(v), "max": max(v)} if v else None
 
 
+# Ranges of the first differing token (inclusive bounds); contiguous from 0, so every token-differing
+# prompt falls in exactly one and the counts sum to prompts - token_identical.
+FIRST_DIFF_BUCKETS = (("0", 0, 0), ("1-4", 1, 4), ("5-31", 5, 31), ("32-127", 32, 127), ("128+", 128, float("inf")))
+
+
 def summarize(rows, label):
     diffs = [r["first_diff_token"] for r in rows if r["first_diff_token"] is not None]
     return {
@@ -70,6 +77,11 @@ def summarize(rows, label):
         "differ_at_token_0": sum(d == 0 for d in diffs),
         "median_first_diff": statistics.median(diffs) if diffs else None,
         "min_first_diff": min(diffs) if diffs else None,
+        "max_first_diff": max(diffs) if diffs else None,
+        "first_diff_buckets": {
+            name: sum(lo <= d <= hi for d in diffs)
+            for name, lo, hi in FIRST_DIFF_BUCKETS
+        },
         "total_common_prefix": sum(r["common_prefix"] for r in rows),
         "mismatching_idx": [r["idx"] for r in rows if not r["exact"]],
     }
