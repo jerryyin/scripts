@@ -190,6 +190,19 @@ def test_a_comm_phase_caps_again_like_weights(tmp=None):
     assert caps == [16 << 30, gh.UNCAPPED, 16 << 30] and states == ['hold', 'busy'], (caps, states)
 
 
+def test_a_dist_phase_releases_for_the_read_then_caps_again_before_the_weights(tmp=None):
+    """memgate's `dist` read (the free memory the KV headroom is taken from) sees the device's free
+    memory, then the cap is back before the ranks construct the model."""
+    tmp = Path(tmp or tempfile.mkdtemp())
+    script = [nothing, nothing, wait(1, 'dist'), wait(2, 'dist'), nothing, nothing,
+              enter(1), enter(2), leave(1), leave(2), nothing,
+              wait(1, 'weights'), wait(2, 'weights'), nothing, nothing]
+    states, caps, _ = run_gated(tmp, script)
+    GiB = 1 << 30
+    assert caps == [16 * GiB, gh.UNCAPPED, 16 * GiB, gh.UNCAPPED], caps
+    assert states == ['hold', 'busy'], states
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

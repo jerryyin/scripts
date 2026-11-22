@@ -55,20 +55,55 @@ def test_patch_wraps_the_names_the_call_sites_use_once(tmp=None):
 
     for name, gates in mg.GATES.items():
         module = types.ModuleType(name)
-        for dotted, _phase in gates:
+        for dotted, _phase, *_ in gates:
             if '.' in dotted:
                 setattr(module, dotted.split('.')[0], type('Runner', (), {}))
             owner, attr = resolve(module, dotted)
             setattr(owner, attr, lambda *a: 'called')
         mg.patch(module, root, 1)
         mg.patch(module, root, 1)
-        for dotted, phase in gates:
+        for dotted, phase, *_ in gates:
             owner, attr = resolve(module, dotted)
             fn = getattr(owner, attr)
             assert fn.__memgate__ == phase and not hasattr(fn.__wrapped__, '__memgate__')
     assert set(mg.GATES) == {'tokenspeed.runtime.model_loader.loader',
                              'tokenspeed.runtime.execution.model_runner',
-                             'tokenspeed.runtime.layers.attention.registry'}
+                             'tokenspeed.runtime.layers.attention.registry',
+                             'tokenspeed.runtime.execution.distributed_initializer'}
+
+
+def test_the_distributed_init_minimum_read_is_gated_and_reported_its_other_reads_are_not(tmp=None):
+    """DistributedInitializer.initialize calls get_available_gpu_memory four times; only the cross-rank
+    minimum (cpu_group=...) sizes anything (init_distributed returns it as the KV headroom's gpu_memory)."""
+    import contextlib
+    import io
+    root = Path(tmp or tempfile.mkdtemp())
+    module = types.ModuleType('tokenspeed.runtime.execution.distributed_initializer')
+    reads = []
+    module.get_available_gpu_memory = lambda device, gpu_id, distributed=False, empty_cache=True, cpu_group=None: (
+        reads.append((distributed, cpu_group)) or 286.25)
+    mg.patch(module, root, 30)
+    fn = module.get_available_gpu_memory
+    assert fn.__memgate__ == 'dist'
+    assert fn('cuda', 0) == 286.25 and not list(root.iterdir()), 'a log read passes straight through'
+    pid = os.getpid()
+    result, err = [], io.StringIO()
+
+    def call():
+        with contextlib.redirect_stderr(err):
+            result.append(fn('cuda', 0, distributed=True, cpu_group='gloo'))
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    for _ in range(200):
+        if (root / f'{pid}.wait').exists():
+            break
+        time.sleep(0.01)
+    assert (root / f'{pid}.wait').read_text().strip() == 'dist' and len(reads) == 1
+    (root / f'{pid}.go').touch()
+    thread.join(5)
+    assert result == [286.25] and reads[-1] == (True, 'gloo') and not list(root.iterdir())
+    assert 'memgate: dist read 286.25' in err.getvalue(), err.getvalue()
 
 
 def test_a_gated_method_still_binds_to_its_instance(tmp=None):

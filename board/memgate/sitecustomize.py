@@ -18,6 +18,15 @@ GATES, TokenSpeed (the call sites look these attributes up at call time, so patc
 - tokenspeed.runtime.layers.attention.registry.profile_available_cache_memory_bytes (phase kv): the
   free-memory profile that sizes the KV cache; registry.py imports the function by name, so the
   registry's binding is wrapped.
+- tokenspeed.runtime.execution.distributed_initializer.get_available_gpu_memory (phase dist), only its
+  call with `cpu_group=` (DistributedInitializer.initialize's cross-rank minimum, which init_distributed
+  returns as the device memory `gpu_memory` the KV profile takes its utilization headroom from:
+  KV = free - post_profile - gpu_memory x (1 - --gpu-memory-utilization)). Read under the busy cap it is
+  the cap (32 GiB), the headroom shrinks from ~29 GiB to ~3 GiB and the KV pool takes the activations'
+  memory; gated, all ranks read the device's free memory. Its other calls there (two log lines, the
+  per-rank balance check) are not gated. The phase's call returns its value on stderr.
+A GATES entry is (attribute, phase) or (attribute, phase, keyword): with a keyword only calls that pass
+it are gated.
 """
 from __future__ import annotations
 
@@ -34,15 +43,20 @@ GATES = {
     'tokenspeed.runtime.model_loader.loader': (('_initialize_model', 'weights'),),
     'tokenspeed.runtime.execution.model_runner': (('ModelRunner.prepare_communication_runtime', 'comm'),),
     'tokenspeed.runtime.layers.attention.registry': (('profile_available_cache_memory_bytes', 'kv'),),
+    'tokenspeed.runtime.execution.distributed_initializer': (('get_available_gpu_memory', 'dist', 'cpu_group'),),
 }
+REPORT_PHASES = {'dist'}  # phases whose call's result goes to stderr (the value the server sizes with)
 POLL_SECONDS = 0.05
 
 
-def gated(fn, phase: str, root: Path, timeout: float, clock=time.monotonic, sleep=time.sleep):
-    """`fn` wrapped to wait at the gate in `root` before each call."""
+def gated(fn, phase: str, root: Path, timeout: float, clock=time.monotonic, sleep=time.sleep,
+          keyword: str | None = None):
+    """`fn` wrapped to wait at the gate in `root` before each call (with `keyword`: each call passing it)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        if keyword is not None and keyword not in kwargs:
+            return fn(*args, **kwargs)
         pid = os.getpid()
         wait, go, inside = root / f'{pid}.wait', root / f'{pid}.go', root / f'{pid}.in'
         tmp = root / f'{pid}.tmp'
@@ -57,7 +71,10 @@ def gated(fn, phase: str, root: Path, timeout: float, clock=time.monotonic, slee
         os.replace(wait, inside)
         go.unlink(missing_ok=True)
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            if phase in REPORT_PHASES:
+                print(f'memgate: {phase} read {result!r}', file=sys.stderr, flush=True)
+            return result
         finally:
             inside.unlink(missing_ok=True)
 
@@ -66,14 +83,14 @@ def gated(fn, phase: str, root: Path, timeout: float, clock=time.monotonic, slee
 
 
 def patch(module, root: Path, timeout: float) -> None:
-    for name, phase in GATES.get(module.__name__, ()):
+    for name, phase, *keyword in GATES.get(module.__name__, ()):
         owner, _, attr = name.rpartition('.')
         target = module
         for part in owner.split('.') if owner else ():
             target = getattr(target, part, None)
         fn = getattr(target, attr, None) if target is not None else None
         if fn is not None and not hasattr(fn, '__memgate__'):
-            setattr(target, attr, gated(fn, phase, root, timeout))
+            setattr(target, attr, gated(fn, phase, root, timeout, keyword=keyword[0] if keyword else None))
 
 
 class _Finder(importlib.abc.MetaPathFinder):

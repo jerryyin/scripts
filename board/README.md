@@ -85,9 +85,12 @@ board/
   cap (its children re-check every 50 ms) and exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
   `board/memgate` first on the server's `PYTHONPATH`: every rank (also multiprocessing spawn
   children) imports it as `sitecustomize` (and runs the one it shadows) and waits at the gate before
-  TokenSpeed's model construction (`weights`: 119-140 GiB at once), communication buffers (`comm`)
-  and KV-cache memory profile (`kv`); when all N ranks wait the holder releases everything and lets
-  them go, caps again after `weights`/`comm`, and yields after `kv`. TokenSpeed is not changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900).
+  TokenSpeed's distributed-init free-memory minimum (`dist`: the `gpu_memory` the KV profile takes its
+  10 % headroom from; read under the cap it made the TP4 KV pool 148 GiB instead of ~123-128 and
+  the first prefill ran out of memory), model construction (`weights`: 119-140 GiB at once),
+  communication buffers (`comm`) and KV-cache memory profile (`kv`); when all N ranks wait the holder
+  releases everything and lets them go, caps again after `dist`/`weights`/`comm`, and yields after
+  `kv`. Every other free-memory read that sizes something on the start path comes after `kv`. TokenSpeed is not changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900).
   Without the shim a gated serve starves the server's weight allocation: use both or neither.
   Tests: `test_memgate.py`, `test_gpu_hold.py`.
 
