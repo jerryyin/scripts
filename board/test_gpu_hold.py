@@ -182,6 +182,14 @@ def test_without_a_gate_the_busy_cap_is_the_default_and_settled_memory_ends_busy
     assert gh.busy_hold(free=11 * GiB, held=270 * GiB, cap=16 * GiB) == 265 * GiB
 
 
+def test_a_comm_phase_caps_again_like_weights(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    script = [nothing, nothing, wait(1, 'comm'), wait(2, 'comm'), nothing, nothing,
+              enter(1), enter(2), leave(1), leave(2), nothing, nothing]
+    states, caps, _ = run_gated(tmp, script)
+    assert caps == [16 << 30, gh.UNCAPPED, 16 << 30] and states == ['hold', 'busy'], (caps, states)
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

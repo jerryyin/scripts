@@ -84,10 +84,10 @@ board/
   tp4ep4-petit post-load step), which the holder follows only if no single allocation exceeds the
   cap (its children re-check every 50 ms) and exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
   `board/memgate` first on the server's `PYTHONPATH`: every rank (also multiprocessing spawn
-  children) imports it as `sitecustomize` and waits at the gate before TokenSpeed's model
-  construction (`weights`: 119-140 GiB at once) and KV-cache memory profile (`kv`); when all N ranks
-  wait the holder releases everything and lets them go, caps again after `weights`, and yields after
-  `kv`. TokenSpeed is not changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900).
+  children) imports it as `sitecustomize` (and runs the one it shadows) and waits at the gate before
+  TokenSpeed's model construction (`weights`: 119-140 GiB at once), communication buffers (`comm`)
+  and KV-cache memory profile (`kv`); when all N ranks wait the holder releases everything and lets
+  them go, caps again after `weights`/`comm`, and yields after `kv`. TokenSpeed is not changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900).
   Without the shim a gated serve starves the server's weight allocation: use both or neither.
   Tests: `test_memgate.py`, `test_gpu_hold.py`.
 

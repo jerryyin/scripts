@@ -8,9 +8,13 @@ GATE/<pid>.wait (its phase), waits for GATE/<pid>.go from gpu-hold (at most GPU_
 seconds, default 900; on timeout it goes on and says so on stderr), renames the wait file to
 GATE/<pid>.in, runs the call and removes it. The target code is not changed.
 
-GATES, TokenSpeed (the call sites name these module attributes, so patching them is enough):
+GATES, TokenSpeed (the call sites look these attributes up at call time, so patching them is enough):
 - tokenspeed.runtime.model_loader.loader._initialize_model (phase weights): the model's construction,
-  which allocates the weights (119-140 GiB per GPU within one 0.5 s sample).
+  run under the target device inside startup phase `weights.allocate`, which allocates the weights
+  (119-140 GiB per GPU within one 0.5 s sample).
+- tokenspeed.runtime.execution.model_runner.ModelRunner.prepare_communication_runtime (phase comm):
+  "allocate model communication buffers before cache planning" (startup phase
+  `communication.prepare`), for the target and the draft model.
 - tokenspeed.runtime.layers.attention.registry.profile_available_cache_memory_bytes (phase kv): the
   free-memory profile that sizes the KV cache; registry.py imports the function by name, so the
   registry's binding is wrapped.
@@ -20,6 +24,7 @@ from __future__ import annotations
 import functools
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import os
 import sys
 import time
@@ -27,6 +32,7 @@ from pathlib import Path
 
 GATES = {
     'tokenspeed.runtime.model_loader.loader': (('_initialize_model', 'weights'),),
+    'tokenspeed.runtime.execution.model_runner': (('ModelRunner.prepare_communication_runtime', 'comm'),),
     'tokenspeed.runtime.layers.attention.registry': (('profile_available_cache_memory_bytes', 'kv'),),
 }
 POLL_SECONDS = 0.05
@@ -61,9 +67,13 @@ def gated(fn, phase: str, root: Path, timeout: float, clock=time.monotonic, slee
 
 def patch(module, root: Path, timeout: float) -> None:
     for name, phase in GATES.get(module.__name__, ()):
-        fn = getattr(module, name, None)
+        owner, _, attr = name.rpartition('.')
+        target = module
+        for part in owner.split('.') if owner else ():
+            target = getattr(target, part, None)
+        fn = getattr(target, attr, None) if target is not None else None
         if fn is not None and not hasattr(fn, '__memgate__'):
-            setattr(module, name, gated(fn, phase, root, timeout))
+            setattr(target, attr, gated(fn, phase, root, timeout))
 
 
 class _Finder(importlib.abc.MetaPathFinder):
@@ -96,4 +106,19 @@ def install(environ=os.environ) -> bool:
     return True
 
 
+def chain() -> None:
+    """Run the sitecustomize this one shadows (on Ubuntu, the system's apport hook), as Python would."""
+    here = Path(__file__).resolve().parent
+    rest = [p for p in sys.path if Path(p or '.').resolve() != here]
+    spec = importlib.machinery.PathFinder.find_spec('sitecustomize', rest)
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # as site.py does: report, never stop start-up
+        print(f'memgate: shadowed sitecustomize {spec.origin} failed: {exc!r}', file=sys.stderr)
+
+
 install()
+chain()

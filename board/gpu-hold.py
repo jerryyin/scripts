@@ -12,10 +12,11 @@ GPUs open, the holder holds again and removes --ready.
 With --gate DIR and --gate-ranks N (used with memgate/, which the server's ranks load), a small
 --busy-free-cap is safe for our server's large allocations: a rank about to make one (model
 construction: phase `weights`; the KV-cache memory profile: phase `kv`) writes DIR/<pid>.wait and
-waits. When N ranks wait, the holder releases everything it holds, then writes DIR/<pid>.go for
-each; ranks arriving later while it is open get theirs at once. After a `weights` phase, when no rank
-waits or runs a gated call, the holder caps free memory again; after a `kv` phase it yields (the
-cache is sized from all free memory, which our server then allocates)."""
+waits; memgate also gates communication buffers: phase `comm`). When N ranks wait, the holder
+releases everything it holds, then writes DIR/<pid>.go for each; ranks arriving later while it is open
+get theirs at once. After a `weights` or `comm` phase, when no rank waits or runs a gated call, the
+holder caps free memory again; after a `kv` phase it yields (the cache is sized from all free memory,
+which our server then allocates)."""
 from __future__ import annotations
 
 import argparse
@@ -312,7 +313,7 @@ def gate_step(holder: Holder, gate: Gate, cap: int, now: float, log: Path | None
     waiting = gate.waiting()
     if gate.state is None and len(waiting) >= gate.ranks:
         gate.state, gate.since = 'releasing', now
-        gate.phase = 'kv' if 'kv' in waiting.values() else 'weights'
+        gate.phase = 'kv' if 'kv' in waiting.values() else sorted(set(waiting.values()))[0]
         holder.set_cap(UNCAPPED)
         note(log, f'gate: {len(waiting)} ranks wait ({gate.phase}); releasing')
     if gate.state == 'releasing' and (holder.released() or now - gate.since >= RELEASE_WAIT_SECONDS):
