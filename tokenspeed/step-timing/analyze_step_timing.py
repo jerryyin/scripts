@@ -35,6 +35,12 @@ SEG = {  # start-marker name -> (category, bucket)
     "petit.s1": ("petit.stage1(dispatch_wait+gate_up)", "moe_dispatch+gate_up"),
     "petit.s2": ("petit.stage2(down)", "moe_down"),
     "petit.comb": ("petit.combine", "moe_combine"),
+    # From TokenSpeed 20ffdf4f, C3 (TOKENSPEED_PETIT_FUSE_POST=1): the combine adds the shared expert's
+    # rows itself (MegaMoECombineResidual) after waiting for them; petit.cwait opens the wait (the main
+    # stream's join on the aux-stream shared expert), petit.combr the residual combine. They replace
+    # petit.comb on that path; petit.post follows either combine.
+    "petit.cwait": ("petit.combine_wait_shared(c3)", "moe_combine"),
+    "petit.combr": ("petit.combine+shared_add(c3)", "moe_combine"),
     "petit.post": ("moe.shared_join_wait", "moe_experts"),
     "moe.join": ("ffn.add+post_comm(allreduce)", "collectives"),
     # From TokenSpeed 649a6353: moe.split opens the tp4ep4-petit row split (this rank's slice of the
