@@ -151,7 +151,9 @@ which sum to the latency gap D x (TPOT_X - TPOT_REF) + TTFT_X - TTFT_REF exactly
 In log terms the decode rate is A / s, so log(rate_X / rate_REF) = log(A_X / A_REF) - log(s_X / s_REF)
 (log_accept, log_step). Per label and concurrency the measured points (phase measured, measured-N) give
 median [min, max] of every part, share and ratio; warmup points are listed in the per-point table only.
---concurrency-list restricts the concurrencies (e.g. 1,2).
+--concurrency-list restricts the concurrencies (e.g. 1,2). point_summary (and the last Markdown table) gives per label and
+concurrency the median [min, max] over the measured points of tok/s, TTFT, TPOT, the acceptance used (with its
+source), EvalScope's acceptance beside it, the decode step and step/A.
 """
 import argparse, collections, csv, datetime as dt, hashlib, itertools, json, math, os, statistics, sys
 
@@ -1035,6 +1037,16 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
                       "accept_share", "other_share", "log_tok_per_s_ratio", "log_accept", "log_step"):
                 row[k] = _range([p.get(k) for p in meas])
             res["summary"].append(row)
+    # per label and concurrency: median [min, max] of each measured point's own values (the reference included)
+    res["point_summary"] = []
+    for label, _ in specs:
+        for c in sorted({k[1] for k in points[label]}):
+            meas = [p for k, p in points[label].items() if k[1] == c and str(k[0]).startswith(phase_prefix)]
+            row = {"label": label, "concurrency": c, "repetitions": len(meas),
+                   "acceptance_source": sorted({p["acceptance_source"] for p in meas})}
+            for k in ("tok_per_s", "ttft_ms", "tpot_ms", "acceptance", "acceptance_evalscope", "step_ms", "implied_tpot_ms"):
+                row[k] = _range([p.get(k) for p in meas])
+            res["point_summary"].append(row)
     return res
 
 
@@ -1065,6 +1077,12 @@ def accept_split_markdown(res):
                    f"{rng(r['latency_gap_ms'], '.0f')} | {rng(r['ttft_part_ms'], '.0f')} | {rng(r['step_part_ms'], '.0f')} | "
                    f"{rng(r['accept_part_ms'], '.0f')} | {rng(r['other_part_ms'], '.0f')} | {rng(r['accept_share'], '.2f')} | "
                    f"{rng(r['step_share'], '.2f')} | {rng(r['ttft_share'], '.2f')} |")
+    out += ["", "| config | C | reps | tok/s | TTFT ms | TPOT ms | acceptance used | EvalScope acceptance | decode step ms "
+            "| step/A ms |", "|" + "---|" * 10]
+    for r in res.get("point_summary", []):
+        out.append(f"| {r['label']} | {r['concurrency']} | {r['repetitions']} | {rng(r['tok_per_s'], '.1f')} | "
+                   f"{rng(r['ttft_ms'], '.0f')} | {rng(r['tpot_ms'], '.2f')} | {rng(r['acceptance'], '.2f')} | "
+                   f"{rng(r['acceptance_evalscope'], '.2f')} | {rng(r['step_ms'], '.2f')} | {rng(r['implied_tpot_ms'], '.2f')} |")
     return "\n".join(out) + "\n"
 
 

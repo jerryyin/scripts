@@ -119,13 +119,74 @@ def test_compare_outputs_pairs_by_prompt_key_with_loops() -> None:
         b.write_text("".join(json.dumps(r) + "\n" for r in [
             {"idx": 3, "concurrency": 1, "prompt_sha256": "p", "text": "xw", "reencoded_ids": loop[:5] + [9] * 75,
              "acc_len": 4.0}]))
-        A = co.load(str(a), ("prompt_sha256",), [("concurrency", "1")])
-        B = co.load(str(b), ("prompt_sha256",), [("concurrency", "1")])
+        A = co.load(str(a), ("prompt_sha256",), [("concurrency", "=", "1")])
+        B = co.load(str(b), ("prompt_sha256",), [co.parse_where("concurrency=1")])
+        assert len(co.load(str(a), ("prompt_sha256",), [co.parse_where("text~^x")])) == 1
         rows = co.compare(A, B)
     assert len(rows) == 1 and rows[0]["first_diff_token"] == 5 and not rows[0]["exact"]
     assert rows[0]["loop_period"] == (2, 1) and rows[0]["acc_len"] == (5.8, 4.0)
     s = co.summarize(rows, "a vs b")
     assert (s["unmatched"], s["looping"], s["same_loop_period"]) == (0, [1, 1], 0)
+
+def test_compare_outputs_accept_test_server_log_and_paired_sign_test() -> None:
+    co = load("compare_outputs.py")
+    loop = [7, 8] * 40
+    with tempfile.TemporaryDirectory() as d:
+        a, b, log = Path(d) / "a.jsonl", Path(d) / "b.jsonl", Path(d) / "server.log"
+        rec = lambda i, ids, acc: {"idx": i, "concurrency": 1, "prompt_sha256": f"p{i}", "text": str(ids[:3]),
+                                   "reencoded_ids": ids, "acc_len": acc, "request_id": f"r{i}"}
+        a.write_text("".join(json.dumps(rec(i, loop, 5.5)) + "\n" for i in range(6)))
+        rows_b = [rec(0, loop, 5.5)] + [rec(i, list(range(80)), 4.0) for i in range(1, 6)]
+        b.write_text("".join(json.dumps(r) + "\n" for r in rows_b))
+        log.write_text("".join(f"Req: r{i} Finish! Accept_num_tokens_avg: {3.5 + 0.1 * i}\n" for i in range(1, 6)))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            co.main(["--pair", f"x={a},y={b}", "--key", "prompt_sha256", "--accept-server-log", f"y={log}",
+                     "--accept-test", "--bootstrap", "200"])
+    s = json.loads(out.getvalue().strip().splitlines()[-1])
+    t = s["accept_test"]
+    assert s["server_acceptance_matched"] == {"y": [5, 6]}
+    assert t["y"]["acc_source"] == ["evalscope", "server"] and abs(t["y"]["min"] - 3.6) < 1e-9
+    assert (t["x"]["looping_prompts"], t["y"]["looping_prompts"], t["y"]["prompts"]) == (6, 1, 6)
+    p = t["paired"]
+    assert (p["n"], p["positive"], p["negative"], p["zero"]) == (6, 0, 5, 1)
+    assert abs(p["sign_test_p"] - 2 / 32) < 1e-12 and p["bootstrap95_mean_diff"][1] < 0
+    assert t["paired_token_identical"]["n"] == 1 and t["paired_token_identical"]["mean_diff"] == 0
+    assert t["paired_both_looping"]["n"] == 1 and t["paired_both_nonlooping"]["n"] == 0
+    assert t["unpaired"]["mean_diff"] < 0
+
+
+def test_wilson_interval_values() -> None:
+    co = load("compare_outputs.py")
+    # Wilson 95%: centre (k + z^2/2) / (n + z^2), half-width z sqrt(k (n - k) / n + z^2 / 4) / (n + z^2), z = 1.96
+    for (k, n), want in (((0, 10), [0.0, 0.2775]), ((5, 10), [0.2366, 0.7634]), ((10, 10), [0.7225, 1.0])):
+        lo, hi = co.wilson(k, n)
+        assert abs(lo - want[0]) < 5e-5 and abs(hi - want[1]) < 5e-5, (k, n, lo, hi)
+    assert co.wilson(0, 0) is None
+
+
+def test_looping_counts_each_prompt_once() -> None:
+    """Repeated greedy runs of one prompt are one observation: 2 prompts x 5 repetitions, p loops in 3 of its
+    5 records and q in 1, so 1 of 2 prompts loops (not 4 of 10 records). A tie (2 of 4) does not loop; a
+    failed record and one without ids or loop period are left out."""
+    co = load("compare_outputs.py")
+    loop, flat = [7, 8] * 40, list(range(80))
+    def rec(prompt, rep, ids, **extra):
+        return {"phase": f"measured-{rep}", "prompt_sha256": prompt, "text": "t", "reencoded_ids": ids,
+                "acc_len": 3.0, **extra}
+    rows = ([rec("p", i, loop if i < 3 else flat) for i in range(5)]
+            + [rec("q", i, loop if i < 1 else flat) for i in range(5)]
+            + [rec("t", i, loop if i < 2 else flat) for i in range(4)]
+            + [rec("t", 5, loop, success=False), rec("t", 6, None)])
+    with tempfile.TemporaryDirectory() as d:
+        a = Path(d) / "a.jsonl"
+        a.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        A = co.load(str(a), ("prompt_sha256",))
+    s = co.side_stats(A)
+    assert (s["looping_prompts"], s["prompts"]) == (1, 3)
+    assert (s["looping_records"], s["records"], s["unclassifiable_records"]) == (6, 16, 2)
+    assert s["looping_wilson95"] == co.wilson(1, 3) and abs(s["looping_fraction"] - 1 / 3) < 1e-12
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
