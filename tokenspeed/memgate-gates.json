@@ -1,0 +1,32 @@
+{
+  "tokenspeed.runtime.execution.distributed_initializer": [
+    {
+      "attr": "get_available_gpu_memory",
+      "phase": "dist",
+      "keyword": "cpu_group",
+      "report": true,
+      "why": "Only the call with cpu_group= is gated: DistributedInitializer.initialize's cross-rank minimum, which init_distributed returns as the device memory gpu_memory the KV profile takes its utilization headroom from (KV = free - post_profile - gpu_memory x (1 - --gpu-memory-utilization)). Read under the busy cap it is the cap, the headroom shrinks and the KV pool takes the activations' memory; gated, every rank reads the device's free memory. Its other calls there (log lines, the per-rank balance check) pass straight through. The result goes to stderr, the value the server sized with."
+    }
+  ],
+  "tokenspeed.runtime.model_loader.loader": [
+    {
+      "attr": "_initialize_model",
+      "phase": "weights",
+      "why": "The model's construction, run under the target device inside startup phase weights.allocate, which allocates the weights at once."
+    }
+  ],
+  "tokenspeed.runtime.execution.model_runner": [
+    {
+      "attr": "ModelRunner.prepare_communication_runtime",
+      "phase": "comm",
+      "why": "Allocates the model's communication buffers before cache planning (startup phase communication.prepare), for the target and the draft model."
+    }
+  ],
+  "tokenspeed.runtime.layers.attention.registry": [
+    {
+      "attr": "profile_available_cache_memory_bytes",
+      "phase": "kv",
+      "why": "The free-memory profile that sizes the KV cache. registry.py imports the function by name, so the registry's binding is wrapped."
+    }
+  ]
+}

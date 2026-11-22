@@ -15,6 +15,9 @@ board/
 ├── test_gpu_queue.py      # its tests (no GPU or docker needed)
 ├── gpu-hold.py            # gpu-queue's memory holder
 ├── test_gpu_hold.py       # its tests (no GPU needed)
+├── memgate/
+│   └── sitecustomize.py   # makes a server's ranks wait for gpu-hold before large allocations
+├── test_memgate.py        # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -73,6 +76,25 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   board/gpu-queue add /path/in/container/queue --name numerics -- 'cd /work && ./run-numerics.sh'
   board/gpu-queue status /path/in/container/queue
   ```
+
+  **Start guard (opt-in).** By default the holder leaves 240 GiB free per GPU while our process
+  starts, and another tenant's launch that fits in that takes it. `serve` (and `add --count`)
+  `--hold-busy-free-cap GIB --hold-gate-ranks N` keeps free memory at most GIB during the start:
+  below the smallest amount other tenants take at once, and above the largest single allocation our
+  server makes outside its gated calls (the holder's children re-check every 50 ms, so growth in
+  smaller steps is followed). It exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
+  `board/memgate` first on the server's `PYTHONPATH` and name the server's gate table in
+  `GPU_HOLD_GATE_TABLE` (TokenSpeed's: `tokenspeed/memgate-gates.json`, which says why each call is
+  gated): every rank (also multiprocessing spawn children) imports memgate as `sitecustomize` (and
+  runs the one it shadows) and waits at the gate before each call the table lists, under the
+  table's phase. When all N ranks wait at a phase the holder releases everything and lets them go;
+  a rank at another phase waits for the next round. After a phase the holder caps again, after
+  `kv` (the free-memory profile that sizes the KV cache) it yields, so the table must gate every
+  large allocation and every free-memory read that sizes something before `kv`. The server is not
+  changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900). A missing table, or a table
+  entry the server lacks, is an error memgate prints and the holder logs. Without the shim a gated
+  serve starves the server's weight allocation: use both or neither. Tests: `test_memgate.py`,
+  `test_gpu_hold.py`, `tokenspeed/test_memgate_gates.py`.
 
   To keep the GPUs across a sequence of experiments, queue the next job before the current one
   finishes; a job queued after the queue empties waits for a fresh claim.
