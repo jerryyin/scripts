@@ -106,6 +106,27 @@ def test_probe_summary_counts() -> None:
     assert s["teacher-forced X"] == {"positions": 2, "prompts": 1, "emitted_not_top1": 1,
                                      "emitted_not_top1_certified_gap_gt": 1}
 
+
+def test_compare_outputs_pairs_by_prompt_key_with_loops() -> None:
+    co = load("compare_outputs.py")
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.jsonl", Path(d) / "b.jsonl"
+        loop = [7, 8] * 40
+        a.write_text("".join(json.dumps(r) + "\n" for r in [
+            {"idx": 0, "concurrency": 1, "prompt_sha256": "p", "text": "xy", "reencoded_ids": loop, "acc_len": 5.8},
+            {"idx": 0, "concurrency": 2, "prompt_sha256": "q", "text": "z", "reencoded_ids": list(range(80)),
+             "acc_len": 3.0}]))
+        b.write_text("".join(json.dumps(r) + "\n" for r in [
+            {"idx": 3, "concurrency": 1, "prompt_sha256": "p", "text": "xw", "reencoded_ids": loop[:5] + [9] * 75,
+             "acc_len": 4.0}]))
+        A = co.load(str(a), ("prompt_sha256",), [("concurrency", "1")])
+        B = co.load(str(b), ("prompt_sha256",), [("concurrency", "1")])
+        rows = co.compare(A, B)
+    assert len(rows) == 1 and rows[0]["first_diff_token"] == 5 and not rows[0]["exact"]
+    assert rows[0]["loop_period"] == (2, 1) and rows[0]["acc_len"] == (5.8, 4.0)
+    s = co.summarize(rows, "a vs b")
+    assert (s["unmatched"], s["looping"], s["same_loop_period"]) == (0, [1, 1], 0)
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
