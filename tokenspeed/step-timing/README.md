@@ -8,17 +8,19 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `649a6353d971a0e9ad5180447ed6a685f27caeb9` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); earlier versions are this file at a toolkit commit: against `4b76ebccdbac7880f367280552e5757a63b23c8d` at toolkit `870b2c9d8ce715d377201fb2b0020afbeee74836`, against `46671ec2c8286eeb6fc7efad4a7e76d4aed57f15` at toolkit `865074dd0439832497c3a7043355f6ecc940d4dd`, against `e8fd096ed80112d6108725bad1fbdc3accb0a559` at toolkit `8592e72043703c70cada18dd7690102c29c6fc10`, against `0dd8d477` at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation.diff` | The patch, against TokenSpeed `20ffdf4f361d661f8536877c3a51c940aeb60639` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); earlier versions are this file at a toolkit commit: against `649a6353d971a0e9ad5180447ed6a685f27caeb9` at toolkit `c18997c9406c5330942e60e46dc0a5aafe3aca71`, against `4b76ebccdbac7880f367280552e5757a63b23c8d` at toolkit `870b2c9d8ce715d377201fb2b0020afbeee74836`, against `46671ec2c8286eeb6fc7efad4a7e76d4aed57f15` at toolkit `865074dd0439832497c3a7043355f6ecc940d4dd`, against `e8fd096ed80112d6108725bad1fbdc3accb0a559` at toolkit `8592e72043703c70cada18dd7690102c29c6fc10`, against `0dd8d477` at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation-f8.diff` | The same instrumentation against `20ffdf4f361d661f8536877c3a51c940aeb60639` with the campaign's r0002-f8 Petit patches applied in order (`0004-trace.patch`, `0005-c6-drop-admit.patch`, `0006-c7-combine-nobarrier.patch`; C7 sizes the combine grid as `combine_blocks`, which `instrumentation.diff`'s `mega_moe.py` context does not match). Use it on a TokenSpeed whose `mega_moe.py` has those patches: `git apply --check instrumentation.diff` fails there and this one applies; the two differ only in that file's context |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
 
 Make the patched copy in a clone (never a worktree or an edit of the checkout you serve from;
-the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
+the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit;
+on a TokenSpeed that carries r0002-f8's Petit patches use `instrumentation-f8.diff`):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 649a6353d971a0e9ad5180447ed6a685f27caeb9
+git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 20ffdf4f361d661f8536877c3a51c940aeb60639
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
@@ -113,8 +115,21 @@ the shared partial and the add of the rank's routed rows). Dumps made with an ea
 their components and groups project exactly as before (the 30 recorded TP4/EP4 stages of r0002-g4 project
 byte-identically with the toolkit before and after). With a deferred, mHC-fused MoE all-reduce (`defer_moe`, when
 the comm backend `supports_all_reduce_mhc_norm`) `moe.comm` does not fire and the collective runs in the next
-layer's pre-attention mHC, in TP4 and tp4ep4-petit alike. The Petit MoE of
-one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
+layer's pre-attention mHC, in TP4 and tp4ep4-petit alike. At 20ffdf4f (Petit fusions C1 `TOKENSPEED_PETIT_FUSE_PREP`, C5 `TOKENSPEED_PETIT_STAGE1_N128` with
+`TOKENSPEED_PETIT_STAGE1_N128_SELECT`, C5b `TOKENSPEED_PETIT_STAGE2_N128`, C3 `TOKENSPEED_PETIT_FUSE_POST`, all
+opt-in; `87b2dbd7f`..`20ffdf4f3`) the MoE file's tp4ep4-petit hunk and `mega_moe.py`'s combine hunk were re-ported;
+every other hunk applies unchanged. C1, C5 and C5b change kernels and tiles only: `petit.s1` / `petit.s2` still
+bracket the stage launches, so a 32x128 Stage1 (C5) or Stage2 (C5b) tile is timed as Petit Stage1 / Stage2. C3 is
+a new path with two new markers. With the switch on (DP4: `_forward_petit_fused_post`; tp4ep4-petit: the
+`_PETIT_FUSE_POST` branch of `_forward_petit_tp_attention`) the shared expert is issued first, `shared.b`/`shared.e`
+around it (aux stream under capture; tp4ep4-petit also copies it into the output there), then `moe.experts`
+(moved after the C3 decision in `forward_normal`, past CPU-only code, so the unfused path is timed as before),
+the Petit call, and `moe.join` after it. In `mega_moe.py` the residual combine `MegaMoECombineResidual` is
+`petit.cwait` (the main stream's wait for the shared expert's rows, category `petit.combine_wait_shared(c3)`) then
+`petit.combr` (the combine with the shared add, `petit.combine+shared_add(c3)`) in place of `petit.comb`, then
+`petit.post`. Both count as Petit (`step_breakdown.py` `PETIT_CATEGORIES`, group `petit`): under C3 the Petit
+MoE holds the shared add that the unfused path does after the call in `moe.join`. The Petit MoE of
+one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` (C3: `petit.cwait` + `petit.combr`) + `petit.post` (router/top-k,
 shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
 
 `STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
