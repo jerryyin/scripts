@@ -72,6 +72,19 @@ def test_compare_outputs_pairs_and_cache_free() -> None:
         assert (s["exact"], s["token_identical"], s["differ_at_token_0"], s["min_first_diff"]) == (1, 1, 1, 0)
         assert s["total_common_prefix"] == 3 + 1 + 0 and s["acceptance"]["A"]["mean"] == 2.5
         assert s["cache_free"]["idx"] == [0, 1] and s["cache_free"]["exact"] == 1
+        assert s["max_first_diff"] == 1
+        assert s["first_diff_buckets"] == {"0": 1, "1-4": 1, "5-31": 0, "32-127": 0, "128+": 0}
+    # Bucket edges: every token-differing prompt is counted once; token-identical ones are not counted.
+    edges = [0, 1, 4, 5, 31, 32, 127, 128, 5000]
+    rows = [{"idx": i, "exact": False, "first_diff_token": d, "common_prefix": d} for i, d in enumerate(edges)]
+    rows.append({"idx": len(edges), "exact": True, "first_diff_token": None, "common_prefix": 7})
+    e = co.summarize(rows, "edges")
+    assert e["first_diff_buckets"] == {"0": 1, "1-4": 2, "5-31": 2, "32-127": 2, "128+": 2}
+    assert sum(e["first_diff_buckets"].values()) == e["prompts"] - e["token_identical"] == len(edges)
+    assert (e["min_first_diff"], e["max_first_diff"]) == (0, 5000)
+    none = co.summarize(rows[-1:], "identical")
+    assert none["max_first_diff"] is None and set(none["first_diff_buckets"].values()) == {0}
+
 
 def test_probe_summary_counts() -> None:
     pb = load("probe.py")
