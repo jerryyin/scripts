@@ -531,3 +531,6 @@ def test_accept_split_parts_sum_to_the_gap() -> None:
     row = res["summary"][0]
     assert row["repetitions"] == 2 and row["accept_part_ms"]["min"] == 0.0
     assert "acceptance share" in e2e.accept_split_markdown(res)
+    ps = {r["label"]: r for r in res["point_summary"]}
+    assert set(ps) == {"REF", "X"} and all(r["tok_per_s"]["n"] == r["repetitions"] for r in ps.values())
+    assert "| step/A ms |" in e2e.accept_split_markdown(res)

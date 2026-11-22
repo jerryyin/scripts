@@ -8,7 +8,7 @@ usage: compare_outputs.py A.jsonl B.jsonl [--label-a A] [--label-b B] [--out rep
 --key pairs records by other fields than idx, e.g. --key prompt_sha256 for amd-tracking
 evalscope_degeneracy.py --requests records (the same prompt in two serving runs; a key seen k times in a
 file pairs its i-th occurrences). --where keeps records whose FIELD equals VALUE (as text), e.g.
---where concurrency=1. Each row also gives both sides' acceptance (acc_len) and loop period (loop_period
+--where concurrency=1; FIELD~REGEX keeps records whose FIELD matches REGEX (re.search), e.g. --where 'phase~^measured'. Each row also gives both sides' acceptance (acc_len) and loop period (loop_period
 of the record, else computed from the re-encoded ids: the smallest p <= 16 with t[i] == t[i-p] over the
 last 64 tokens, amd-tracking evalscope_degeneracy.loop_period). --rows prints every row as a JSON line.
 
@@ -21,9 +21,25 @@ once, total common prefix, mean / min / max acceptance length of each side) and,
 writes a Markdown table. --cache-free adds the same counts over the prompts with no prefix-cache
 hit on either side. Exits 0 whether or not the outputs match; deciding what a mismatch means is
 the caller's job.
+
+--accept-server-log LABEL=LOG (repeatable) replaces each record's acc_len of side LABEL with the server's own
+per-request acceptance (batch_log kind "Accept": `Req: RID Finish! Accept_num_tokens_avg: X`, matched by
+request_id = rid), keeping EvalScope's value as acc_len_evalscope; records with no server line keep EvalScope's.
+--accept-test adds "accept_test" to each pair's summary: per side n / mean / median / min / max acceptance,
+the looping count with its Wilson 95% interval and the mean acceptance of looping and non-looping outputs; the
+unpaired difference of means (B - A) with a bootstrap 95% interval (each side resampled on its own); and over
+the matched keys the paired per-prompt difference B - A: mean, median, the sign test (positive / negative / zero
+counts, exact two-sided binomial p over the non-zero ones) and a bootstrap 95% interval of the mean, also
+restricted to token-identical pairs (same output: a difference there is draft/target agreement, not the
+continuation), both-looping pairs and both-non-looping pairs. --bootstrap N (default 10000) and --seed (default
+0) fix the resampling.
 """
 import argparse
 import json
+import math
+import os
+import random
+import re
 import statistics
 import sys
 
@@ -41,11 +57,24 @@ def loop_period(tokens, window=LOOP_WINDOW, max_period=MAX_LOOP_PERIOD):
     return None
 
 
+def match(value, op, want):
+    """--where test: op "=" compares as text, op "~" searches the regular expression in the text."""
+    return re.search(want, str(value)) is not None if op == "~" else str(value) == want
+
+
+def parse_where(spec):
+    """FIELD=VALUE or FIELD~REGEX -> (field, op, value); the first of = and ~ splits."""
+    i = min((spec.find(c) for c in "=~" if c in spec), default=-1)
+    if i <= 0:
+        raise ValueError(f"--where {spec!r}: give FIELD=VALUE or FIELD~REGEX")
+    return spec[:i], spec[i], spec[i + 1:]
+
+
 def load(path, key=("idx",), where=()):
     out, seen = {}, {}
     with open(path) as fh:
         for r in map(json.loads, (line for line in fh if line.strip())):
-            if any(str(r.get(f)) != v for f, v in where):
+            if any(not match(r.get(f), op, v) for f, op, v in where):
                 continue
             k = tuple(r.get(f) for f in key)
             n = seen.get(k, 0); seen[k] = n + 1
@@ -137,6 +166,114 @@ def cache_free(rows):
     return [r for r in rows if not any(int(c or 0) for c in r["cache_tokens"])]
 
 
+def server_acceptance(path):
+    """{rid: acc_len} from the server log's batch_log "Accept" lines (and Finish RequestStats acc_len)."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from batch_log import parse_lines
+    out = {}
+    with open(path, errors="replace") as fh:
+        for e in parse_lines(fh):
+            if e["kind"] == "Accept":
+                out[e["rid"]] = e["acc_len"]
+            elif e["kind"] == "Finish" and isinstance((e.get("stats") or {}).get("acc_len"), float):
+                out[e["rid"]] = e["stats"]["acc_len"]
+    return out
+
+
+def use_server_acceptance(records, server):
+    """Replace acc_len by the server value (by request_id); return how many records matched."""
+    n = 0
+    for r in records.values():
+        v = server.get(r.get("request_id"))
+        if v is not None:
+            r["acc_len_evalscope"], r["acc_len"], r["acc_source"] = r.get("acc_len"), v, "server"
+            n += 1
+        else:
+            r["acc_source"] = "evalscope"
+    return n
+
+
+def wilson(k, n, z=1.959963984540054):
+    if not n:
+        return None
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return [max(0.0, c - h), min(1.0, c + h)]
+
+
+def sign_test_p(pos, neg):
+    """Exact two-sided binomial p (p = 1/2) of pos successes in pos + neg trials."""
+    n = pos + neg
+    if not n:
+        return None
+    tail = sum(math.comb(n, i) for i in range(min(pos, neg) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def boot_mean(values, n_boot, rng):
+    if len(values) < 2:
+        return None
+    m = sorted(statistics.mean(rng.choices(values, k=len(values))) for _ in range(n_boot))
+    return [m[int(0.025 * n_boot)], m[int(0.975 * n_boot) - 1]]
+
+
+def boot_diff(a, b, n_boot, rng):
+    if len(a) < 2 or len(b) < 2:
+        return None
+    m = sorted(statistics.mean(rng.choices(b, k=len(b))) - statistics.mean(rng.choices(a, k=len(a)))
+               for _ in range(n_boot))
+    return [m[int(0.025 * n_boot)], m[int(0.975 * n_boot) - 1]]
+
+
+def paired_stats(diffs, n_boot, rng):
+    if not diffs:
+        return {"n": 0}
+    pos, neg = sum(d > 0 for d in diffs), sum(d < 0 for d in diffs)
+    return {"n": len(diffs), "mean_diff": statistics.mean(diffs), "median_diff": statistics.median(diffs),
+            "min_diff": min(diffs), "max_diff": max(diffs), "positive": pos, "negative": neg,
+            "zero": len(diffs) - pos - neg, "sign_test_p": sign_test_p(pos, neg),
+            "bootstrap95_mean_diff": boot_mean(diffs, n_boot, rng)}
+
+
+def side_stats(records):
+    acc = [r["acc_len"] for r in records if r.get("acc_len") is not None]
+    loops = [period_of(r) is not None for r in records]
+    def by(flag):
+        return [r["acc_len"] for r, l in zip(records, loops) if l == flag and r.get("acc_len") is not None]
+    def mean(v):
+        return statistics.mean(v) if v else None
+    return {"n": len(acc), "mean": mean(acc), "median": statistics.median(acc) if acc else None,
+            "min": min(acc) if acc else None, "max": max(acc) if acc else None,
+            "acc_source": sorted({r.get("acc_source", "evalscope") for r in records}),
+            "looping": sum(loops), "outputs": len(loops),
+            "looping_fraction": sum(loops) / len(loops) if loops else None,
+            "looping_wilson95": wilson(sum(loops), len(loops)),
+            "acc_looping_mean": mean(by(True)), "acc_looping_n": len(by(True)),
+            "acc_nonlooping_mean": mean(by(False)), "acc_nonlooping_n": len(by(False))}
+
+
+def accept_test(A, B, rows, la, lb, n_boot=10000, seed=0):
+    """Acceptance distributions of both sides and the unpaired and paired (per key) differences B - A."""
+    rng = random.Random(seed)
+    a_acc = [r["acc_len"] for r in A.values() if r.get("acc_len") is not None]
+    b_acc = [r["acc_len"] for r in B.values() if r.get("acc_len") is not None]
+    matched = [r for r in rows if r.get("matched") and None not in r["acc_len"]]
+    def d(rs):
+        return [r["acc_len"][1] - r["acc_len"][0] for r in rs]
+    def lp(r, k):
+        return r["loop_period"][k] is not None
+    return {la: side_stats(list(A.values())), lb: side_stats(list(B.values())),
+            "unpaired": {"mean_diff": (statistics.mean(b_acc) - statistics.mean(a_acc)) if a_acc and b_acc else None,
+                         "bootstrap95_mean_diff": boot_diff(a_acc, b_acc, n_boot, rng)},
+            "paired": paired_stats(d(matched), n_boot, rng),
+            "paired_token_identical": paired_stats(d([r for r in matched if r["first_diff_token"] is None]), n_boot, rng),
+            "paired_both_looping": paired_stats(d([r for r in matched if lp(r, 0) and lp(r, 1)]), n_boot, rng),
+            "paired_both_nonlooping": paired_stats(d([r for r in matched if not lp(r, 0) and not lp(r, 1)]), n_boot, rng),
+            "bootstrap": n_boot, "seed": seed}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("a", nargs="?"); ap.add_argument("b", nargs="?")
@@ -144,9 +281,14 @@ def main(argv=None):
     ap.add_argument("--pair", action="append", default=[], help="LABEL_A=A.jsonl,LABEL_B=B.jsonl (repeatable)")
     ap.add_argument("--cache-free", action="store_true")
     ap.add_argument("--key", default="idx", help="comma-separated fields that pair records (default idx)")
-    ap.add_argument("--where", action="append", default=[], metavar="FIELD=VALUE")
+    ap.add_argument("--where", action="append", default=[], metavar="FIELD=VALUE|FIELD~REGEX")
     ap.add_argument("--rows", action="store_true", help="print every row as a JSON line")
     ap.add_argument("--out")
+    ap.add_argument("--accept-server-log", action="append", default=[], metavar="LABEL=LOG",
+                    help="use the server's per-request acceptance for side LABEL (repeatable)")
+    ap.add_argument("--accept-test", action="store_true", help="acceptance distributions and paired tests per pair")
+    ap.add_argument("--bootstrap", type=int, default=10000)
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
     pairs = [tuple(tuple(side.split("=", 1)) for side in p.split(",")) for p in args.pair]
     if args.a and args.b:
@@ -156,9 +298,15 @@ def main(argv=None):
     if args.out and len(pairs) > 1:
         ap.error("--out writes one pair's table")
     key = tuple(args.key.split(","))
-    where = [tuple(w.split("=", 1)) for w in args.where]
+    where = [parse_where(w) for w in args.where]
+    logs = {}
+    for spec in args.accept_server_log:
+        label, path = spec.split("=", 1)
+        logs.setdefault(label, {}).update(server_acceptance(path))
     for (la, pa), (lb, pb) in pairs:
         A, B = load(pa, key, where), load(pb, key, where)
+        server_matched = {lab: [use_server_acceptance(R, logs[lab]), len(R)]
+                          for lab, R in ((la, A), (lb, B)) if lab in logs}
         rows = compare(A, B)
         summary = summarize(rows, f"{la} vs {lb}")
         if args.rows:
@@ -169,6 +317,10 @@ def main(argv=None):
                                   **{f: A[r["idx"]].get(f) for f in ("phase", "concurrency")
                                      if f in A[r["idx"]]}}))
         summary["acceptance"] = {la: acceptance(A), lb: acceptance(B)}
+        if server_matched:
+            summary["server_acceptance_matched"] = server_matched
+        if args.accept_test:
+            summary["accept_test"] = accept_test(A, B, rows, la, lb, args.bootstrap, args.seed)
         if args.cache_free:
             free = cache_free(rows)
             summary["cache_free"] = {**summarize(free, summary["pair"]), "idx": [r["idx"] for r in free]}

@@ -119,13 +119,42 @@ def test_compare_outputs_pairs_by_prompt_key_with_loops() -> None:
         b.write_text("".join(json.dumps(r) + "\n" for r in [
             {"idx": 3, "concurrency": 1, "prompt_sha256": "p", "text": "xw", "reencoded_ids": loop[:5] + [9] * 75,
              "acc_len": 4.0}]))
-        A = co.load(str(a), ("prompt_sha256",), [("concurrency", "1")])
-        B = co.load(str(b), ("prompt_sha256",), [("concurrency", "1")])
+        A = co.load(str(a), ("prompt_sha256",), [("concurrency", "=", "1")])
+        B = co.load(str(b), ("prompt_sha256",), [co.parse_where("concurrency=1")])
+        assert len(co.load(str(a), ("prompt_sha256",), [co.parse_where("text~^x")])) == 1
         rows = co.compare(A, B)
     assert len(rows) == 1 and rows[0]["first_diff_token"] == 5 and not rows[0]["exact"]
     assert rows[0]["loop_period"] == (2, 1) and rows[0]["acc_len"] == (5.8, 4.0)
     s = co.summarize(rows, "a vs b")
     assert (s["unmatched"], s["looping"], s["same_loop_period"]) == (0, [1, 1], 0)
+
+def test_compare_outputs_accept_test_server_log_and_paired_sign_test() -> None:
+    co = load("compare_outputs.py")
+    loop = [7, 8] * 40
+    with tempfile.TemporaryDirectory() as d:
+        a, b, log = Path(d) / "a.jsonl", Path(d) / "b.jsonl", Path(d) / "server.log"
+        rec = lambda i, ids, acc: {"idx": i, "concurrency": 1, "prompt_sha256": f"p{i}", "text": str(ids[:3]),
+                                   "reencoded_ids": ids, "acc_len": acc, "request_id": f"r{i}"}
+        a.write_text("".join(json.dumps(rec(i, loop, 5.5)) + "\n" for i in range(6)))
+        rows_b = [rec(0, loop, 5.5)] + [rec(i, list(range(80)), 4.0) for i in range(1, 6)]
+        b.write_text("".join(json.dumps(r) + "\n" for r in rows_b))
+        log.write_text("".join(f"Req: r{i} Finish! Accept_num_tokens_avg: {3.5 + 0.1 * i}\n" for i in range(1, 6)))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            co.main(["--pair", f"x={a},y={b}", "--key", "prompt_sha256", "--accept-server-log", f"y={log}",
+                     "--accept-test", "--bootstrap", "200"])
+    s = json.loads(out.getvalue().strip().splitlines()[-1])
+    t = s["accept_test"]
+    assert s["server_acceptance_matched"] == {"y": [5, 6]}
+    assert t["y"]["acc_source"] == ["evalscope", "server"] and abs(t["y"]["min"] - 3.6) < 1e-9
+    assert (t["x"]["looping"], t["y"]["looping"]) == (6, 1) and t["y"]["looping_wilson95"][0] < 1 / 6
+    p = t["paired"]
+    assert (p["n"], p["positive"], p["negative"], p["zero"]) == (6, 0, 5, 1)
+    assert abs(p["sign_test_p"] - 2 / 32) < 1e-12 and p["bootstrap95_mean_diff"][1] < 0
+    assert t["paired_token_identical"]["n"] == 1 and t["paired_token_identical"]["mean_diff"] == 0
+    assert t["paired_both_looping"]["n"] == 1 and t["paired_both_nonlooping"]["n"] == 0
+    assert t["unpaired"]["mean_diff"] < 0
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
