@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Compile TokenSpeed's Gluon Petit stage-1 / stage-2 / combine kernels for gfx950 with no GPU (no device opened, nothing
-launched), and compare two compiles' instruction streams.
+"""Compile TokenSpeed MoE kernels for gfx950 with no GPU (no device opened, nothing launched), and compare
+two AMDGCN listings' instruction streams.
 
-  petit_compile_check.py compile --ts-src TREE --kernel stage2|stage2_n128|combine|combine_residual \
-      [--profile dsv41_flash] [--asm-out FILE]
+  petit_compile_check.py compile --ts-src TREE --kernel KERNEL [--profile dsv41_flash] [--asm-out FILE]
   petit_compile_check.py compare A.s B.s
 
-compile: a stub Triton driver answers JITFunction.run's target queries (hip / gfx950 / wave 64), the kernel's
-warmup() compiles the specialization Petit's MegaMoESolutionAdapter.Kernels builds (stage1: one row, external inputs;
-stage1_n128: C5's MegaMoEStage1N128Config; stage2_n128: C5b's MegaMoEStage2N128Config; combine_residual: C3's
-MegaMoECombineResidual; trace_ping: TOKENSPEED_PETIT_TRACE's MegaMoETracePing, which needs the switch on). The
-TokenSpeed switches (TOKENSPEED_PETIT_*) in the environment apply as they do at import in a server, and the AMDGCN is written; prints
-compile time, VGPRs and LDS bytes. The platform is the owner fixture `mi350_platform` of
-tokenspeed-kernel/test/conftest.py (evaluated from that file). Run it with an LD_PRELOAD that refuses /dev/kfd
-and /dev/dri opens when another process holds the GPUs.
-compare: the instruction lines of two AMDGCN files (no directives, comments or debug lines), so two trees'
-switch-off kernels can be shown identical although their source paths and line numbers differ.
+compile: a stub Triton driver answers JITFunction.run's target queries (hip / gfx950 / wave 64) and the kernel's
+warmup() compiles one specialization; prints compile time, VGPRs, LDS bytes and the instruction count, and
+writes the AMDGCN to --asm-out. KERNEL is one of
+  stage1, stage2, combine      Gluon Petit's launches as MegaMoESolutionAdapter.Kernels builds them (stage 1:
+                               one row, external inputs)
+  stage1_n128, stage2_n128     Petit's 32x128 stage-1 / stage-2 tiles (Kernels(n128=True) of
+                               TOKENSPEED_PETIT_STAGE1_N128, Kernels(stage2_n128=True) of TOKENSPEED_PETIT_STAGE2_N128)
+  combine_residual             Petit's combine with the post add (MegaMoECombineResidual, TOKENSPEED_PETIT_FUSE_POST)
+  trace_ping                   Petit's trace clock-alignment kernel (MegaMoETracePing; needs TOKENSPEED_PETIT_TRACE=1)
+  a4w4_ep_finalize             not Petit: the A4W4 EP registration's ep_route_finalize kernel
+                               (TOKENSPEED_A4W4_EP_FUSED_FINALIZE) at the DeepSeek V4.1 target shape, top-6, or
+                               with --profile dsv41_flash_dspark the draft's top-3
+The Petit kernels need a TokenSpeed with tokenspeed_kernel.ops.moe.gluon._megamoe_config (46671ec2c and later
+on users/jerryyin/ep4-beats-tp4; upstream main has none; compile says so and exits), the opt-in kernels the
+commits that add them. TokenSpeed's switches in the environment apply as they do at import in a server. The platform is the owner fixture
+`mi350_platform` of tokenspeed-kernel/test/conftest.py (evaluated from that file). Run it under
+board/no-gpu/no-gpu-run when another process holds the GPUs.
+compare (generic, any two AMDGCN listings): the instruction lines of the two files (no directives, labels,
+comments or debug lines), so e.g. two trees' switch-off kernels can be shown identical although their source
+paths and line numbers differ; exit 0 when identical, 1 otherwise.
 """
 from __future__ import annotations
 
@@ -28,7 +37,8 @@ import sys
 import time
 from pathlib import Path
 
-KERNELS = ("stage1", "stage1_n128", "stage2", "stage2_n128", "combine", "combine_residual", "trace_ping")
+KERNELS = ("stage1", "stage1_n128", "stage2", "stage2_n128", "combine", "combine_residual", "trace_ping",
+           "a4w4_ep_finalize")
 
 
 def instructions(asm: str) -> list[str]:
@@ -86,6 +96,8 @@ def compile_kernel(ts_src: Path, kernel: str, profile: str = "dsv41_flash"):
 
     driver.set_active(StubDriver())
     _platform(ts_src)
+    if kernel == "a4w4_ep_finalize":
+        return _compile_a4w4_ep_finalize(profile)
     import test_gluon_petit as t  # the owner test's config helpers
     pk = t._import_petit_kernel()
     import lib.moe.rocm.mega_moe as fwd
@@ -122,6 +134,25 @@ def compile_kernel(ts_src: Path, kernel: str, profile: str = "dsv41_flash"):
     vgpr = next((l.split()[-1] for l in asm.splitlines() if ".vgpr_count" in l), "?")
     return asm, {"kernel": kernel, "compile_s": round(time.time() - t0, 1), "vgprs": vgpr,
                  "lds_bytes": getattr(k.metadata, "shared", None), "instructions": len(instructions(asm))}
+
+
+def _compile_a4w4_ep_finalize(profile: str):
+    """ep_route_finalize's kernel as the registration launches it (FP32 weights, BF16 routes and output)."""
+    import torch
+    from tokenspeed_kernel_amd.ops.gfx950.moe.mxfp4 import ep_route_finalize as F
+    top_k = {"dsv41_flash": 6, "dsv41_flash_dspark": 3}[profile]
+    rows, hidden = 6, 5120
+    t0 = time.time()
+    k = F._ep_route_finalize_kernel.warmup(
+        torch.empty(rows * top_k, hidden, dtype=torch.bfloat16), torch.empty(rows * top_k, dtype=torch.int32),
+        torch.empty(rows, top_k, dtype=torch.float32), torch.empty(rows, hidden, dtype=torch.bfloat16),
+        hidden, hidden, top_k, 1, hidden, TOPK=top_k, BLOCK_N=F.EP_ROUTE_FINALIZE_BLOCK_N, num_warps=4,
+        enable_fp_fusion=False, grid=(rows, -(-hidden // F.EP_ROUTE_FINALIZE_BLOCK_N)))
+    asm = k.asm["amdgcn"]
+    vgpr = next((l.split()[-1] for l in asm.splitlines() if ".vgpr_count" in l), "?")
+    return asm, {"kernel": "a4w4_ep_finalize", "compile_s": round(time.time() - t0, 1), "vgprs": vgpr,
+                 "lds_bytes": getattr(k.metadata, "shared", None), "instructions": len(instructions(asm)),
+                 "fma": sum(1 for i in instructions(asm) if "fma" in i.split()[0])}
 
 
 def main(argv=None) -> int:

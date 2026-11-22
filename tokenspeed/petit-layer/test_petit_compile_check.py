@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("petit_compile_check", HERE / "petit_compile_check.py")
 pcc = importlib.util.module_from_spec(spec)
@@ -36,6 +38,16 @@ def test_cli_compare_exit_code(tmp_path):
     assert pcc.main(["compare", str(a), str(b)]) == 1
 
 
-def test_kernel_choices_cover_every_petit_launch():
-    assert set(pcc.KERNELS) == {"stage1", "stage1_n128", "stage2", "stage2_n128", "combine",
-                                "combine_residual", "trace_ping"}
+def test_usage_describes_every_kernel_choice():
+    table = [line.split("  ")[1] for line in pcc.__doc__.splitlines() if line.startswith("  ") and line[2] != " "]
+    named = {k.strip(" ,") for row in table for k in row.split(", ")}
+    assert set(pcc.KERNELS) <= named, set(pcc.KERNELS) - named
+
+
+def test_compile_names_the_tokenspeed_it_needs():
+    class UpstreamTest:  # the owner test module of a TokenSpeed without _megamoe_config
+        __file__ = "test_gluon_petit.py"
+    with pytest.raises(SystemExit, match="46671ec2c"):
+        pcc.require_megamoe_config(UpstreamTest)
+    UpstreamTest._megamoe_config = object()
+    pcc.require_megamoe_config(UpstreamTest)
