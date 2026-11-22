@@ -8,7 +8,10 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
   "Prefill" | "Mix" | "Decode"  from `ts_control::batch_log` lines, with the fields of FIELD_RES
                                 that are present ("dp_rank" defaults to 0 for single-rank logs);
   "Finish"                      from `Req: RID Finish! RequestStats(...)`, with "rid" and "stats"
-                                (numbers as int/float, quoted strings unquoted, None as None).
+                                (numbers as int/float, quoted strings unquoted, None as None);
+  "Accept"                      from `Req: RID Finish! Accept_num_tokens_avg: X` (the finish line of a
+                                TokenSpeed that logs no RequestStats), with "rid" and "acc_len" = X, the
+                                request's mean tokens per speculative verify step.
 LogTail follows a growing log from its current end.
 dp_spread(events, windows) counts new sequences per attention-DP rank ("#new-seq" of "Prefill batch."
 lines) inside each named time window [start, end).
@@ -65,6 +68,7 @@ FIELD_RES = {
 }
 KIND_RE = re.compile(r"\b(Prefill|Mix|Decode) batch\.")
 FINISH_RE = re.compile(r"Req: (\S+) Finish! RequestStats\((.*)\)")
+ACCEPT_RE = re.compile(r"Req: (\S+) Finish! Accept_num_tokens_avg: " + NUM)
 STAT_RE = re.compile(r"(\w+)=('[^']*'|[^,()]+)")
 
 
@@ -109,7 +113,8 @@ def parse_line(raw):
     line = ANSI.sub("", raw.rstrip("\n"))
     m = KIND_RE.search(line)
     fm = FINISH_RE.search(line)
-    if not m and not fm:
+    am = None if (m or fm) else ACCEPT_RE.search(line)
+    if not m and not fm and not am:
         return None
     ts, sub, tzx = parse_ts(line)
     ev = {"ts": ts, "subsec": sub, "tz_explicit": tzx, "line": line}
@@ -121,6 +126,10 @@ def parse_line(raw):
                 v = mm.group(1)
                 ev[k] = float(v) if "." in v else int(v)
         ev.setdefault("dp_rank", 0)
+    elif am:
+        ev["kind"] = "Accept"
+        ev["rid"] = am.group(1)
+        ev["acc_len"] = float(am.group(2))
     else:
         ev["kind"] = "Finish"
         ev["rid"] = fm.group(1)

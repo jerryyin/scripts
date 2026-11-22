@@ -160,6 +160,13 @@ def test_prefill_cli_matrix_phases_repeated_across_concurrencies() -> None:
         assert {k: (v["requests"], v["valid"]) for k, v in res.items()} == {"measured-1/c2": (2, True), "measured-1/c1": (1, False)}
 
 
+def test_accept_finish_lines_are_their_own_kind() -> None:
+    line = f"[ts] {ts(T)}  INFO ts_control::output: Req: cmpl-ab-01 Finish! Accept_num_tokens_avg: 5.544444444444444\n"
+    e = batch_log.parse_line(line)
+    assert (e["kind"], e["rid"], round(e["acc_len"], 4)) == ("Accept", "cmpl-ab-01", 5.5444)
+    assert batch_log.parse_line(finish(T, "x", 10, 0))["kind"] == "Finish"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
