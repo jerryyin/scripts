@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide` |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -99,6 +99,67 @@ python3 petit_layer.py --rows petit-prefill-rows.csv petit-prefill.json
 python3 petit_layer.py --fit petit-prefill-rows.csv --where mode=eager --where active_ranks=1 \
     --fit-layers 40 --fit-chunks 1024,2048,4096,8192 --fit-cap 1024
 ```
+
+**Stages of one call (`--stages`).** Each call is split at six timing points, in stream order:
+`petit.begin` (entry of the test's `run()`, i.e. `kernel_moe_apply`, whose only device work before
+Stage1 is Petit's apply prep: activation quantize and the top-k id and weight copies into the heap;
+none at 0 rows), `petit.s1`, `petit.s2`, `petit.comb` (immediately before each launch),
+`petit.comb_end` (after the Combine launch) and `petit.end` (the call returned). The stages are the
+intervals between consecutive points: `prep`, `s1`, `s2` (holds the S1 to S2 gap), `comb` and `post`
+(after Combine until return; this path has no post add, so post net is ~0 and checks the marker
+cost). The points before the launches come from thin wrappers around the three launch objects
+`lib.moe.rocm.mega_moe.MegaMoEStage1/MegaMoEStage2/MegaMoECombine`, which `MegaMoESolutionAdapter.Invoke`
+looks up per call (`kernel[grid](...)`; `warmup`, the compile-only path, passes through); they are
+installed in this process only, like `--candidates`, and TokenSpeed's files are unchanged.
+- **Eager:** a `torch.cuda.Event` at each point, `--iters` calls per repetition, no sync between calls.
+- **Graph:** a second graph of the same `--layers` calls is captured with the points recorded by the
+  step-timing owner's marker writer, `runtime/utils/step_timing.py` taken from
+  `../step-timing/instrumentation.diff` (the file the diff adds, loaded with `TS_STEP_TIMING=1`,
+  every replay harvested, records kept in memory): `capture_begin` / `mark` / `capture_end` around the
+  capture, `before_replay` / `after_replay` / `_harvest` around a sampled replay. External timing
+  events recorded during capture become event-record nodes. Reading one replay's points needs a host
+  sync (each replay re-records them), so each sampled replay follows one unsampled replay that lets
+  the collective realign the ranks behind a busy queue. The unmarked graph, the one the whole-call
+  time comes from, has no marker nodes.
+- **Per repetition** (same block order as the whole-call timing, after it): the marked whole call
+  (`dist_timing.time_calls` on the marked graph or marked eager call), then `--iters` stage samples.
+  Per stage: per-rank median over calls and the per-call max over ranks' median (`reduce_repetition`),
+  then median, min, max over repetitions. With `--layers N` a sample is the mean over the N layers.
+- **Marker cost and closure:** every stage interval holds exactly one timing point, so
+  `net = raw - c`, with c = `--marker-us` (the per-node cost `profiling/graph_event_smoke.py`
+  measures) or, by default, this run's `(marked whole call - unmarked whole call) / 6`. The closure
+  compares `stage_sum_net_ms` with the unmarked whole call of the same repetition
+  (`closure_gap_ms`, `closure_ratio`), per rank and on the max-over-ranks medians (the max over ranks of
+  each stage separately, so its sum may exceed any one rank's).
+- **Output:** `results[].stages_ms[mode]` holds `stages` (per stage, aggregate and `per_repetition`),
+  `marked_call`, `closure_per_repetition` (`per_rank`, `max_over_ranks`: `stage_raw_ms`,
+  `stage_net_ms`, `unmarked_call_ms`, `marked_call_ms`, `marker_cost_run_ms`, `marker_cost_ms`,
+  `stage_sum_net_ms`, `closure_gap_ms`, `closure_ratio`), `closure_max_over_ranks` and
+  `stage_net_max_over_ranks` (median, min, max over repetitions); `tool.step_timing.py` is the SHA-256
+  of the marker writer used. `--rows` adds the max-over-ranks columns `prep_ms` .. `post_ms`,
+  `marked_call_ms`, `marker_cost_ms`, `prep_net_ms` .. `post_net_ms`, `stage_sum_net_ms` and
+  `closure_ratio` (empty without `--stages`).
+
+**0 rows.** `--tokens 0` is accepted: every rank calls with 0 rows (the ranks outside `--active-ranks`
+always do), Petit's skeleton (its apply skips the prep kernels; Stage1, Stage2 and Combine still launch and
+exchange; `_launch` accepts `0 <= num_tokens`, and 0 is one of Petit's compile variants). The
+distributed test exercises 0-row ranks next to non-empty ones (`uneven`), not every rank at 0 at once;
+the tool's check (eager, graph, replay steps 0-2 against the reference, graph == eager) runs for it as
+for every count.
+
+**Experts touched.** Every result's `routing.distinct_local_experts` lists, per destination rank, the
+distinct experts of its local range (`experts // world size`) that the timed routing of all ranks
+touches; `--rows` adds `distinct_local_experts` (space separated) and `distinct_local_experts_max`.
+
+`--decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]` applies the decision rules of r0002-p1
+(the fixed-cost study of a batch-1 Petit call) to `--rows` CSVs with stage columns, on the medians
+over repetitions of the max-over-ranks net stages (select one profile, mode, routing, layers and
+candidate with `--where`): C1 (pass the router's ids and weights as Petit's external inputs) if
+`prep_net_ms` at tokens 6, active ranks 1 is >= 0.008; C2 (fuse Stage1 and Stage2) if `s2_net_ms` at
+tokens 0 is >= 0.005; C5 (stage-1 tile N=128) if `s1_net_ms`(6, active 1) - `s1_net_ms`(0) -
+`distinct_local_experts_max`(6, active 1) x 13,926,400 B (one expert's W13) / 6 TB/s is > 0.005; C6/C7
+(launch-ready round, Combine barrier) if `s1_net_ms`(0) + `comb_net_ms`(0) - 3 x node cost is >= 0.020,
+node cost `--node-us` or the median `marker_cost_ms`. It prints a table and the decisions as JSON.
 
 `torchrun --standalone` needs a resolvable hostname; in a container without one, pass
 `--master-addr=127.0.0.1` and a fixed `--master-port` instead.
