@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -482,3 +483,51 @@ def test_line_gaps_per_rank_with_log_timestamps() -> None:
     assert gaps[0]["from_utc"] == ts(T + 0.1) and gaps[0]["to_utc"] == ts(T + 1.6)
     assert abs(gaps[1]["gap_s"] - 1.5) < 1e-6
     assert e2e.line_gap_lines(gaps)[0] == f"measured-1-c2.log rank 1 Prefill -> Decode {ts(T + 0.1)} -> {ts(T + 1.6)} 1.50s"
+
+
+def test_accept_split_parts_sum_to_the_gap() -> None:
+    e2e = load("e2e_decompose.py")
+
+    def bench(path, rows):
+        results = [{"phase": ph, "concurrency": 1, "summary": {
+            "Avg Output Tokens": 101.0, "Output Throughput (tok/s)": tps, "Avg TTFT (ms)": ttft,
+            "Avg TPOT (ms)": tpot, "Avg Latency (s)": (ttft + 100 * tpot) / 1e3, "Avg Decoded Tok/Iter": acc}}
+            for ph, tps, ttft, tpot, acc in rows]
+        path.write_text(json.dumps({"results": results}))
+
+    def decomp(path, labels_gap):
+        runs = [{"label": lab, "ranks": {"0": {"prefill_time_s": 1.0, "decode_time_s": 1.0, "prefill_chunks": 1,
+                                               "chunk_time_s": {"median": 0.1},
+                                               "full_batch_line_gap_s": {"median": gap},
+                                               "prefill_to_decode_gap_s": {"max": 0.0}}}}
+                for lab, gap in labels_gap]
+        path.write_text(json.dumps(runs))
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        # REF: step 10 ms, A 5 -> 2 ms/token; X: step 12 ms, A 4 -> 3 ms/token, plus 0.1 ms/token other
+        bench(d / "ref.json", [("measured-1", 300.0, 700.0, 2.0, 5.0), ("measured-2", 300.0, 700.0, 2.0, 5.0)])
+        bench(d / "x.json", [("measured-1", 200.0, 800.0, 3.1, 4.0), ("measured-2", 250.0, 800.0, 2.4, 5.0)])
+        decomp(d / "ref-d.json", [("measured-1", 0.4), ("measured-2", 0.4)])  # 0.4 s / 40 rounds = 10 ms
+        decomp(d / "x-d.json", [("measured-1", 0.48), ("measured-2", 0.48)])
+        (d / "x.log").write_text(
+            f"[ts] {ts(1.8e9)}  INFO ts_control::output: Req: r1 Finish! Accept_num_tokens_avg: 4.0\n")
+        (d / "x.req").write_text(json.dumps({"phase": "measured-1", "concurrency": 1, "request_id": "r1",
+                                             "acc_len": 4.2}) + "\n")
+        res = e2e.accept_split([("REF", str(d / "ref.json")), ("X", str(d / "x.json"))],
+                               {"REF": str(d / "ref-d.json"), "X": str(d / "x-d.json")}, 40,
+                               {"X": [str(d / "x.log")]}, {"X": [str(d / "x.req")]})
+    p1 = next(p for p in res["pairs"] if p["phase"] == "measured-1")
+    assert abs(p1["ttft_part_ms"] - 100.0) < 1e-9
+    assert abs(p1["step_part_ms"] - 100 * 2 / 5) < 1e-9          # D (s_X - s_R) / A_R = 40 ms
+    assert abs(p1["accept_part_ms"] - 100 * 12 * (1 / 4 - 1 / 5)) < 1e-9  # 60 ms
+    assert abs(p1["other_part_ms"] - 100 * 0.1) < 1e-9
+    parts = sum(p1[k] for k in ("ttft_part_ms", "step_part_ms", "accept_part_ms", "other_part_ms"))
+    assert abs(parts - p1["latency_gap_ms"]) < 1e-9
+    assert abs(p1["log_accept"] + p1["log_step"] - (math.log(4 / 5) - math.log(1.2))) < 1e-12
+    x1 = next(p for p in res["points"] if p["label"] == "X" and p["phase"] == "measured-1")
+    assert x1["acceptance_source"].startswith("server") and x1["acceptance"] == 4.0
+    assert abs(x1["acceptance_evalscope_vs_server_max_abs_diff"] - 0.2) < 1e-9
+    row = res["summary"][0]
+    assert row["repetitions"] == 2 and row["accept_part_ms"]["min"] == 0.0
+    assert "acceptance share" in e2e.accept_split_markdown(res)
