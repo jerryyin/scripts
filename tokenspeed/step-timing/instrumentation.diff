@@ -237,10 +237,10 @@ index f99473a60..c8e1dc6df 100644
              h = pending_post.finish(h)
          combined = v41_hc_pre(h, pre_mix)
 diff --git a/python/tokenspeed/runtime/models/deepseek_v41_moe.py b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
-index 7dcc4c0ac..643b105d4 100644
+index e88c834fd..f6d5b9ad1 100644
 --- a/python/tokenspeed/runtime/models/deepseek_v41_moe.py
 +++ b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
-@@ -50,6 +50,7 @@ from tokenspeed.runtime.utils import add_prefix
+@@ -51,6 +51,7 @@ from tokenspeed.runtime.utils import add_prefix
  from tokenspeed.runtime.utils.cuda_stream import StreamFork
  from tokenspeed.runtime.utils.env import envs, global_server_args_dict
  from tokenspeed.runtime.utils.nvtx import nvtx_range
@@ -248,7 +248,7 @@ index 7dcc4c0ac..643b105d4 100644
  from tokenspeed.runtime.utils.server_args import (
      gluon_petit_tp_attention_mapping,
      gluon_petit_tp_attention_rows,
-@@ -518,8 +519,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -526,8 +527,10 @@ class DeepseekV4MoE(nn.Module):
          ctx: ForwardContext,
          comm_manager: CommManager,
      ) -> torch.Tensor:
@@ -259,7 +259,7 @@ index 7dcc4c0ac..643b105d4 100644
          if self.shared_expert_fused:
              # The routed output already includes the shared expert.
              with nvtx_range("moe_mega_experts"):
-@@ -541,11 +544,14 @@ class DeepseekV4MoE(nn.Module):
+@@ -549,11 +552,14 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=True,
                  )
              with fork.branch():
@@ -274,18 +274,23 @@ index 7dcc4c0ac..643b105d4 100644
          return routed + shared if shared is not None else routed
  
      def forward_normal(
-@@ -564,8 +570,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -572,6 +578,7 @@ class DeepseekV4MoE(nn.Module):
              return self._forward_petit_tp_attention(hidden_states, input_ids, out)
          if hidden_states.shape[0] == 0 and not self.use_gluon_petit:
              return hidden_states if out is None else out.copy_(hidden_states)
 +        _st.mark("moe.router", self.layer_index)
          with nvtx_range("moe_select_experts"):
              topk_output = self._compute_topk_output(hidden_states, input_ids)
-+        _st.mark("moe.experts", self.layer_index)
          deferred_finalize = (
-             hidden_states.dtype == torch.bfloat16
-             and self.experts.supports_deferred_cuda_finalize
-@@ -581,7 +589,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -592,6 +599,7 @@ class DeepseekV4MoE(nn.Module):
+                 max_num_tokens_per_gpu,
+                 out,
+             )
++        _st.mark("moe.experts", self.layer_index)
+         shared = None
+         with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
+             with nvtx_range("moe_experts"):
+@@ -603,7 +611,10 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=not deferred_finalize,
                  )
              with fork.branch():
@@ -296,7 +301,31 @@ index 7dcc4c0ac..643b105d4 100644
          if deferred_finalize:
              # Reduce routed rows and add the shared expert in one finalize.
              gemm2_out, expert_weights, expanded_idx = routed
-@@ -614,14 +625,17 @@ class DeepseekV4MoE(nn.Module):
+@@ -639,17 +650,22 @@ class DeepseekV4MoE(nn.Module):
+ 
+         with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
+             with fork.branch():
++                _st.mark("shared.b", self.layer_index)
+                 shared = self._forward_shared_experts(hidden_states)
++                _st.mark("shared.e", self.layer_index)
+             ready = fork.join_event if getattr(fork, "_active", False) else None
++            _st.mark("moe.experts", self.layer_index)
+             with petit_combine_post(shared, out=out, ready=ready):
+                 with nvtx_range("moe_experts"):
+-                    return self._forward_routed_experts(
++                    result = self._forward_routed_experts(
+                         hidden_states,
+                         topk_output,
+                         num_global_tokens,
+                         max_num_tokens_per_gpu,
+                         do_finalize=True,
+                     )
++        _st.mark("moe.join", self.layer_index)
++        return result
+ 
+     def _forward_petit_tp_attention(
+         self,
+@@ -666,12 +682,14 @@ class DeepseekV4MoE(nn.Module):
          all-reduce over the MoE TPxEP group then yields routed + shared for
          every row, exactly as TP4's routed partial + shared partial.
          """
@@ -310,11 +339,34 @@ index 7dcc4c0ac..643b105d4 100644
 +        _st.mark("moe.router", self.layer_index)
          with nvtx_range("moe_select_experts"):
              topk_output = self._compute_topk_output(local, local_ids)
+         if _PETIT_FUSE_POST and self.shared_experts is not None and num_rows > 0:
+@@ -680,12 +698,15 @@ class DeepseekV4MoE(nn.Module):
+             # out[start:end] in place, after waiting for it: no slice add.
+             with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
+                 with fork.branch():
++                    _st.mark("shared.b", self.layer_index)
+                     shared = self._forward_shared_experts(hidden_states)
+                     result = shared if out is None else out.copy_(shared)
++                    _st.mark("shared.e", self.layer_index)
+                 ready = fork.join_event if getattr(fork, "_active", False) else None
+                 from tokenspeed_kernel.ops.moe.gluon import petit_combine_post
+ 
+                 rows = result[start:end]
++                _st.mark("moe.experts", self.layer_index)
+                 with petit_combine_post(rows, out=rows, ready=ready):
+                     with nvtx_range("moe_experts"):
+                         self._forward_routed_experts(
+@@ -695,7 +716,9 @@ class DeepseekV4MoE(nn.Module):
+                             -(-num_rows // self.mapping.moe.ep_size),
+                             do_finalize=True,
+                         )
++            _st.mark("moe.join", self.layer_index)
+             return result
 +        _st.mark("moe.experts", self.layer_index)
          shared = None
          with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
              with nvtx_range("moe_experts"):
-@@ -634,7 +648,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -708,7 +731,10 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=True,
                  )
              with fork.branch():
@@ -599,12 +651,12 @@ index 000000000..c3723209c
 +        raise RuntimeError("TS_STEP_TIMING=1 requires TS_STEP_TIMING_DIR")
 +    atexit.register(flush)
 diff --git a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-index 01f583f38..70f7f276e 100644
+index 725e48d44..d951e0629 100644
 --- a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
 +++ b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-@@ -228,7 +228,16 @@ class MegaMoESolutionAdapter:
-             # warmup() takes the grid as a keyword; a launch takes it above.
-             return {"grid": blocks} if compile_only else {}
+@@ -502,7 +502,16 @@ class MegaMoESolutionAdapter:
+             else combine.kNumSMs
+         )
  
 +        import sys as _sys  # TS_STEP_TIMING test-only
 +
@@ -619,7 +671,7 @@ index 01f583f38..70f7f276e 100644
              Launch(MegaMoEStage1, (C.kNumSMs,))(
                  p.w13,
                  p.scales_w13,
-@@ -244,6 +253,7 @@ class MegaMoESolutionAdapter:
+@@ -518,6 +527,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
                  **Grid((C.kNumSMs,)),
              )
@@ -627,18 +679,33 @@ index 01f583f38..70f7f276e 100644
              Launch(MegaMoEStage2, (stage2.kStage2GridBlocks,))(
                  p.w2,
                  p.scales_w2,
-@@ -255,6 +265,7 @@ class MegaMoESolutionAdapter:
-                 enable_fp_fusion=False,
+@@ -530,6 +540,7 @@ class MegaMoESolutionAdapter:
                  **Grid((stage2.kStage2GridBlocks,)),
              )
-+            _mk("petit.comb")
-             Launch(MegaMoECombine, (combine.kNumSMs,))(
-                 p.out,
-                 p.num_tokens,
-@@ -266,6 +277,7 @@ class MegaMoESolutionAdapter:
-                 enable_fp_fusion=False,
-                 **Grid((combine.kNumSMs,)),
-             )
+             if p.residual is None:
++                _mk("petit.comb")
+                 Launch(MegaMoECombine, (combine_blocks,))(
+                     p.out,
+                     p.num_tokens,
+@@ -543,10 +554,14 @@ class MegaMoESolutionAdapter:
+                 )
+             else:
+                 assert combine.kAddResidual
++                # C3: the wait for the shared expert's rows (aux stream) and the
++                # combine that adds them are their own Petit stages.
++                _mk("petit.cwait")
+                 if p.residual_ready is not None and not compile_only:
+                     # The shared expert runs on the aux stream: its rows
+                     # must be complete before the combine reads them.
+                     torch.cuda.current_stream().wait_event(p.residual_ready)
++                _mk("petit.combr")
+                 Launch(MegaMoECombineResidual, (combine_blocks,))(
+                     p.out,
+                     p.num_tokens,
+@@ -560,6 +575,7 @@ class MegaMoESolutionAdapter:
+                     enable_fp_fusion=False,
+                     **Grid((combine_blocks,)),
+                 )
 +            _mk("petit.post")
          return 0
  

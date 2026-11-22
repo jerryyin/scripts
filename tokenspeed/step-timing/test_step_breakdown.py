@@ -94,7 +94,7 @@ def test_draft_markers_counted_apart() -> None:
 
 
 def test_tp4ep4_petit_markers() -> None:
-    # One tp4ep4-petit MoE layer at TokenSpeed 649a6353: ffn, moe.split, moe.router, moe.experts, the four
+    # One tp4ep4-petit MoE layer: ffn, moe.split, moe.router, moe.experts, the four
     # Petit markers, shared.b/e (main stream), moe.join (row placement), moe.comm (combine all-reduce), ffn.end.
     import analyze_step_timing as ast
     names = ["0:ffn", "0:moe.split", "0:moe.router", "0:moe.experts", "0:petit.s1", "0:petit.s2", "0:petit.comb",
@@ -109,11 +109,42 @@ def test_tp4ep4_petit_markers() -> None:
     owner = {c: comp["name"] for comp in comps for c in comp["categories"]}
     assert sb.project_group(owner["moe.row_split(tp4ep4-petit)"]) == "row_split"
     assert sb.project_group(owner["ffn.post_comm(moe allreduce)"]) == "moe_allreduce"
-    # groups of the components that existed before 649a6353 keep their meaning
+    # groups of the components that existed before moe.split / moe.comm keep their meaning
     assert sb.project_group(owner["ffn.add+post_comm(allreduce)"]) == "other"
     assert sb.project_group(owner["other:shared.b"]) == "shared_expert"
     assert sb.project_group(owner["moe.router_gate_topk"]) == "router"
     assert sb.project_group("other: draft:ffn.post_comm(moe allreduce)") == "draft"
+
+
+def test_fused_post_markers() -> None:
+    # One DP4-Petit MoE layer with TOKENSPEED_PETIT_FUSE_POST=1: the shared expert is
+    # issued first on the aux stream, moe.experts follows it, and the combine is petit.cwait (wait for the
+    # shared rows) + petit.combr (combine with the shared add) instead of petit.comb.
+    import analyze_step_timing as ast
+    names = ["0:ffn", "0:moe.router", "0:shared.b", "0:shared.e", "0:moe.experts", "0:petit.s1", "0:petit.s2",
+             "0:petit.cwait", "0:petit.combr", "0:petit.post", "0:moe.join", "0:ffn.end"]
+    streams = ["main", "main", "s9", "s9", "main", "main", "main", "main", "main", "main", "main", "main"]
+    t = [0.0, 0.1, 0.12, 0.42, 0.15, 0.2, 0.5, 0.7, 0.75, 0.95, 0.96, 0.97]
+    cats, buckets, aux, _ = ast.step_components({"names": names, "streams": streams}, t, 1.0)
+    assert abs(cats["moe.router_gate_topk"] - 0.05) < 1e-9
+    assert abs(cats["moe.prep(quant/non-petit experts)"] - 0.05) < 1e-9
+    assert abs(cats["petit.stage2(down)"] - 0.2) < 1e-9
+    assert abs(cats["petit.combine_wait_shared(c3)"] - 0.05) < 1e-9
+    assert abs(cats["petit.combine+shared_add(c3)"] - 0.2) < 1e-9
+    assert "petit.combine" not in cats
+    assert abs(aux["aux.shared_expert"] - 0.3) < 1e-9
+    assert abs(buckets["moe_combine"] - 0.25) < 1e-9
+    # both fused-post segments are part of the Petit MoE of the layer (share) and of the petit group (project)
+    for cat in ("petit.combine_wait_shared(c3)", "petit.combine+shared_add(c3)"):
+        assert cat in sb.PETIT_CATEGORIES
+    assert {"petit.cwait", "petit.combr"} <= set(sb.PETIT_MARKERS)
+    comps, _ = sb.load_map(str(Path(sb.HERE) / "components.json"))
+    owner = {c: comp["name"] for comp in comps for c in comp["categories"]}
+    for cat in ("petit.combine_wait_shared(c3)", "petit.combine+shared_add(c3)"):
+        assert sb.project_group(owner[cat]) == "petit"
+        assert sb.project_group(owner["draft:" + cat]) == "draft"
+    markers = {m for comp in comps for m in comp["markers"]}
+    assert {"petit.cwait", "petit.combr", "draft:petit.cwait", "draft:petit.combr"} <= markers
 
 
 if __name__ == "__main__":
@@ -123,6 +154,7 @@ if __name__ == "__main__":
     test_share_on_self_test_dumps()
     test_draft_markers_counted_apart()
     test_tp4ep4_petit_markers()
+    test_fused_post_markers()
     print("ok")
 
 

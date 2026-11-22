@@ -8,7 +8,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `649a6353d971a0e9ad5180447ed6a685f27caeb9` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); earlier versions are this file at a toolkit commit: against `4b76ebccdbac7880f367280552e5757a63b23c8d` at toolkit `870b2c9d8ce715d377201fb2b0020afbeee74836`, against `46671ec2c8286eeb6fc7efad4a7e76d4aed57f15` at toolkit `865074dd0439832497c3a7043355f6ecc940d4dd`, against `e8fd096ed80112d6108725bad1fbdc3accb0a559` at toolkit `8592e72043703c70cada18dd7690102c29c6fc10`, against `0dd8d477` at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation.diff` | The patch, against TokenSpeed `100621d17` (branch `users/jerryyin/ep4-beats-tp4` of `jerryyin/tokenspeed`: DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); versions for older TokenSpeed commits are in this file's history (`git log -- instrumentation.diff`) |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
@@ -18,7 +18,7 @@ Make the patched copy in a clone (never a worktree or an edit of the checkout yo
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 649a6353d971a0e9ad5180447ed6a685f27caeb9
+git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach 100621d17
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
@@ -63,59 +63,64 @@ The harness's job sets the engine's `PYTHONPATH` itself (`tiered_benchmark.py`, 
 from amd-tracking `a7c0557` on it is `$INSTR/python:$INSTR/tokenspeed-kernel/python`, so the Gluon
 Petit `mega_moe.py` stage markers in `tokenspeed-kernel/` are timed there too (before that commit only
 `$INSTR/python` was on the path and the kernel package came from the editable install, so only the
-python-level markers fired). `tokenspeed-kernel/python` holds no build products at e8fd096e or 46671ec2; it imports
-from a clone. `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
+python-level markers fired). `tokenspeed-kernel/python` holds no build products; it imports from a
+clone. `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
 the harness only the `TS_STEP_TIMING_*` variables pass through (the engine inherits the environment).
 
-Markers (main stream unless noted), each at the same logical boundary as in the 0dd8d477 version:
-`model.begin` (before the encoder), `engram` / `layer` (per decoder layer, before Engram / mHC
-pre-attention), `attn` (attention call), `attn.fork`, `attn.kvidx.b` .. `attn.kvidx.e` (compressor /
-KV write / indexer branch, aux stream when overlapped), `attn.q` (q projection after the branch),
-`attn.core` (sparse-MLA kernel), `attn.wo` (output projection), `hc_ffn` (mHC pre-FFN), `ffn`
-(`_forward_ffn`), `moe.router` (gate + top-k), `moe.experts` (the routed-expert call: for Gluon
-Petit the whole `kernel_moe_apply`: activation MXFP4 quantize, route copies, then `petit.s1`
-(stage 1: dispatch wait + gate/up), `petit.s2` (down), `petit.comb` (combine), `petit.post` (return)),
-`shared.b` .. `shared.e` (shared expert; on the main stream under Petit, which runs it serially after
-the routed call), `moe.join`, `ffn.end`, `final` (final norm), `model.end` (head, sampling, outputs,
-and with DSpark the draft round inside the same graph). New at e8fd096e: the replay is timed when a
-drafter replays the decode graph (DSpark), and the DSpark draft model marks `draft.begin` /
-`draft.end` around its block forward with its stages recorded as layer id + 1000
-(`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as `draft:<category>`. At 46671ec2
-(same markers, same boundaries): `capture_begin` / `capture_end` bracket the capture's
-`with overlap_capture, capture_session(graph), graph_capture:` (the draft-overlap capture context is
-inside the timed capture), the replay markers sit inside the replay's `try` around both branches,
-`model.begin` / `model.end` bracket the idle-DP-rank layer loop and, on the main path,
-`model.begin` follows `begin_indexer_forward()` (before the decode index-geometry fork onto the
-auxiliary stream) and `model.end` follows `end_indexer_forward()` (after the geometry join), and
-`final` precedes `finish_forward`. The MoE file `deepseek_v41_moe.py` is unchanged from e8fd096e (the
-MegaMoE path with a fused shared expert, `shared_expert_fused`, returns inside `moe.experts`, so
-`shared.*` and `moe.join` do not fire there; Gluon Petit does not take that path). At 4b76ebcc (Petit
-compile-at-startup `73c3b0e8b`, opt-in shared-expert aux stream `4b76ebccd`) two hunks were re-ported, same
-markers at the same boundaries: the `_st` import in `deepseek_v41_moe.py` (its `env` import line changed; the
-`forward_normal` markers apply unchanged, `shared.b`/`shared.e` still bracket the `fork.branch()` body, which runs
-on the aux stream only with `TOKENSPEED_PETIT_SHARED_EXPERT_AUX_STREAM=on`), and the four `petit.*` markers in
-`mega_moe.py` `Invoke`, now around the `Launch(...)` calls; they are no-ops when `compile_only` (startup compile).
-At 649a6353 (attention TP with Gluon Petit's MoE, the tp4ep4-petit layout, `04f4f429e`..`649a6353d`) the MoE file's
-`_st` import and `forward_normal` `moe.router`/`moe.experts` hunks were re-ported (the import block and the method's
-first lines changed); every other hunk applies unchanged. Two markers are new. `moe.split` (tp4ep4-petit only) opens
-`DeepseekV4MoE._forward_petit_tp_attention`: this rank's slice `[r*ceil(T/EP), ...)` of the replicated rows, views
-before the router (category `moe.row_split(tp4ep4-petit)`, group `row_split`). `moe.comm` sits in the decoder layer's
-`_forward_ffn` before `post_mlp_comm`, the MoE output all-reduce over `moe.tp_ep_group`, for every layout whose MoE
-output is all-reduced after the call (TP4 and tp4ep4-petit; EP4/DP4-Petit returns before it, so its markers are
-unchanged); category `ffn.post_comm(moe allreduce)`, group `moe_allreduce`. In TP4 it is the routed + shared
-partials' sum, in tp4ep4-petit the combine/gather of the split rows (the same collective). The tp4ep4-petit path
-carries the markers of `forward_normal` at the same boundaries: `moe.router` (router/top-k on the slice),
-`moe.experts` + the four `petit.*` (Petit on the slice), `shared.b`/`shared.e` around the TP-sharded shared expert
-over all rows (aux stream only with `TOKENSPEED_PETIT_SHARED_EXPERT_AUX_STREAM=on`), `moe.join` after the fork join.
-Where `moe.comm` fires, the `moe.join` segment (`add/post-comm (TP4 all-reduce)`, group `other`) ends at it and holds
-only the work before the collective: TP4's routed finalize + shared add, tp4ep4-petit's row placement (zero/copy of
-the shared partial and the add of the rank's routed rows). Dumps made with an earlier patch have no `moe.comm`, and
-their components and groups project exactly as before (the 30 recorded TP4/EP4 stages of r0002-g4 project
-byte-identically with the toolkit before and after). With a deferred, mHC-fused MoE all-reduce (`defer_moe`, when
-the comm backend `supports_all_reduce_mhc_norm`) `moe.comm` does not fire and the collective runs in the next
-layer's pre-attention mHC, in TP4 and tp4ep4-petit alike. The Petit MoE of
-one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
-shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
+Markers (main stream unless noted): `model.begin` (before the encoder, after
+`begin_indexer_forward()`, so before the decode index-geometry fork onto the auxiliary stream),
+`engram` / `layer` (per decoder layer, before Engram / mHC pre-attention), `attn` (attention call),
+`attn.fork`, `attn.kvidx.b` .. `attn.kvidx.e` (compressor / KV write / indexer branch, aux stream
+when overlapped), `attn.q` (q projection after the branch), `attn.core` (sparse-MLA kernel),
+`attn.wo` (output projection), `hc_ffn` (mHC pre-FFN), `ffn` (`_forward_ffn`), `moe.split`
+(attention TP with Petit's MoE, the tp4ep4-petit layout, only: opens
+`DeepseekV4MoE._forward_petit_tp_attention`, this rank's slice `[r*ceil(T/EP), ...)` of the
+replicated rows), `moe.router` (gate + top-k), `moe.experts` (the routed-expert call: for Gluon
+Petit the whole `kernel_moe_apply`: activation MXFP4 quantize, route copies, then the kernel
+markers `petit.s1` (stage 1: dispatch wait + gate/up), `petit.s2` (down), `petit.comb` (combine),
+`petit.post` (return)), `shared.b` .. `shared.e` (shared expert; on the main stream under Petit,
+which runs it serially after the routed call, on the aux stream with
+`TOKENSPEED_PETIT_SHARED_EXPERT_AUX_STREAM=on`), `moe.join` (after the fork join), `moe.comm`
+(before `post_mlp_comm`, the MoE output all-reduce over `moe.tp_ep_group`, in every layout whose
+MoE output is all-reduced after the call: TP4 and tp4ep4-petit; EP4/DP4-Petit returns before it),
+`ffn.end`, `final` (final norm, before `finish_forward`), `model.end` (after
+`end_indexer_forward()`: head, sampling, outputs, and with DSpark the draft round inside the same
+graph). `capture_begin` / `capture_end` bracket the graph capture (the draft-overlap capture
+context included), and a replay is timed also when a drafter replays the decode graph (DSpark).
+The DSpark draft model marks `draft.begin` / `draft.end` around its block forward, its stages
+recorded as layer id + 1000 (`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as
+`draft:<category>`. The `petit.*` markers sit around `mega_moe.py`'s `Launch(...)` calls in
+`MegaMoESolutionAdapter.Invoke` and are no-ops when `compile_only` (startup compile). The MegaMoE
+path with a fused shared expert (`shared_expert_fused`) returns inside `moe.experts`, so `shared.*`
+and `moe.join` do not fire there (Gluon Petit does not take that path).
+
+Where `moe.comm` fires, the `moe.join` segment (`add/post-comm (TP4 all-reduce)`, group `other`)
+ends at it and holds only the work before the collective: TP4's routed finalize + shared add,
+tp4ep4-petit's row placement (zero/copy of the shared partial and the add of the rank's routed
+rows); `moe.comm` itself is category `ffn.post_comm(moe allreduce)`, group `moe_allreduce`, and
+`moe.split` category `moe.row_split(tp4ep4-petit)`, group `row_split`. Dumps made with an earlier
+patch have no `moe.comm` and project as before. With a deferred, mHC-fused MoE all-reduce
+(`defer_moe`, when the comm backend `supports_all_reduce_mhc_norm`) `moe.comm` does not fire and
+the collective runs in the next layer's pre-attention mHC.
+
+Petit's opt-in switches `TOKENSPEED_PETIT_FUSE_PREP`, `TOKENSPEED_PETIT_STAGE1_N128` (with
+`TOKENSPEED_PETIT_STAGE1_N128_SELECT`), `TOKENSPEED_PETIT_STAGE2_N128`,
+`TOKENSPEED_PETIT_DROP_ADMIT` and `TOKENSPEED_PETIT_COMBINE_NOBARRIER` change kernels, tiles and
+grids only: `petit.s1` / `petit.s2` / `petit.comb` still bracket the launches. With
+`TOKENSPEED_PETIT_FUSE_POST=1` (the post add folded into Combine; DP4:
+`_forward_petit_fused_post`; tp4ep4-petit: the `_PETIT_FUSE_POST` branch of
+`_forward_petit_tp_attention`) the shared expert is issued first, `shared.b`/`shared.e` around it
+(aux stream under capture; tp4ep4-petit also copies it into the output there), then `moe.experts`
+(after the switch's decision in `forward_normal`, past CPU-only code, so the unfused path is timed
+the same), the Petit call, and `moe.join` after it. In `mega_moe.py` the residual combine
+`MegaMoECombineResidual` is `petit.cwait` (the main stream's wait for the shared expert's rows,
+category `petit.combine_wait_shared(c3)`) then `petit.combr` (the combine with the shared add,
+`petit.combine+shared_add(c3)`) in place of `petit.comb`, then `petit.post`. Both count as Petit
+(`step_breakdown.py` `PETIT_CATEGORIES`, group `petit`): with the switch the Petit MoE holds the
+shared add that the unfused path does after the call in `moe.join`. The Petit MoE of one layer is
+`moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` (fused post: `petit.cwait` +
+`petit.combr`) + `petit.post` (router/top-k, shared expert and the add excluded); without the
+kernel markers `moe.experts` alone spans the call.
 
 `STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
 0..39, none dense or hash-routed) and 3 DSpark stages (ids 0..2), so `STRIDE=40` times target layer 0

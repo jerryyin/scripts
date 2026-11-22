@@ -36,9 +36,13 @@ DRAFT_LAYER_OFFSET = 1000  # analyze_step_timing.DRAFT_LAYER_OFFSET
 # Analyzer categories of the segments from moe.experts to the next marker after the Petit call
 # (shared.b): activation quantize + route copies, stage 1 (dispatch wait + gate/up), stage 2 (down),
 # combine, and the return to Python. Without kernel-side markers moe.experts alone spans the call.
+# With TOKENSPEED_PETIT_FUSE_POST=1 the combine is petit.cwait (wait for the
+# shared expert's rows) + petit.combr (combine with the shared add) instead of petit.comb, so the Petit
+# MoE there also holds the shared add (and any join wait) that the unfused path does after the call.
 PETIT_CATEGORIES = ("moe.prep(quant/non-petit experts)", "petit.stage1(dispatch_wait+gate_up)",
-                    "petit.stage2(down)", "petit.combine", "moe.shared_join_wait")
-PETIT_MARKERS = ("moe.experts", "petit.s1", "petit.s2", "petit.comb", "petit.post")
+                    "petit.stage2(down)", "petit.combine", "petit.combine_wait_shared(c3)",
+                    "petit.combine+shared_add(c3)", "moe.shared_join_wait")
+PETIT_MARKERS = ("moe.experts", "petit.s1", "petit.s2", "petit.comb", "petit.cwait", "petit.combr", "petit.post")
 
 
 def marker_name(name):
@@ -240,8 +244,8 @@ UNTIMED_TAILS = ("layer tail", "DSpark draft: layer tail")
 
 def project_group(name):
     """Coarse group of a table component (attention, router, petit, shared, norms, head, draft, row_split,
-    moe_allreduce, other). row_split and moe_allreduce come from markers added at TokenSpeed 649a6353
-    (moe.split, moe.comm); in dumps without them their time stays where it was (router / other)."""
+    moe_allreduce, other). row_split and moe_allreduce come from the markers moe.split
+    and moe.comm; in dumps without them their time stays where it was (router / other)."""
     if name.startswith("DSpark draft") or name.startswith("other: draft:"):
         return "draft"
     for prefix, group in (("MoE row split", "row_split"), ("MoE output all-reduce", "moe_allreduce")):

@@ -35,10 +35,16 @@ SEG = {  # start-marker name -> (category, bucket)
     "petit.s1": ("petit.stage1(dispatch_wait+gate_up)", "moe_dispatch+gate_up"),
     "petit.s2": ("petit.stage2(down)", "moe_down"),
     "petit.comb": ("petit.combine", "moe_combine"),
+    # With TOKENSPEED_PETIT_FUSE_POST=1 the combine adds the shared expert's rows itself
+    # (MegaMoECombineResidual) after waiting for them; petit.cwait opens the wait (the main stream's
+    # join on the aux-stream shared expert), petit.combr the residual combine. They replace
+    # petit.comb on that path; petit.post follows either combine.
+    "petit.cwait": ("petit.combine_wait_shared(c3)", "moe_combine"),
+    "petit.combr": ("petit.combine+shared_add(c3)", "moe_combine"),
     "petit.post": ("moe.shared_join_wait", "moe_experts"),
     "moe.join": ("ffn.add+post_comm(allreduce)", "collectives"),
-    # From TokenSpeed 649a6353: moe.split opens the tp4ep4-petit row split (this rank's slice of the
-    # replicated rows, before the router); moe.comm opens the MoE output all-reduce in _forward_ffn
+    # moe.split opens the tp4ep4-petit row split (this rank's slice of the replicated rows, before
+    # the router); moe.comm opens the MoE output all-reduce in _forward_ffn
     # (TP4: routed + shared partials; tp4ep4-petit: the combine/gather of the split rows), which ends
     # the moe.join segment there (TP4: routed finalize + shared add; tp4ep4-petit: row placement).
     "moe.split": ("moe.row_split(tp4ep4-petit)", "moe_split"),
