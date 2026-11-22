@@ -38,4 +38,4 @@ def test_cli_compare_exit_code(tmp_path):
 
 def test_kernel_choices_cover_every_petit_launch():
     assert set(pcc.KERNELS) == {"stage1", "stage1_n128", "stage2", "stage2_n128", "combine",
-                                "combine_residual", "trace_ping"}
+                                "combine_residual", "trace_ping", "a4w4_ep_finalize"}
