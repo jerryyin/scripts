@@ -409,6 +409,18 @@ def test_container_lock_holder_keeps_the_lock_until_stdin_closes(tmp=None):
     assert gq.serving(queue) is None
 
 
+def test_hold_options_reach_the_holder_and_add_passes_them_to_the_serve_it_starts(tmp=None):
+    root = Path(tmp or tempfile.mkdtemp())
+    hold = gq.MemoryHold('0,1,2,3', root / 'serve.log', root, busy_free_cap=16, gate_ranks=4)
+    assert hold.options == ['--busy-free-cap', '16', '--gate', str(root / 'hold.gate'), '--gate-ranks', '4']
+    assert gq.MemoryHold('0', root / 'serve.log', root).options == [], 'the default holder is unchanged'
+    args = gq.parse(['add', str(root / 'q'), '--count', '4', '--hold-busy-free-cap', '16',
+                     '--hold-gate-ranks', '4', '--', 'true'])
+    started = []
+    quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
+    assert started == [(4, ('--hold-busy-free-cap', '16', '--hold-gate-ranks', '4'))], started
+
+
 if __name__ == '__main__':
     test_queue_runs_back_to_back_in_one_claim()
     test_empty_queue_claims_nothing_and_recovers_interrupted_jobs()

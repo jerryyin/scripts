@@ -15,6 +15,9 @@ board/
 ├── test_gpu_queue.py      # its tests (no GPU or docker needed)
 ├── gpu-hold.py            # gpu-queue's memory holder
 ├── test_gpu_hold.py       # its tests (no GPU needed)
+├── memgate/
+│   └── sitecustomize.py   # makes a server's ranks wait for gpu-hold before large allocations
+├── test_memgate.py        # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -71,6 +74,22 @@ board/
   board/gpu-queue add /path/in/container/queue --name numerics -- 'cd /work && ./run-numerics.sh'
   board/gpu-queue status /path/in/container/queue
   ```
+
+  **Start guard (opt-in).** By default the holder leaves 240 GiB free per GPU while our process
+  starts. On the MI350X host, other tenants took 36-215 GiB of that free memory within 0.5-11 s
+  (smallest free memory before a grab: 38 GiB), so a start could be lost. `serve` (and `add
+  --count`) `--hold-busy-free-cap 32 --hold-gate-ranks 4` keeps free memory at most 32 GiB during the
+  start: below the smallest grab seen (33.6 GiB) and the smallest free memory before one (38 GiB);
+  outside its two gated allocations our server grew by up to 49 GiB within one 0.5 s sample (a
+  tp4ep4-petit post-load step), which the holder follows only if no single allocation exceeds the
+  cap (its children re-check every 50 ms) and exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
+  `board/memgate` first on the server's `PYTHONPATH`: every rank (also multiprocessing spawn
+  children) imports it as `sitecustomize` (and runs the one it shadows) and waits at the gate before
+  TokenSpeed's model construction (`weights`: 119-140 GiB at once), communication buffers (`comm`)
+  and KV-cache memory profile (`kv`); when all N ranks wait the holder releases everything and lets
+  them go, caps again after `weights`/`comm`, and yields after `kv`. TokenSpeed is not changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900).
+  Without the shim a gated serve starves the server's weight allocation: use both or neither.
+  Tests: `test_memgate.py`, `test_gpu_hold.py`.
 
   To keep the GPUs across a sequence of experiments, queue the next job before the current one
   finishes; a job queued after the queue empties waits for a fresh claim.
