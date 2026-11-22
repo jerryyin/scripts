@@ -33,6 +33,7 @@ reference then for the timed inputs; the test's check still runs on the test's w
 Analysis modes (no GPU):
   petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]   one CSV row per repetition of each result
   petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
+  petit_layer.py --stage-table OUT.json [OUT.json ...]     --stages net times per rank and max over ranks (us)
   petit_layer.py --fit ROWS.csv [ROWS.csv ...] [--where NAME=VALUE ...] [--fit-layers 40]
                  [--fit-chunks C,C,...] [--fit-cap 1024]
 --fit groups the --rows CSV rows by (profile, routing, mode, active_ranks, candidate) and per group
@@ -45,7 +46,23 @@ the line if it was not measured; the remainder at the line) against one --fit-ca
 that differ in --layers or --seed share a group: select one with --where (for example --where
 layers=8 --where seed=0); --weights is not a CSV column, so fit such runs from separate CSVs.
 
-Pure logic (argument parsing, limits, result rows, fit) runs without a GPU: test_petit_layer.py.
+--stages splits each call into prep (entry of the test's run(), i.e. kernel_moe_apply -> Petit's apply:
+quantize and route copies), s1 (MegaMoEStage1), s2 (MegaMoEStage2), comb (MegaMoECombine) and post (after
+Combine until the call returns): a timing point before each of the three launches (thin wrappers around
+lib.moe.rocm.mega_moe.MegaMoEStage1/Stage2/Combine, whose launch objects Invoke looks up per call) plus one at
+entry, one after Combine and one at return. Eager: torch.cuda.Event at each point. Graph: the step-timing
+owner's marker writer (runtime/utils/step_timing.py, taken from tokenspeed/step-timing/instrumentation.diff
+and loaded in this process only; external timing events recorded during capture become graph nodes, on a
+second, marked graph of the same calls; each sampled replay follows one unsampled replay, since reading
+a replay's points needs a host sync); TokenSpeed's files are not changed. Each stage interval holds one
+marker, so stages are reported raw and net of the marker cost: --marker-us (profiling/graph_event_smoke.py's
+per-node cost) or else this run's estimate (marked - unmarked whole call) / 6 markers. Closure per rank and
+max over ranks: stage sum net vs the unmarked whole call of the same run. --tokens 0 times the skeleton
+(every rank, or the non-active ranks, call with 0 rows). Every result carries distinct_local_experts: per
+rank, the distinct experts of its local range that the timed routing of all ranks touches.
+  petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
+
+Pure logic (argument parsing, limits, result rows, fit, stage arithmetic) runs without a GPU: test_petit_layer.py.
 """
 from __future__ import annotations
 
@@ -55,6 +72,7 @@ import importlib.util
 import json
 import os
 import random
+import statistics
 import sys
 import textwrap
 import time
@@ -77,7 +95,18 @@ SKEW_PERMUTATION_SEED = 12345  # fixed: the same experts are popular on every ra
 ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "candidate", "launched",
               "layers", "repetition",
               "max_over_ranks_median_ms", "max_over_ranks_min_ms", "max_over_ranks_max_ms",
-              "per_rank_median_ms", "pass", "iters", "tokenspeed_commit", "test_sha256", "source")
+              "per_rank_median_ms", "pass", "iters", "tokenspeed_commit", "test_sha256", "source",
+              "distinct_local_experts", "distinct_local_experts_max",
+              "prep_ms", "s1_ms", "s2_ms", "comb_ms", "post_ms", "marked_call_ms", "marker_cost_ms",
+              "prep_net_ms", "s1_net_ms", "s2_net_ms", "comb_net_ms", "post_net_ms", "stage_sum_net_ms",
+              "closure_ratio")
+# --stages: timing points per call, in stream order, and the stage between each point and the next.
+STAGE_MARKS = ("petit.begin", "petit.s1", "petit.s2", "petit.comb", "petit.comb_end", "petit.end")
+STAGES = ("prep", "s1", "s2", "comb", "post")
+STEP_TIMING_REL = "python/tokenspeed/runtime/utils/step_timing.py"
+STEP_TIMING_DIFF = HERE.parent / "step-timing" / "instrumentation.diff"
+# W13 bytes of one dsv41_flash expert (2 x 2560 x 5120 MXFP4 + E8M0 scales) for --decide's C5 rule.
+W13_EXPERT_BYTES = 2 * 2560 * 5120 // 2 + 2 * 2560 * 5120 // 32
 
 
 def record_rows(record: dict, source: str = "") -> list[dict]:
@@ -101,8 +130,228 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "per_rank_median_ms": " ".join(f"{v:.6f}" for v in rep["per_rank_median_ms"]),
                     "pass": r["pass"], "iters": args.get("iters"),
                     "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
-                    "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source})
+                    "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source,
+                    **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k)})
     return rows
+
+
+def expert_columns(result: dict) -> dict:
+    d = result.get("routing", {}).get("distinct_local_experts")
+    if d is None:
+        return {"distinct_local_experts": "", "distinct_local_experts_max": ""}
+    return {"distinct_local_experts": " ".join(str(v) for v in d), "distinct_local_experts_max": max(d)}
+
+
+def stage_columns(stages: dict | None, k: int) -> dict:
+    """Repetition k of one mode's --stages result as CSV columns (max over ranks; '' without --stages)."""
+    keys = [f"{s}_ms" for s in STAGES] + ["marked_call_ms", "marker_cost_ms"] + \
+        [f"{s}_net_ms" for s in STAGES] + ["stage_sum_net_ms", "closure_ratio"]
+    if not stages:
+        return {key: "" for key in keys}
+    c = stages["closure_per_repetition"][k]["max_over_ranks"]
+    out = {f"{s}_ms": c["stage_raw_ms"][s] for s in STAGES}
+    out.update({f"{s}_net_ms": c["stage_net_ms"][s] for s in STAGES})
+    out.update({"marked_call_ms": c["marked_call_ms"], "marker_cost_ms": c["marker_cost_ms"],
+                "stage_sum_net_ms": c["stage_sum_net_ms"], "closure_ratio": c["closure_ratio"]})
+    return out
+
+
+def distinct_local_experts(load: list, ws: int) -> list[int]:
+    """Per destination rank: distinct experts of its local range (experts // ws each) with any route."""
+    local = len(load) // ws
+    return [sum(1 for c in load[r * local:(r + 1) * local] if c) for r in range(ws)]
+
+
+def stage_split(names: list[str], t: list[float], layers: int) -> list[dict]:
+    """Per layer, the STAGES (ms) from one call's timing points: names[i] is 'LAYER:MARK' (step_timing.mark)
+    or 'MARK', t[i] its time (ms, any common origin). Every layer 0..layers-1 must hold STAGE_MARKS once."""
+    at: dict[int, dict[str, float]] = {}
+    for name, v in zip(names, t):
+        layer, _, mark = name.rpartition(":")
+        layer = int(layer) if layer else 0
+        if mark in at.setdefault(layer, {}):
+            raise ValueError(f"timing point {name} recorded twice")
+        at[layer][mark] = v
+    out = []
+    for layer in range(layers):
+        got = at.get(layer, {})
+        missing = [m for m in STAGE_MARKS if m not in got]
+        if missing:
+            raise ValueError(f"layer {layer}: timing points {missing} not recorded")
+        ts = [got[m] for m in STAGE_MARKS]
+        out.append({s: ts[i + 1] - ts[i] for i, s in enumerate(STAGES)})
+    return out
+
+
+def mean_stages(per_layer: list[dict]) -> dict:
+    """Per-call stage times of one replay or eager block of N layers: the mean over layers."""
+    return {s: sum(d[s] for d in per_layer) / len(per_layer) for s in STAGES}
+
+
+def stage_closure(raw: dict, unmarked_ms: float, marked_ms: float, marker_ms: float | None = None) -> dict:
+    """Stage arithmetic for one rank (or the max over ranks): each stage interval holds one timing point,
+    so net = raw - marker cost; the cost is marker_ms (--marker-us) or this run's (marked - unmarked) /
+    len(STAGE_MARKS). Closure: the net stage sum against the unmarked whole call."""
+    run_cost = (marked_ms - unmarked_ms) / len(STAGE_MARKS)
+    cost = run_cost if marker_ms is None else marker_ms
+    net = {s: raw[s] - cost for s in STAGES}
+    total = sum(net.values())
+    return {"stage_raw_ms": dict(raw), "stage_net_ms": net, "unmarked_call_ms": unmarked_ms,
+            "marked_call_ms": marked_ms, "marker_cost_run_ms": run_cost, "marker_cost_ms": cost,
+            "marker_cost_source": "run" if marker_ms is None else "--marker-us",
+            "stage_sum_raw_ms": sum(raw.values()), "stage_sum_net_ms": total,
+            "closure_gap_ms": unmarked_ms - total,
+            "closure_ratio": total / unmarked_ms if unmarked_ms else float("nan")}
+
+
+def repetition_closure(stage_reps: dict, unmarked_rep: dict, marked_rep: dict, marker_ms: float | None) -> dict:
+    """stage_closure of one repetition, per rank and on the max-over-ranks medians (from reduce_repetition)."""
+    ranks = len(unmarked_rep["per_rank_median_ms"])
+    per_rank = [stage_closure({s: stage_reps[s]["per_rank_median_ms"][k] for s in STAGES},
+                              unmarked_rep["per_rank_median_ms"][k], marked_rep["per_rank_median_ms"][k],
+                              marker_ms) for k in range(ranks)]
+    mx = stage_closure({s: stage_reps[s]["max_over_ranks_median_ms"] for s in STAGES},
+                       unmarked_rep["max_over_ranks_median_ms"], marked_rep["max_over_ranks_median_ms"], marker_ms)
+    return {"per_rank": per_rank, "max_over_ranks": mx}
+
+
+def step_timing_source(diff_text: str) -> str:
+    """The step-timing owner's marker writer (STEP_TIMING_REL), a new file in instrumentation.diff."""
+    lines, inside = [], False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            if inside:
+                break
+            inside = line.endswith(f" b/{STEP_TIMING_REL}")
+            continue
+        if inside and line.startswith("+") and not line.startswith("+++"):
+            lines.append(line[1:])
+    if not lines:
+        raise RuntimeError(f"{STEP_TIMING_REL} not found in the step-timing diff")
+    return "\n".join(lines) + "\n"
+
+
+def load_step_timing(out_dir: str):
+    """Load the marker writer enabled (every replay harvested), its records kept in memory (module.RECORDS)."""
+    import types
+    env = {"TS_STEP_TIMING": "1", "TS_STEP_TIMING_DIR": out_dir, "TS_STEP_TIMING_EVERY": "1",
+           "TS_STEP_TIMING_MAX_RECORDS": str(10 ** 9), "TS_STEP_TIMING_LAYER_STRIDE": "1"}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        source = step_timing_source(STEP_TIMING_DIFF.read_text())
+        module = types.ModuleType("petit_layer_step_timing")
+        exec(compile(source, f"{STEP_TIMING_DIFF}:{STEP_TIMING_REL}", "exec"), module.__dict__)
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    module.RECORDS = []
+    module._write = module.RECORDS.append  # keep the records here instead of a JSONL file
+    module.SOURCE_SHA256 = hashlib.sha256(source.encode()).hexdigest()
+    return module
+
+
+class Stages:
+    """--stages: the timing-point hook (None: off) the launch wrappers and marked calls call."""
+    mark = None
+
+
+class _MarkedLaunch:
+    """A Petit launch object whose launch kernel[grid](...) first records a timing point (and after it,
+    for Combine); warmup (compile only) and every other attribute pass through unchanged."""
+
+    def __init__(self, kernel, before: str, after: str | None = None):
+        self._kernel, self._before, self._after = kernel, before, after
+
+    def __getitem__(self, grid):
+        launch = self._kernel[grid]
+
+        def call(*args, **kwargs):
+            if Stages.mark is not None:
+                Stages.mark(self._before)
+            out = launch(*args, **kwargs)
+            if self._after is not None and Stages.mark is not None:
+                Stages.mark(self._after)
+            return out
+        return call
+
+    def __getattr__(self, name):
+        return getattr(self._kernel, name)
+
+
+def install_stage_marks() -> None:
+    """Wrap the three launch objects mega_moe.MegaMoESolutionAdapter.Invoke looks up per call."""
+    import lib.moe.rocm.mega_moe as package
+    # lib.moe.rocm.mega_moe is a package whose __getattr__ forwards to the sibling mega_moe.py, loaded as its
+    # own module; Invoke resolves the launch objects in that module's globals, so patch them there.
+    mega_moe = sys.modules[package.MegaMoESolutionAdapter.__module__]
+    for name, before, after in (("MegaMoEStage1", "petit.s1", None), ("MegaMoEStage2", "petit.s2", None),
+                                ("MegaMoECombine", "petit.comb", "petit.comb_end")):
+        kernel = getattr(mega_moe, name)
+        if not isinstance(kernel, _MarkedLaunch):
+            setattr(mega_moe, name, _MarkedLaunch(kernel, before, after))
+
+
+class EagerMarks:
+    """Eager timing points: a torch.cuda.Event per point, names as step_timing writes them."""
+
+    def __init__(self):
+        self.layer, self.names, self.events = 0, [], []
+
+    def mark(self, name: str, layer: int | None = None) -> None:
+        import torch
+        if layer is not None:
+            self.layer = layer
+        ev = torch.cuda.Event(enable_timing=True)
+        ev.record()
+        self.names.append(f"{self.layer}:{name}")
+        self.events.append(ev)
+
+    def times(self) -> list[float]:
+        return [self.events[0].elapsed_time(e) for e in self.events]
+
+
+def decide(rows: list[dict], node_us: float | None = None) -> list[dict]:
+    """r0002-p1 section 4 decision rules on --rows CSV rows with --stages columns (one profile, mode,
+    routing and candidate selected by --where): medians over repetitions of the max-over-ranks net stages.
+    Points: b1 = tokens_per_gpu 6 at active_ranks 1 (DP4 batch 1, busy rank); zero = tokens_per_gpu 0.
+    node cost: node_us or the median marker_cost_ms of the rows."""
+    import statistics
+
+    def med(field, tokens, active=None):
+        v = [float(r[field]) for r in rows if r.get(field, "") != "" and int(r["tokens_per_gpu"]) == tokens
+             and (active is None or str(r["active_ranks"]) == str(active))]
+        return statistics.median(v) if v else None
+    costs = [float(r["marker_cost_ms"]) for r in rows if r.get("marker_cost_ms", "") != ""]
+    node = node_us / 1000 if node_us is not None else (statistics.median(costs) if costs else None)
+    prep_b1, s1_b1, s2_0 = med("prep_net_ms", 6, 1), med("s1_net_ms", 6, 1), med("s2_net_ms", 0)
+    s1_0, comb_0, experts_b1 = med("s1_net_ms", 0), med("comb_net_ms", 0), med("distinct_local_experts_max", 6, 1)
+    out = []
+
+    def rule(name, value, threshold, op, text):
+        ok = None if value is None or threshold is None else (value >= threshold if op == ">=" else value > threshold)
+        out.append({"candidate": name, "value_ms": value, "threshold_ms": threshold, "op": op, "build": ok,
+                    "rule": text})
+    rule("C1", prep_b1, 0.008, ">=", "prep_net_ms(tokens 6, active 1) >= 0.008")
+    rule("C2", s2_0, 0.005, ">=", "s2_net_ms(tokens 0) >= 0.005 (s2 holds the S1->S2 gap)")
+    c5 = None if None in (s1_b1, s1_0, experts_b1) else s1_b1 - s1_0 - experts_b1 * W13_EXPERT_BYTES / 6e12 * 1e3
+    rule("C5", c5, 0.005, ">", "s1_net_ms(6, active 1) - s1_net_ms(0) - distinct_local_experts_max(6, active 1)"
+         f" x {W13_EXPERT_BYTES} B / 6 TB/s > 0.005")
+    c67 = None if None in (s1_0, comb_0, node) else s1_0 + comb_0 - 3 * node
+    rule("C6/C7", c67, 0.020, ">=", "s1_net_ms(0) + comb_net_ms(0) - 3 x node cost >= 0.020")
+    return out
+
+
+def decide_table(decisions: list[dict]) -> str:
+    rows = ["| candidate | rule | value ms | threshold ms | build |", "|---|---|---|---|---|"]
+    for d in decisions:
+        v = "n/a" if d["value_ms"] is None else f"{d['value_ms']:.4f}"
+        b = "no data" if d["build"] is None else ("yes" if d["build"] else "no")
+        rows.append(f"| {d['candidate']} | {d['rule']} | {v} | {d['threshold_ms']:.3f} | {b} |")
+    return "\n".join(rows)
 
 
 def write_rows_csv(out: str, inputs: list[str]) -> int:
@@ -117,10 +366,10 @@ def write_rows_csv(out: str, inputs: list[str]) -> int:
 
 
 def check_tokens(tokens: list[int], capacity: int = PETIT_MAX_TOKENS_PER_RANK) -> list[int]:
-    bad = [t for t in tokens if t < 1 or t > capacity]
+    bad = [t for t in tokens if t < 0 or t > capacity]
     if bad:
         raise ValueError(
-            f"tokens per GPU {bad} outside 1..{capacity}: Petit's per-rank capacity is "
+            f"tokens per GPU {bad} outside 0..{capacity}: Petit's per-rank capacity is "
             f"MegaMoeConfig.max_tokens_per_rank={capacity} (default 1024, tokenspeed_kernel/thirdparty/gluon_petit/"
             "petit_kernel/__init__.py:251; raise it with --capacity at a TokenSpeed that reads "
             "plan['gluon_petit_max_tokens_per_rank'])")
@@ -223,6 +472,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "(what the server passes from ServerArgs.gluon_petit_max_tokens_per_rank(), "
                          "TokenSpeed 46671ec2 and later) when not 1024, and checked against the layer "
                          "state; --tokens may go up to it (default 1024: the plan is unchanged)")
+    ap.add_argument("--stages", action="store_true",
+                    help="also split each call into prep, s1, s2, comb, post (eager: events; graph: the "
+                         "step-timing marker writer on a second, marked graph); per rank, max over ranks, "
+                         "net of the marker cost, with closure against the unmarked whole call")
+    ap.add_argument("--marker-us", type=float, default=None,
+                    help="with --stages: per-timing-point cost in us (profiling/graph_event_smoke.py); "
+                         "default: this run's (marked - unmarked) / 6")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
     if a.capacity < 1 or a.capacity % 32:
@@ -237,6 +493,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--active-ranks must be >= 1")
     if a.layers < 1:
         ap.error("--layers must be >= 1")
+    if a.marker_us is not None and (not a.stages or a.marker_us < 0):
+        ap.error("--marker-us needs --stages and must be >= 0")
     if a.candidates is not None and a.candidates != "all":
         bad = [n for n in a.candidates.split(",") if n.count("/") != 1 or n.split("/")[0] not in GEOMETRIES
                or n.split("/")[1] not in STAGE1_TILES]
@@ -291,6 +549,32 @@ def routing_summary(ids, profile, ws):
     dest = torch.bincount((ids.flatten().long() // local), minlength=ws)
     load = torch.bincount(ids.flatten().long(), minlength=profile.experts)
     return dest.cpu().tolist(), load
+
+
+
+def stage_table(record: dict) -> str:
+    """Markdown table of one --stages JSON: per mode, tokens and candidate, each stage's net time (us) per rank
+    and max over ranks as median [min, max] over repetitions, the net stage sum and the closure ratio."""
+    def agg(values):
+        v = sorted(values)
+        return f"{statistics.median(v) * 1e3:.1f} [{v[0] * 1e3:.1f}, {v[-1] * 1e3:.1f}]"
+
+    head = ["mode", "tokens/GPU", "active", "candidate", "experts/rank", "rank"] + [f"{n} net" for n in STAGES]
+    head += ["sum net", "unmarked call", "closure"]
+    rows = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for r in record["results"]:
+        for mode, st in sorted(r.get("stages_ms", {}).items()):
+            reps = st["closure_per_repetition"]
+            ranks = len(reps[0]["per_rank"])
+            experts = " ".join(map(str, r["routing"].get("distinct_local_experts", [])))
+            for who in list(range(ranks)) + ["max"]:
+                cell = [x["max_over_ranks"] if who == "max" else x["per_rank"][who] for x in reps]
+                row = [mode, str(r["tokens_per_gpu"]), str(r["active_ranks"]), r["candidate"], experts, str(who)]
+                row += [agg([c["stage_net_ms"][n] for c in cell]) for n in STAGES]
+                row += [agg([c["stage_sum_net_ms"] for c in cell]), agg([c["unmarked_call_ms"] for c in cell]),
+                        "%.3f" % statistics.median([c["closure_ratio"] for c in cell])]
+                rows.append("| " + " | ".join(row) + " |")
+    return "\n".join(rows)
 
 
 def summary_table(record: dict) -> str:
@@ -388,6 +672,28 @@ def main(argv=None) -> int:
         chunks = tuple(int(c) for c in fa.fit_chunks.split(",") if c)
         print(fit_table(rows, fa.fit_layers, chunks, fa.fit_cap))
         return 0
+    if argv and argv[0] == "--decide":  # petit_layer.py --decide ROWS.csv [--where N=V ...] [--node-us U]
+        import csv
+        dp = argparse.ArgumentParser(prog="petit_layer.py --decide",
+                                     description="r0002-p1 decision rules (see decide) on --rows CSVs with --stages")
+        dp.add_argument("rows_csv", nargs="+")
+        dp.add_argument("--where", action="append", default=[], help="NAME=VALUE row filter (repeatable)")
+        dp.add_argument("--node-us", type=float, default=None, help="graph node cost (default: marker_cost_ms)")
+        da = dp.parse_args(argv[1:])
+        rows = [r for path in da.rows_csv for r in csv.DictReader(open(path, newline=""))]
+        for w in da.where:
+            k, v = w.split("=", 1)
+            rows = [r for r in rows if str(r.get(k)) == v]
+        decisions = decide(rows, da.node_us)
+        print(decide_table(decisions))
+        print(json.dumps(decisions))
+        return 0
+    if argv and argv[0] == "--stage-table":  # petit_layer.py --stage-table OUT.json [OUT.json ...]
+        for path in argv[1:]:
+            record = json.loads(Path(path).read_text())
+            print(f"### {Path(path).name}: {record['profile']['name']}\n")
+            print(stage_table(record) + "\n")
+        return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:
             record = json.loads(Path(path).read_text())
@@ -444,6 +750,19 @@ def main(argv=None) -> int:
     active = ws if a.active_ranks is None else min(a.active_ranks, ws)
     install_forcing()
     names = candidate_names(a.candidates, profile.experts) or [None]
+    step_timing = None
+    if a.stages:
+        install_stage_marks()
+        step_timing = load_step_timing(str(Path(a.out).parent / "step-timing"))
+
+    def marked(fn, layer_index):
+        """One call between the entry and return timing points (Stages.mark set by the caller)."""
+        def call():
+            Stages.mark("petit.begin", layer_index)
+            out = fn()
+            Stages.mark("petit.end")
+            return out
+        return call
 
     def timed_layers():
         """--layers layers for timing: the test layer itself, or distinct random MXFP4 weights."""
@@ -471,6 +790,9 @@ def main(argv=None) -> int:
         if a.routing == "test":
             return mod._routing(count, rank + a.seed, profile, ws, device)
         gen = torch.Generator(device="cpu").manual_seed(a.seed * 1009 + rank)
+        if count == 0:
+            return torch.empty((0, profile.top_k), dtype=torch.int32, device=device), \
+                torch.empty((0, profile.top_k), dtype=torch.float32, device=device)
         if a.routing == "skew":
             order = torch.randperm(profile.experts, generator=torch.Generator().manual_seed(SKEW_PERMUTATION_SEED))
             weight = torch.empty(profile.experts)
@@ -537,6 +859,21 @@ def main(argv=None) -> int:
                                    f"{[expected_launch(name, profile.experts)]}")
             per[name] = {"graph": timed_graph, "steps": steps, "timed_check": timed_check, "first": first,
                          "launched": launched}
+            if a.stages and "graph" in modes:  # a second graph of the same calls with the timing points
+                torch.cuda.synchronize()
+                dist.barrier()
+                Stages.mark = step_timing.mark
+                marked_graph = torch.cuda.CUDAGraph()
+                step_timing.capture_begin(marked_graph)
+                with torch.cuda.graph(marked_graph):
+                    for i, fn in enumerate(runs):
+                        marked(fn, i)()
+                step_timing.capture_end(marked_graph, bs=count)
+                Stages.mark = None
+                seq = step_timing.RECORDS[-1]
+                if seq.get("type") != "seq" or seq["dropped"]:
+                    raise RuntimeError(f"marked graph: unexpected marker record {seq}")
+                per[name]["marked_graph"], per[name]["marked_names"] = marked_graph, seq["names"]
             dist.barrier()
         dest, load = routing_summary(ids, profile, ws)
         dist.all_reduce(load)
@@ -544,12 +881,67 @@ def main(argv=None) -> int:
         dist.all_gather_object(dests, dest)
         load_list = load.cpu().tolist()
         timing = {name: {} for name in names}
+        stage_timing = {name: {} for name in names}
+
+        def stage_block(name, mode):
+            """iters calls with timing points: per call (mean over layers) this rank's STAGES in ms."""
+            out = []
+            torch.cuda.synchronize()
+            dist.barrier()
+            if mode == "graph":
+                g = per[name]["marked_graph"]
+                for _ in range(a.iters):
+                    # Read the previous sample first (a host sync: its timing points are re-recorded by
+                    # every replay), then one unsampled replay, so that the collective realigns the ranks
+                    # and the sampled replay starts behind it on a busy queue, as in the unmarked loop.
+                    step_timing._harvest()
+                    g.replay()
+                    token = step_timing.before_replay(g)
+                    g.replay()
+                    step_timing.after_replay(token)
+                step_timing._harvest()
+                steps = [r for r in step_timing.RECORDS if r.get("type") == "step"]
+                del step_timing.RECORDS[:]
+                for r in steps[-a.iters:]:
+                    out.append(mean_stages(stage_split(per[name]["marked_names"], r["t"], a.layers)))
+            else:
+                blocks = []
+                for _ in range(a.iters):
+                    m = EagerMarks()
+                    Stages.mark = m.mark
+                    for i, fn in enumerate(runs):
+                        marked(fn, i)()
+                    Stages.mark = None
+                    blocks.append(m)
+                torch.cuda.synchronize()
+                for m in blocks:
+                    out.append(mean_stages(stage_split(m.names, m.times(), a.layers)))
+            if len(out) != a.iters:
+                raise RuntimeError(f"--stages {mode}: {len(out)} of {a.iters} calls harvested")
+            return out
+
+        def marked_fn(name, mode):
+            if mode == "graph":
+                return per[name]["marked_graph"].replay
+
+            def eager_marked():
+                m = EagerMarks()
+                Stages.mark = m.mark
+                try:
+                    return [marked(f, i)() for i, f in enumerate(runs)]
+                finally:
+                    Stages.mark = None
+            return eager_marked
         for mode in modes:
             for name in names:  # warmup
                 Forcing.candidate = name
                 fn = per[name]["graph"].replay if mode == "graph" else (lambda: [f() for f in runs])
                 for _ in range(a.warmup):
                     fn()
+                if a.stages:
+                    mfn = marked_fn(name, mode)
+                    for _ in range(a.warmup):
+                        mfn()
             reps = {name: [] for name in names}
             for k in range(a.reps):
                 order = list(names)
@@ -561,8 +953,41 @@ def main(argv=None) -> int:
                     gathered = [None] * ws
                     dist.all_gather_object(gathered, calls)
                     reps[name].append(dist_timing.reduce_repetition(gathered))
+                    if a.stages:  # the same repetition: marked whole call, then the per-stage block
+                        mcalls = [c / a.layers for c in
+                                  dist_timing.time_calls(marked_fn(name, mode), a.iters, barrier=dist.barrier)]
+                        mg = [None] * ws
+                        dist.all_gather_object(mg, mcalls)
+                        sg = [None] * ws
+                        dist.all_gather_object(sg, stage_block(name, mode))
+                        st = {s: dist_timing.reduce_repetition([[c[s] for c in calls_] for calls_ in sg])
+                              for s in STAGES}
+                        stage_timing[name].setdefault(mode, []).append(
+                            {"stages": st, "marked": dist_timing.reduce_repetition(mg)})
             for name in names:
                 timing[name][mode] = {**dist_timing.aggregate(reps[name]), "per_repetition": reps[name]}
+                if a.stages:
+                    sr = stage_timing[name][mode]
+                    marker = a.marker_us / 1000 if a.marker_us is not None else None
+                    closures = [repetition_closure(r["stages"], u, r["marked"], marker)
+                                for r, u in zip(sr, reps[name])]
+                    stage_timing[name][mode] = {
+                        "mechanism": ("step_timing.mark (tokenspeed/step-timing/instrumentation.diff "
+                                      f"{STEP_TIMING_REL}, sha256 {step_timing.SOURCE_SHA256}) in a second "
+                                      "captured graph" if mode == "graph" else "torch.cuda.Event per point"),
+                        "marks": list(STAGE_MARKS),
+                        "stages": {s: {**dist_timing.aggregate([r["stages"][s] for r in sr]),
+                                       "per_repetition": [r["stages"][s] for r in sr]} for s in STAGES},
+                        "marked_call": {**dist_timing.aggregate([r["marked"] for r in sr]),
+                                        "per_repetition": [r["marked"] for r in sr]},
+                        "closure_per_repetition": closures,
+                        "closure_max_over_ranks": {
+                            k: dist_timing.summarize([c["max_over_ranks"][k] for c in closures])
+                            for k in ("stage_sum_net_ms", "unmarked_call_ms", "marker_cost_ms", "closure_ratio")},
+                        "stage_net_max_over_ranks": {
+                            s: dist_timing.summarize([c["max_over_ranks"]["stage_net_ms"][s] for c in closures])
+                            for s in STAGES},
+                    }
         Forcing.candidate = None
         for name in names:
             mine = per[name]
@@ -583,8 +1008,10 @@ def main(argv=None) -> int:
                 "per_rank": verdicts,
                 "routing": {"routes_by_source_rank_to_destination_rank": dests,
                             "expert_load": dist_timing.summarize([float(c) for c in load_list]),
-                            "experts_hit": sum(1 for c in load_list if c)},
+                            "experts_hit": sum(1 for c in load_list if c),
+                            "distinct_local_experts": distinct_local_experts(load_list, ws)},
                 "timing_ms": timing[name],
+                **({"stages_ms": stage_timing[name]} if a.stages else {}),
             })
             if rank == 0:
                 t = {m: round(timing[name][m]["max_over_ranks_ms"]["median"], 4) for m in timing[name]}
@@ -600,7 +1027,8 @@ def main(argv=None) -> int:
         gpus_after = dist_timing.gpu_context()
         record = {
             "tool": {"petit_layer.py": dist_timing.file_sha256(__file__),
-                     "dist_timing.py": dist_timing.file_sha256(dist_timing.__file__)},
+                     "dist_timing.py": dist_timing.file_sha256(dist_timing.__file__),
+                     **({"step_timing.py": step_timing.SOURCE_SHA256} if step_timing is not None else {})},
             "tokenspeed": {"src": str(ts_src), **dist_timing.git_head(ts_src), "test": test_info,
                            "tokenspeed_kernel": str(Path(mod.tokenspeed_kernel.__file__).resolve())},
             "runtime": dist_timing.runtime_versions(),

@@ -31,7 +31,8 @@ def test_parse_requires_the_profile_and_tokens() -> None:
 
 @pytest.mark.parametrize("argv", [
     ["--tokens", "1025"],        # above Petit's per-rank capacity
-    ["--tokens", "0"],
+    ["--tokens", "-1"],
+    ["--marker-us", "5"],        # needs --stages
     ["--reps", "2"],
     ["--warmup", "0"],
     ["--mode", "neither"],
@@ -184,3 +185,168 @@ def test_fit_line_and_split_chunk(tmp_path) -> None:
     assert "| 8192 | 8 | 227.07 | 8.00x | 27.72 |" in text  # 40 x 8 x 0.7096
     assert "| 1536 | 2 | 48.58 | 1.71x |" in text  # 40 x (0.7096 + 0.3 + 0.0004 x 512)
     assert petit_layer.main(["--fit", str(rows), "--fit-chunks", "4096", "--where", "routing=test"]) == 0
+
+
+# --- --stages, --tokens 0, distinct_local_experts ---
+
+def test_parse_stages_zero_tokens_and_marker_cost() -> None:
+    base = ["--ts-src", "/ts", "--out", "o.json", "--profile", "x"]
+    a = petit_layer.parse_args(base + ["--tokens", "0,1,2,6"])
+    assert a.tokens == [0, 1, 2, 6] and a.stages is False and a.marker_us is None
+    b = petit_layer.parse_args(base + ["--tokens", "0", "--stages", "--marker-us", "5.011"])
+    assert b.stages and b.marker_us == 5.011
+    with pytest.raises(SystemExit):
+        petit_layer.parse_args(base + ["--tokens", "1", "--stages", "--marker-us", "-1"])
+    assert petit_layer.check_tokens([0, 1024]) == [0, 1024]
+
+
+def test_distinct_local_experts() -> None:
+    load = [0] * 16
+    for e in (0, 0, 3, 5, 12, 15, 15):
+        load[e] += 1
+    assert petit_layer.distinct_local_experts(load, 4) == [2, 1, 0, 2]
+    assert petit_layer.distinct_local_experts([0] * 384, 4) == [0, 0, 0, 0]
+
+
+def _points(layer, t0, d=(0.010, 0.050, 0.020, 0.016, 0.005)):
+    t = [t0]
+    for v in d:
+        t.append(t[-1] + v)
+    return [f"{layer}:{m}" for m in petit_layer.STAGE_MARKS], t
+
+
+def test_stage_split_per_layer_and_mean() -> None:
+    n0, t0 = _points(0, 1.0)
+    n1, t1 = _points(1, 2.0, (0.012, 0.054, 0.024, 0.018, 0.007))
+    per = petit_layer.stage_split(n0 + n1, t0 + t1, 2)
+    assert per[0] == pytest.approx({"prep": 0.010, "s1": 0.050, "s2": 0.020, "comb": 0.016, "post": 0.005})
+    mean = petit_layer.mean_stages(per)
+    assert mean == pytest.approx({"prep": 0.011, "s1": 0.052, "s2": 0.022, "comb": 0.017, "post": 0.006})
+    with pytest.raises(ValueError, match="not recorded"):
+        petit_layer.stage_split(n0[:-1], t0[:-1], 1)
+    with pytest.raises(ValueError, match="twice"):
+        petit_layer.stage_split(n0 + n0, t0 + t0, 1)
+    # names without a layer prefix (layer 0)
+    bare = [m for m in petit_layer.STAGE_MARKS]
+    assert petit_layer.stage_split(bare, t0, 1) == per[:1]
+
+
+def test_stage_closure_arithmetic() -> None:
+    raw = {"prep": 0.016, "s1": 0.056, "s2": 0.026, "comb": 0.022, "post": 0.006}
+    # 6 timing points: marked 0.140 vs unmarked 0.104 -> 6 us each from this run
+    c = petit_layer.stage_closure(raw, 0.104, 0.140)
+    assert c["marker_cost_run_ms"] == pytest.approx(0.006) and c["marker_cost_ms"] == pytest.approx(0.006)
+    assert c["marker_cost_source"] == "run"
+    assert c["stage_net_ms"] == pytest.approx({"prep": 0.010, "s1": 0.050, "s2": 0.020, "comb": 0.016, "post": 0.0})
+    assert c["stage_sum_raw_ms"] == pytest.approx(0.126) and c["stage_sum_net_ms"] == pytest.approx(0.096)
+    assert c["closure_gap_ms"] == pytest.approx(0.008) and c["closure_ratio"] == pytest.approx(0.096 / 0.104)
+    g = petit_layer.stage_closure(raw, 0.104, 0.140, marker_ms=0.005011)
+    assert g["marker_cost_source"] == "--marker-us" and g["stage_net_ms"]["s1"] == pytest.approx(0.050989)
+
+
+def _rep(values):
+    return {"per_rank_median_ms": list(values), "max_over_ranks_median_ms": max(values),
+            "max_over_ranks_min_ms": max(values), "max_over_ranks_max_ms": max(values)}
+
+
+def test_stage_rows_and_decide(tmp_path) -> None:
+    def result(tokens, active, s1, s2, comb, prep, experts):
+        raw = {"prep": prep + 0.006, "s1": s1 + 0.006, "s2": s2 + 0.006, "comb": comb + 0.006, "post": 0.006}
+        stages = {s: _rep([v, v - 0.001, v, v]) for s, v in raw.items()}
+        unmarked, marked = _rep([0.1] * 4), _rep([0.136] * 4)
+        clos = [petit_layer.repetition_closure(stages, unmarked, marked, None)] * 3
+        timing = {"max_over_ranks_ms": {}, "per_rank_ms": [], "per_repetition": [unmarked] * 3}
+        return {"tokens_per_gpu": tokens, "active_ranks": active, "pass": True,
+                "routing": {"distinct_local_experts": experts},
+                "timing_ms": {"graph": timing},
+                "stages_ms": {"graph": {"closure_per_repetition": clos}}}
+    record = {"args": {"routing": "test", "seed": 0, "iters": 50, "layers": 40}, "world_size": 4,
+              "profile": {"name": "dsv41_flash"},
+              "tokenspeed": {"commit": "e" * 40, "test": {"sha256": "a" * 64}},
+              "results": [result(0, 4, 0.040, 0.004, 0.017, 0.0, [0, 0, 0, 0]),
+                          result(6, 1, 0.058, 0.018, 0.017, 0.011, [9, 8, 10, 9])]}
+    src = tmp_path / "petit.json"
+    src.write_text(json.dumps(record))
+    out = tmp_path / "rows.csv"
+    assert petit_layer.main(["--rows", str(out), str(src)]) == 0
+    rows = list(csv.DictReader(out.open()))
+    assert len(rows) == 6
+    b1 = [r for r in rows if r["tokens_per_gpu"] == "6"][0]
+    assert b1["distinct_local_experts"] == "9 8 10 9" and b1["distinct_local_experts_max"] == "10"
+    assert float(b1["marker_cost_ms"]) == pytest.approx(0.006)
+    assert float(b1["s1_net_ms"]) == pytest.approx(0.058) and float(b1["post_net_ms"]) == pytest.approx(0.0)
+    assert float(b1["stage_sum_net_ms"]) == pytest.approx(0.104)
+    d = {x["candidate"]: x for x in petit_layer.decide(rows)}
+    assert d["C1"]["build"] is True and d["C1"]["value_ms"] == pytest.approx(0.011)
+    assert d["C2"]["build"] is False and d["C2"]["value_ms"] == pytest.approx(0.004)
+    w13 = 10 * petit_layer.W13_EXPERT_BYTES / 6e12 * 1e3
+    assert d["C5"]["value_ms"] == pytest.approx(0.018 - w13) and d["C5"]["build"] is (0.018 - w13 > 0.005)
+    assert d["C6/C7"]["value_ms"] == pytest.approx(0.057 - 0.018) and d["C6/C7"]["build"] is True
+    assert petit_layer.decide(rows, node_us=15)[3]["build"] is False   # 0.057 - 0.045 < 0.020
+    assert petit_layer.main(["--decide", str(out), "--where", "mode=graph"]) == 0
+    # a record without --stages or distinct_local_experts leaves the new columns empty
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps(_record()))
+    assert petit_layer.main(["--rows", str(tmp_path / "old.csv"), str(old)]) == 0
+    r0 = next(csv.DictReader((tmp_path / "old.csv").open()))
+    assert r0["s1_ms"] == "" and r0["distinct_local_experts"] == ""
+    assert petit_layer.decide([dict(r0)])[0]["build"] is None
+
+
+def test_marked_launch_records_around_the_launch_and_passes_warmup() -> None:
+    calls = []
+
+    class Kernel:
+        warmup = "warmup-fn"
+
+        def __getitem__(self, grid):
+            return lambda *a, **k: calls.append(("launch", grid, a))
+    w = petit_layer._MarkedLaunch(Kernel(), "petit.comb", "petit.comb_end")
+    assert w.warmup == "warmup-fn"
+    w[(128,)](1, 2)   # hook off: launch only
+    petit_layer.Stages.mark = lambda name: calls.append(("mark", name))
+    try:
+        w[(128,)](3)
+    finally:
+        petit_layer.Stages.mark = None
+    assert calls == [("launch", (128,), (1, 2)), ("mark", "petit.comb"), ("launch", (128,), (3,)),
+                     ("mark", "petit.comb_end")]
+
+
+def test_step_timing_source_from_the_owner_diff() -> None:
+    src = petit_layer.step_timing_source(petit_layer.STEP_TIMING_DIFF.read_text())
+    assert src.startswith('"""TEST-ONLY decode-step component timing')
+    for fn in ("def mark(", "def capture_begin(", "def capture_end(", "def before_replay(", "def after_replay(",
+               "def _harvest(", "external=True"):
+        assert fn in src
+    compile(src, "step_timing.py", "exec")
+    with pytest.raises(RuntimeError):
+        petit_layer.step_timing_source("diff --git a/x b/x\n+x\n")
+
+
+def test_load_step_timing_keeps_records_in_memory(tmp_path) -> None:
+    pytest.importorskip("torch")
+    before = os.environ.get("TS_STEP_TIMING")
+    st = petit_layer.load_step_timing(str(tmp_path / "st"))
+    assert st.ENABLED and st._EVERY == 1 and os.environ.get("TS_STEP_TIMING") == before
+    st._write({"type": "seq", "names": []})
+    assert st.RECORDS == [{"type": "seq", "names": []}] and not (tmp_path / "st").exists()
+    assert len(st.SOURCE_SHA256) == 64
+
+
+def test_stage_table_per_rank_and_max() -> None:
+    def cell(scale):
+        net = {n: scale * (i + 1) * 1e-3 for i, n in enumerate(petit_layer.STAGES)}
+        return {"stage_net_ms": net, "stage_sum_net_ms": sum(net.values()), "unmarked_call_ms": 0.016,
+                "closure_ratio": sum(net.values()) / 0.016}
+    reps = [{"per_rank": [cell(1.0), cell(2.0)], "max_over_ranks": cell(2.0)},
+            {"per_rank": [cell(1.0), cell(2.0)], "max_over_ranks": cell(2.0)}]
+    record = {"results": [{"tokens_per_gpu": 6, "active_ranks": 1, "candidate": "petit",
+                           "routing": {"distinct_local_experts": [9, 10]},
+                           "stages_ms": {"graph": {"closure_per_repetition": reps}}}]}
+    lines = petit_layer.stage_table(record).splitlines()
+    assert len(lines) == 2 + 3  # header, rule, ranks 0 and 1, max
+    assert lines[2].startswith("| graph | 6 | 1 | petit | 9 10 | 0 | 1.0 [1.0, 1.0] | 2.0 [2.0, 2.0] |")
+    assert "| max | 2.0 [2.0, 2.0] | 4.0 [4.0, 4.0] |" in lines[4]
+    assert lines[4].endswith("| 30.0 [30.0, 30.0] | 16.0 [16.0, 16.0] | 1.875 |")
+    assert petit_layer.stage_table({"results": [{"tokens_per_gpu": 1, "stages_ms": {}}]}).count("\n") == 1
