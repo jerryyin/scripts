@@ -71,14 +71,15 @@ DP4's torch.add(routed, shared, out=out); copy-add is tp4ep4-petit's out.copy_(s
 out[start:end].add_(routed) over the replicated rows (shared = zeros, so the check stays exact).
   petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
   petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
---hops (graph mode, --layers <= 64) needs a TokenSpeed with TOKENSPEED_PETIT_TRACE: it sets
+--hops (graph mode) needs a TokenSpeed with TOKENSPEED_PETIT_TRACE: it sets
 TOKENSPEED_PETIT_TRACE=1 before TokenSpeed is imported (refusing a different value already set, since the
 switch is read at import) and, after each token count's timed replays (whose times are the instrumented
 kernels' unmarked call), zeroes the trace region, runs MegaMoETracePing (phase 0), one replay of the
 timed graph (--layers calls), MegaMoETracePing again (phase 1), gathers every rank's region and decodes it
 with petit_hops.py: X (ping RTT/2), clock offsets interpolated between the pings, every site per rank
 relative to the call's first stage-1 entry, and the chain (petit_hops.CHAIN: hop1..hop5, the owner's and
-producers' local work, tile, epilogue, node gaps) per rank and max over ranks, median [min, max] over calls.
+producers' local work, tile, epilogue, node gaps) per rank and max over ranks, median [min, max] over the
+replay's last 8 calls (the trace ring's 8 slots).
 
 Pure logic (argument parsing, limits, result rows, fit, stage arithmetic) runs without a GPU: test_petit_layer.py.
 """
@@ -571,8 +572,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="s_memrealtime rate (default 100 MHz on gfx942/gfx950); the JSON records a host check")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
-    if a.hops and (a.mode != "graph" or a.layers > petit_hops.SLOTS or a.candidates is not None):
-        ap.error(f"--hops needs --mode graph, --layers <= {petit_hops.SLOTS} (the trace ring) and no --candidates")
+    if a.hops and (a.mode != "graph" or a.candidates is not None):
+        ap.error("--hops needs --mode graph and no --candidates")
     if a.capacity < 1 or a.capacity % 32:
         ap.error("--capacity must be a positive multiple of 32 (Petit rounds capacities to 32-row blocks)")
     if not a.ts_src:

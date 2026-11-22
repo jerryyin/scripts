@@ -2,12 +2,15 @@
 
 The trace is TokenSpeed's (MegaMoEWorkspace.TraceOffset, TracePingStampOffset; commit "gluon petit: opt-in per-hop
 instrumentation"): in each rank's local workspace, at MegaMoEWorkspaceInfo.trace_offset, trace_bytes long,
-  ring  u64[64 slots = epoch mod 64][3 kernels][256 rows = CTA][16 sites]   s_memrealtime stamps, 0 = not written
+  ring  u64[8 slots = epoch mod 8][3 kernels][256 rows = CTA][16 sites]     s_memrealtime stamps, 0 = not written
   ping  u64[2 phases][8 peers][64 iterations][2]                             MegaMoETracePing stamps
 Ping: rank 0 stores (send, reply seen) for peer r; rank r stores (ping seen, reply sent) at its own [phase][r].
 Per iteration the one-way hop is X = ((seen0 - send0) - (sent_r - seen_r)) / 2 and rank r's clock offset
 theta = seen_r - send0 - X (rank-r ticks minus rank-0 ticks); phase 0 runs before and phase 1 after the traced
 replay, and a stamp is mapped to rank 0's clock by interpolating theta linearly in time between them.
+A slot keeps the last call that wrote it (a replay of N >= 8 calls leaves its last 8), and CTAs that call did
+not stamp may hold an older call's stamps: every stamp earlier than its rank's stage-1 entry of the slot's
+call is dropped (stale_mask).
 Everything here is pure (numpy only); petit_layer.py captures the buffers on the GPU.
 """
 from __future__ import annotations
@@ -16,7 +19,7 @@ import statistics
 
 import numpy as np
 
-SLOTS, KERNELS, ROWS, SITES = 64, 3, 256, 16
+SLOTS, KERNELS, ROWS, SITES = 8, 3, 256, 16
 PING_PHASES, PING_PEERS, PING_ITERS = 2, 8, 64
 RING_WORDS = SLOTS * KERNELS * ROWS * SITES
 PING_WORDS = PING_PHASES * PING_PEERS * PING_ITERS * 2
@@ -100,6 +103,23 @@ def to_rank0(t: np.ndarray, off: dict) -> np.ndarray:
     return np.where(t > 0, out, np.nan)
 
 
+def drop_stale(ring: np.ndarray) -> np.ndarray:
+    """Zero every stamp of a slot older than that slot's call: stage 1 launches all 256 CTAs every call and each
+    stamps site 0, so the slot's earliest site-0 stamp is its latest call's start, and any earlier stamp is an
+    older call's (left in a CTA, site or kernel the latest call did not reach). The aux word (site 13, not a
+    time) goes with its tile's site 11. Returns a copy."""
+    out = ring.copy()
+    for s in range(out.shape[0]):
+        entries = out[s, 0, :, 0]
+        if not (entries > 0).any():
+            continue
+        start = int(entries[entries > 0].min())
+        stale = (out[s] > 0) & (out[s].astype(np.int64) < start)
+        stale[0, :, 13] = (out[s, 0, :, 13] > 0) & (out[s, 0, :, 11].astype(np.int64) < start)
+        out[s][stale] = 0
+    return out
+
+
 def call_slots(rings: list[np.ndarray]) -> list[int]:
     """Slots written by the traced replay (stage-1 entry on every rank), ordered by rank 0's first entry."""
     used = [s for s in range(SLOTS) if all((r[s, 0, :, 0] > 0).any() for r in rings)]
@@ -177,7 +197,7 @@ def call_chain(aligned: list[np.ndarray], slot: int, producers: list[int], us_pe
 def analyze(buffers: list[bytes], producers: list[int], clock_mhz: float = NOMINAL_CLOCK_MHZ) -> dict:
     """The hops section of a --hops run from every rank's trace bytes (rank order)."""
     decoded = [decode(b) for b in buffers]
-    rings, pings = [d[0] for d in decoded], [d[1] for d in decoded]
+    rings, pings = [drop_stale(d[0]) for d in decoded], [d[1] for d in decoded]
     us_per_tick = 1.0 / clock_mhz
     offs = offsets(pings)
     aligned = [to_rank0(rings[r], offs[r]) for r in range(len(rings))]

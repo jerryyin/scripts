@@ -558,7 +558,7 @@ def _theta(t0):
 
 
 def _synthetic(ws=2, slots=(5, 6)):
-    rings = [np.zeros((64, 3, 256, 16), dtype="<u8") for _ in range(ws)]
+    rings = [np.zeros((8, 3, 256, 16), dtype="<u8") for _ in range(ws)]
     pings = [np.zeros((2, 8, 64, 2), dtype="<u8") for _ in range(ws)]
     for phase, start in ((0, 10000), (1, 90000)):
         for i in range(64):
@@ -591,14 +591,14 @@ def _synthetic(ws=2, slots=(5, 6)):
 
 def test_hops_decode_layout_matches_tokenspeed_trace_offsets():
     buf = _synthetic()[0]
-    assert len(buf) == petit_hops.TRACE_BYTES == 64 * 3 * 256 * 16 * 8 + 2 * 8 * 64 * 2 * 8
+    assert len(buf) == petit_hops.TRACE_BYTES == 8 * 3 * 256 * 16 * 8 + 2 * 8 * 64 * 2 * 8
     ring, ping = petit_hops.decode(buf)
     words = np.frombuffer(buf, dtype="<u8")
     # TraceOffset(slot, kernel, row, site) = base + (((slot*3 + kernel)*256 + row)*16 + site)*8
     assert ring[5, 0, 0, 3] == words[((5 * 3 + 0) * 256 + 0) * 16 + 3] != 0
     assert ring[6, 2, 0, 5] == words[((6 * 3 + 2) * 256 + 0) * 16 + 5] != 0
     # TracePingStampOffset(phase, peer, it, which) after the ring
-    assert ping[1, 1, 7, 1] == words[64 * 3 * 256 * 16 + ((1 * 8 + 1) * 64 + 7) * 2 + 1]
+    assert ping[1, 1, 7, 1] == words[8 * 3 * 256 * 16 + ((1 * 8 + 1) * 64 + 7) * 2 + 1]
     with pytest.raises(ValueError):
         petit_hops.decode(buf[:-8])
 
@@ -657,7 +657,7 @@ def test_hops_refuses_without_the_switch(monkeypatch):
     with pytest.raises(SystemExit):
         petit_layer.parse_args(base)  # --mode both
     with pytest.raises(SystemExit):
-        petit_layer.parse_args(base + ["--mode", "graph", "--layers", "65"])
+        petit_layer.parse_args(base + ["--mode", "graph", "--candidates", "all"])
     a = petit_layer.parse_args(base + ["--mode", "graph", "--layers", "40"])
     assert a.hops and a.hop_clock_mhz == 100.0
 
@@ -671,3 +671,15 @@ def test_hop_table_cli(tmp_path, capsys):
     assert petit_layer.main(["--hop-table", str(path)]) == 0
     out = capsys.readouterr().out
     assert "tokens/GPU=6" in out and "| tile | 10.00 [10.00, 10.00]" in out and out.count("###") == 1
+
+
+def test_hops_drop_stale_stamps_of_an_older_call():
+    ring = np.zeros((8, 3, 256, 16), dtype="<u8")
+    ring[2, 0, :4, 0] = 900_000 + np.arange(4)       # the slot's latest call: CTAs 0-3 enter at ~900000
+    ring[2, 0, :4, 12] = 902_000
+    ring[2, 0, 7, 9] = 100_000                       # CTA 7's tile stamp from the call 8 calls earlier
+    ring[2, 0, 3, 9] = 900_500                       # CTA 3's tile stamp from the latest call
+    ring[2, 2, 0, 4] = 903_000
+    out = petit_hops.drop_stale(ring)
+    assert out[2, 0, 7, 9] == 0 and out[2, 0, 3, 9] == 900_500 and out[2, 2, 0, 4] == 903_000
+    assert (out[2, 0, :4, 0] == ring[2, 0, :4, 0]).all() and ring[2, 0, 7, 9] == 100_000  # a copy

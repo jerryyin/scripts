@@ -11,7 +11,7 @@ exchange.
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
 | `petit_compile_check.py` | Compiles Petit's stage-1, stage-2 and combine kernels (base; C5 `stage1_n128`, C5b `stage2_n128`, C3 `combine_residual`; `trace_ping`, the clock-alignment kernel of `TOKENSPEED_PETIT_TRACE=1`) for gfx950 with no GPU (stub Triton driver, nothing launched; TokenSpeed's `TOKENSPEED_PETIT_*` switches in the environment apply) and compares two trees' instruction streams (`compare A.s B.s`), e.g. to show a switch-off path is unchanged; run it under `board/no-gpu/no-gpu-run`; `test_petit_compile_check.py` tests the comparison and the kernel list |
-| `petit_hops.py` | `--hops` / `--hop-table`: decodes TokenSpeed's `TOKENSPEED_PETIT_TRACE=1` trace region (64-call ring of `s_memrealtime` stamps per kernel, CTA and site, plus `MegaMoETracePing` stamps), aligns ranks' clocks (X = ping RTT/2, offsets interpolated between the pings) and derives the hop chain (`CHAIN`: hop1..hop5, owner and producer local work, tile, epilogue, node gaps) per rank and max over ranks |
+| `petit_hops.py` | `--hops` / `--hop-table`: decodes TokenSpeed's `TOKENSPEED_PETIT_TRACE=1` trace region (8-call ring of `s_memrealtime` stamps per kernel, CTA and site, plus `MegaMoETracePing` stamps), aligns ranks' clocks (X = ping RTT/2, offsets interpolated between the pings) and derives the hop chain (`CHAIN`: hop1..hop5, owner and producer local work, tile, epilogue, node gaps) per rank and max over ranks |
 | `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
@@ -192,7 +192,7 @@ TS_SRC=<checkout> python3 -m pytest test_petit_layer.py -q    # no GPU required
 ```
 
 **Per-hop trace (`--hops`, TokenSpeed with `TOKENSPEED_PETIT_TRACE`).** `--hops` (with `--mode graph`,
-`--layers` at most 64, no `--candidates`) sets `TOKENSPEED_PETIT_TRACE=1` before TokenSpeed is imported and
+no `--candidates`) sets `TOKENSPEED_PETIT_TRACE=1` before TokenSpeed is imported and
 refuses another value already set (the switch is read at import) or a TokenSpeed without the trace. The
 timed replays run as usual (so `--hops` runs time the instrumented kernels; compare a run without `--hops`
 and without the switch for the overhead). Then per token count it zeroes the trace region
@@ -200,7 +200,8 @@ and without the switch for the overhead). Then per token count it zeroes the tra
 the timed graph, the ping again (phase 1), gathers every rank's region and writes a `hops` section into
 each result: X from the ping, clock drift, every stamp site per rank relative to the call's first stage-1
 entry, and the chain of `petit_hops.CHAIN` per rank and max over ranks, median [min, max] over the
-`--layers` calls. `--hop-table OUT.json ...` prints the chain as Markdown. `--hop-clock-mhz` overrides the
+last 8 of the `--layers` calls (the ring's 8 slots; stamps an older call left in CTAs the last call did not
+reach are dropped). `--hop-table OUT.json ...` prints the chain as Markdown. `--hop-clock-mhz` overrides the
 nominal 100 MHz `s_memrealtime` rate (the JSON keeps a host-timed check, `clock_check_mhz`).
 
 ```bash
