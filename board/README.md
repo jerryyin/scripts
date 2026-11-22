@@ -49,7 +49,10 @@ board/
   when none runs; it exits when the queue empties. Serves of different DIRs do not see each other's
   claims, so share one DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
   not the caller's, so a job script sets up its own directory and environment; output and exit
-  status land in `DIR/done/` or `DIR/failed/`. Tests: `test_gpu_queue.py`.
+  status land in `DIR/done/` or `DIR/failed/`. A local serve stopped by SIGTERM, SIGINT or SIGHUP
+  (or failing with an error) stops its memory holder's process group and releases `DIR/serve.lock`;
+  on a signal it logs one line and exits 128+signal. It does not signal the running job: stop the
+  serve's process group to stop both. Tests: `test_gpu_queue.py`.
 
   The simplest setup runs everything inside the container: amd-smi there sees every GPU, so
   the idle check and HIP numbering work, and the log lands in `DIR/serve.log` where `status`
