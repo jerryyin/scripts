@@ -78,9 +78,11 @@ board/
   **Start guard (opt-in).** By default the holder leaves 240 GiB free per GPU while our process
   starts. On the MI350X host, other tenants took 36-215 GiB of that free memory within 0.5-11 s
   (smallest free memory before a grab: 38 GiB), so a start could be lost. `serve` (and `add
-  --count`) `--hold-busy-free-cap 16 --hold-gate-ranks 4` keeps free memory at most 16 GiB during the
-  start (our server grows by at most 5 GiB per 0.5 s outside its two large allocations, which the
-  holder follows within 50 ms) and exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
+  --count`) `--hold-busy-free-cap 32 --hold-gate-ranks 4` keeps free memory at most 32 GiB during the
+  start: below the smallest grab seen (33.6 GiB) and the smallest free memory before one (38 GiB);
+  outside its two gated allocations our server grew by up to 49 GiB within one 0.5 s sample (a
+  tp4ep4-petit post-load step), which the holder follows only if no single allocation exceeds the
+  cap (its children re-check every 50 ms) and exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
   `board/memgate` first on the server's `PYTHONPATH`: every rank (also multiprocessing spawn
   children) imports it as `sitecustomize` and waits at the gate before TokenSpeed's model
   construction (`weights`: 119-140 GiB at once) and KV-cache memory profile (`kv`); when all N ranks
