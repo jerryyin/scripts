@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table` |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -106,8 +106,10 @@ Stage1 is Petit's apply prep: activation quantize and the top-k id and weight co
 none at 0 rows), `petit.s1`, `petit.s2`, `petit.comb` (immediately before each launch),
 `petit.comb_end` (after the Combine launch) and `petit.end` (the call returned). The stages are the
 intervals between consecutive points: `prep`, `s1`, `s2` (holds the S1 to S2 gap), `comb` and `post`
-(after Combine until return; this path has no post add, so post net is ~0 and checks the marker
-cost). The points before the launches come from thin wrappers around the three launch objects
+(after Combine until return; without `--post` this path has no post add, so post net is ~0 and checks
+the marker cost; `--post add` appends DP4's `torch.add(routed, shared, out=out)` and `--post copy-add`
+tp4ep4-petit's `out.copy_(shared)` then `out[start:end].add_(routed)` over the replicated rows, with
+`shared` = zeros so the reference check stays exact; `--rows` writes the mode as the `post` column). The points before the launches come from thin wrappers around the three launch objects
 `MegaMoEStage1/MegaMoEStage2/MegaMoECombine`, which `MegaMoESolutionAdapter.Invoke` looks up per call
 (`kernel[grid](...)`; `warmup`, the compile-only path, passes through). `lib.moe.rocm.mega_moe` is a
 package whose `__getattr__` forwards to the sibling `mega_moe.py`, loaded as its own module, so the

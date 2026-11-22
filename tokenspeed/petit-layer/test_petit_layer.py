@@ -373,3 +373,53 @@ def test_project_step_against_switch_off():
     assert flash["delta_us"] == -5.0 and flash["draft_delta_us"] == -4.0
     assert flash["step_delta_ms"] == round((40 * -5.0 + 3 * -4.0) / 1000, 3)
     assert [r for r in res if r["profile"] == "dsv41_flash_dspark"][0]["delta_us"] == -4.0
+
+
+def test_post_mode_geometry_and_ops():
+    assert petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1"]).post == "none"
+    assert petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1",
+                                   "--post", "copy-add"]).post == "copy-add"
+    with pytest.raises(SystemExit):
+        petit_layer.parse_args(["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1", "--post", "x"])
+    assert petit_layer.post_geometry("add", [6, 0, 0, 0], 0) == (6, 0)
+    assert petit_layer.post_geometry("add", [6, 0, 0, 0], 2) == (0, 0)
+    assert petit_layer.post_geometry("copy-add", [2, 2, 2, 0], 2) == (6, 4)
+    assert petit_layer.post_geometry("copy-add", [2, 2, 2, 0], 3) == (6, 6)  # 0-row rank keeps its shared rows
+    with pytest.raises(ValueError):
+        petit_layer.post_geometry("none", [1], 0)
+    assert "post" in petit_layer.ROW_FIELDS
+    torch = pytest.importorskip("torch")
+    routed = torch.randn(2, 8).to(torch.bfloat16)
+    fn = lambda: routed  # noqa: E731
+    assert petit_layer.with_post(fn, "none", None, None, 0, 2) is fn
+    shared, out = torch.randn(2, 8).to(torch.bfloat16), torch.empty(2, 8, dtype=torch.bfloat16)
+    assert torch.equal(petit_layer.with_post(fn, "add", shared, out, 0, 2)(), routed + shared)
+    shared6, out6 = torch.randn(6, 8).to(torch.bfloat16), torch.empty(6, 8, dtype=torch.bfloat16)
+    got = petit_layer.with_post(fn, "copy-add", shared6, out6, 4, 2)()
+    assert torch.equal(got, shared6[4:6] + routed) and torch.equal(out6[:4], shared6[:4])
+    zeros = torch.zeros(6, 8, dtype=torch.bfloat16)  # what the GPU path passes: post is exact
+    assert torch.equal(petit_layer.with_post(fn, "copy-add", zeros, out6, 2, 2)(), routed)
+    empty = lambda: routed[:0]  # noqa: E731
+    assert petit_layer.with_post(empty, "copy-add", shared6, out6, 6, 0)().shape == (0, 8)
+    assert torch.equal(out6, shared6)
+
+
+def test_rows_carry_post_mode():
+    record = {"args": {"post": "add"}, "profile": {"name": "p"}, "world_size": 4, "tokenspeed": {"test": {"sha256": "s"}},
+              "results": [{"tokens_per_gpu": 1, "pass": True, "timing_ms": {"graph": {"per_repetition": [
+                  {"max_over_ranks_median_ms": 1.0, "max_over_ranks_min_ms": 1.0, "max_over_ranks_max_ms": 1.0,
+                   "per_rank_median_ms": [1.0]}]}}}]}
+    rows = petit_layer.record_rows(record, "x.json")
+    assert rows[0]["post"] == "add"
+    record["args"] = {}
+    assert petit_layer.record_rows(record, "x.json")[0]["post"] == "none"
+
+
+def test_project_step_keeps_post_modes_apart():
+    def row(post, sw, ms):
+        return {"profile": "dsv41_flash", "mode": "graph", "active_ranks": "1", "tokens_per_gpu": "6",
+                "candidate": "petit", "petit_switches": sw, "post": post, "max_over_ranks_median_ms": ms}
+    rows = [row("none", "off", 0.090), row("none", "C3=1", 0.088), row("add", "off", 0.095), row("add", "C3=1", 0.089)]
+    res = {r["post"]: r for r in petit_layer.project_step(rows)}
+    assert res["none"]["delta_us"] == -2.0 and res["add"]["delta_us"] == -6.0
+    assert res["add"]["baseline_us"] == 95.0

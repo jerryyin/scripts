@@ -61,6 +61,9 @@ per-node cost) or else this run's estimate (marked - unmarked whole call) / 6 ma
 max over ranks: stage sum net vs the unmarked whole call of the same run. --tokens 0 times the skeleton
 (every rank, or the non-active ranks, call with 0 rows). Every result carries distinct_local_experts: per
 rank, the distinct experts of its local range that the timed routing of all ranks touches.
+--post add|copy-add appends the model's op after Petit to every timed call, so post times it: add is
+DP4's torch.add(routed, shared, out=out); copy-add is tp4ep4-petit's out.copy_(shared) then
+out[start:end].add_(routed) over the replicated rows (shared = zeros, so the check stays exact).
   petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
 
 Pure logic (argument parsing, limits, result rows, fit, stage arithmetic) runs without a GPU: test_petit_layer.py.
@@ -100,7 +103,7 @@ ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ra
               "distinct_local_experts", "distinct_local_experts_max",
               "prep_ms", "s1_ms", "s2_ms", "comb_ms", "post_ms", "marked_call_ms", "marker_cost_ms",
               "prep_net_ms", "s1_net_ms", "s2_net_ms", "comb_net_ms", "post_net_ms", "stage_sum_net_ms",
-              "closure_ratio", "petit_switches")
+              "closure_ratio", "petit_switches", "post")
 # Environment switches of TokenSpeed's Petit path (TOKENSPEED_PETIT_*), recorded per run so one
 # commit's switch-off and switch-on runs stay apart in --rows / range_compare keys.
 SWITCH_PREFIX = "TOKENSPEED_PETIT_"
@@ -147,7 +150,8 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
                     "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source,
                     **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k),
-                    "petit_switches": switches_label(record.get("petit_switches", {}))})
+                    "petit_switches": switches_label(record.get("petit_switches", {})),
+                    "post": args.get("post") or "none"})
     return rows
 
 
@@ -497,6 +501,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--marker-us", type=float, default=None,
                     help="with --stages: per-timing-point cost in us (profiling/graph_event_smoke.py); "
                          "default: this run's (marked - unmarked) / 6")
+    ap.add_argument("--post", choices=POST_MODES, default="none",
+                    help="the model's op after Petit's call, timed as the post stage (see post_geometry): "
+                         "none; add = DP4's torch.add(routed, shared, out=out); copy-add = tp4ep4-petit's "
+                         "out.copy_(shared) then out[start:end].add_(routed) over the replicated rows")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
     if a.capacity < 1 or a.capacity % 32:
@@ -523,6 +531,41 @@ def parse_args(argv=None) -> argparse.Namespace:
     except ValueError as error:
         ap.error(str(error))
     return a
+
+
+POST_MODES = ("none", "add", "copy-add")
+
+
+def post_geometry(mode: str, counts: list[int], rank: int) -> tuple[int, int]:
+    """(rows of the post op's output, first row of this rank's routed rows in it) for --post.
+    add (DP4, deepseek_v41_moe.forward_normal): out and shared have this rank's rows, start 0.
+    copy-add (tp4ep4-petit, _forward_petit_tp_attention): out and shared hold every rank's rows (the
+    replicated T = sum(counts) rows), this rank's routed rows land at sum(counts[:rank]); a 0-row rank
+    still copies its shared rows and adds nothing."""
+    if mode == "add":
+        return counts[rank], 0
+    if mode == "copy-add":
+        return sum(counts), sum(counts[:rank])
+    raise ValueError(f"post mode {mode!r}: use add or copy-add")
+
+
+def with_post(fn, mode: str, shared, out, start: int, count: int):
+    """fn followed by the model's post op on (shared, out); returns this rank's rows of out, so the
+    timed check compares them with Petit's reference. The caller's shared is zeros, which makes the
+    post op exact (x + 0 == x) while its kernels are the model's (their time does not depend on values)."""
+    import torch
+    if mode == "none":
+        return fn
+
+    def call():
+        routed = fn()
+        if mode == "add":
+            torch.add(routed, shared, out=out)
+            return out
+        out.copy_(shared)
+        out[start:start + count].add_(routed)
+        return out[start:start + count]
+    return call
 
 
 def extract_closures(test_source: str) -> str:
@@ -676,21 +719,21 @@ def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_ove
     groups: dict = {}
     for r in rows:
         key = (r["profile"], r["mode"], str(r["active_ranks"]), str(r["tokens_per_gpu"]), r.get("candidate", "petit"),
-               r.get("petit_switches") or "off")
+               r.get("post") or "none", r.get("petit_switches") or "off")
         groups.setdefault(key, []).append(float(r[metric]))
     med = {k: statistics.median(v) for k, v in groups.items()}
     out = []
-    for (profile, mode, act, tok, cand, sw), value in sorted(med.items()):
-        base = med.get((profile, mode, act, tok, cand, baseline))
+    for (profile, mode, act, tok, cand, post, sw), value in sorted(med.items()):
+        base = med.get((profile, mode, act, tok, cand, post, baseline))
         if sw == baseline or base is None:
             continue
         delta_us = (value - base) * 1000.0
         row = {"profile": profile, "mode": mode, "active_ranks": act, "tokens_per_gpu": tok, "candidate": cand,
-               "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
+               "post": post, "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
                "delta_us": round(delta_us, 2)}
         if profile == "dsv41_flash":
-            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, sw))
-            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, baseline))
+            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", sw))
+            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", baseline))
             draft_us = (d_draft - b_draft) * 1000.0 if d_draft is not None and b_draft is not None else None
             row["draft_delta_us"] = None if draft_us is None else round(draft_us, 2)
             row["step_delta_ms"] = (None if draft_us is None else
@@ -754,7 +797,7 @@ def main(argv=None) -> int:
         pa = pp.parse_args(argv[1:])
         rows = [r for path in pa.rows_csv for r in csv.DictReader(open(path, newline=""))]
         res = project_step(rows, pa.baseline, pa.metric, pa.draft_tokens)
-        cols = ["profile", "active_ranks", "tokens_per_gpu", "switches", "baseline_us", "call_us", "delta_us",
+        cols = ["profile", "active_ranks", "tokens_per_gpu", "post", "switches", "baseline_us", "call_us", "delta_us",
                 "draft_delta_us", "step_delta_ms"]
         print("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))
         for r in res:
@@ -884,6 +927,12 @@ def main(argv=None) -> int:
         refresh, run = mod._closures(x, ids, weights, profile, rank, ws, device, count, counts, plan, layer)
         runs = [mod._closures(x, ids, weights, profile, rank, ws, device, count, counts, plan, timed)[1]
                 for timed in layers]
+        if a.post != "none":  # the model's post op after every timed call (the test's check keeps run())
+            post_rows, post_start = post_geometry(a.post, counts, rank)
+            post_bufs = [(torch.zeros((post_rows, profile.hidden), device=device, dtype=torch.bfloat16),
+                          torch.empty((post_rows, profile.hidden), device=device, dtype=torch.bfloat16))
+                         for _ in runs]
+            runs = [with_post(fn, a.post, sh, o, post_start, count) for fn, (sh, o) in zip(runs, post_bufs)]
         per = {}  # candidate -> its graphs, checks and launch
         for name in names:
             Forcing.candidate, Forcing.launched = name, set()
