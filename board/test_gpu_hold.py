@@ -105,6 +105,83 @@ def test_busy_hold_keeps_free_memory_under_the_cap_and_gives_the_rest_to_our_ser
     assert gh.busy_hold(free=153 * GiB, held=0, cap=cap) == 0
 
 
+def run_gated(tmp, script, ranks=2):
+    """Drive watch() with a gate: script entries are callables run before a pass (rank actions)."""
+    tmp = Path(tmp)
+    gate = gh.Gate(tmp / 'gate', ranks)
+    gate.clear()
+    caps, notes = [], []
+    holder = gh.Holder([0, 1], None, spawn=lambda gpu: FakeChild(), cap_file=tmp / 'cap',
+                       vram=lambda pid: 0)
+    real_set_cap = holder.set_cap
+    holder.set_cap = lambda cap: (caps.append(cap), real_set_cap(cap))
+    state, states, step = tmp / 'state', [], [-1]
+
+    def stop():
+        if state.exists() and (not states or states[-1] != state.read_text().strip()):
+            states.append(state.read_text().strip())
+        step[0] += 1
+        if step[0] < len(script):
+            script[step[0]](gate.root)
+        return step[0] >= len(script)
+
+    users = lambda _exclude: [] if step[0] == 0 else [99]
+    gh.watch(holder, users, lambda pids: 1 << 30, stop, 0, None, tmp / 'ready', state,
+             clock=lambda: step[0] * 1.0, cap=16 << 30, gate=gate)
+    return states, caps, gate
+
+
+def wait(pid, phase):
+    return lambda root: (root / f'{pid}.wait').write_text(phase + '\n')
+
+
+def enter(pid):
+    return lambda root: ((root / f'{pid}.wait').rename(root / f'{pid}.in'), (root / f'{pid}.go').unlink())
+
+
+def leave(pid):
+    return lambda root: (root / f'{pid}.in').unlink()
+
+
+nothing = lambda root: None
+
+
+def test_gate_releases_for_all_ranks_then_caps_again_and_yields_at_the_kv_profile(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    gone = []
+    script = [nothing, nothing, wait(1, 'weights'), nothing,        # one rank waits: nothing released
+              wait(2, 'weights'), nothing,                          # both wait: release, then go
+              lambda r: gone.append(sorted(p.name for p in r.glob('*.go'))),
+              enter(1), enter(2), leave(1), leave(2), nothing,      # weights allocated: cap again
+              wait(1, 'kv'), wait(2, 'kv'), nothing,
+              lambda r: gone.append(sorted(p.name for p in r.glob('*.go'))), nothing]
+    states, caps, _ = run_gated(tmp, script)
+    GiB = 1 << 30
+    assert caps == [16 * GiB, gh.UNCAPPED, 16 * GiB, gh.UNCAPPED], caps
+    assert gone == [['1.go', '2.go'], ['1.go', '2.go']], gone
+    assert states == ['hold', 'busy', 'yielded'], states
+
+
+def test_gate_gives_late_ranks_their_go_while_open_and_after_yielding(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    seen = []
+    script = [nothing, nothing, wait(1, 'kv'), wait(2, 'kv'), nothing, nothing,
+              wait(3, 'kv'), nothing, lambda r: seen.append((r / '3.go').exists())]
+    states, _, _ = run_gated(tmp, script)
+    assert states[-1] == 'yielded' and seen == [True], (states, seen)
+
+
+def test_without_a_gate_the_busy_cap_is_the_default_and_settled_memory_ends_busy():
+    assert gh.read_cap(None) == gh.BUSY_FREE_CAP == 240 << 30
+    tmp = Path(tempfile.mkdtemp())
+    gh.write_cap(tmp / 'cap', 16 << 30)
+    assert gh.read_cap(tmp / 'cap') == 16 << 30
+    # a small cap gives our server what it allocates beyond 16 GiB free, chunk by chunk
+    GiB = 1 << 30
+    assert gh.busy_hold(free=286 * GiB, held=0, cap=16 * GiB) == 270 * GiB
+    assert gh.busy_hold(free=11 * GiB, held=270 * GiB, cap=16 * GiB) == 265 * GiB
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
