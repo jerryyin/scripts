@@ -350,3 +350,26 @@ def test_stage_table_per_rank_and_max() -> None:
     assert "| max | 2.0 [2.0, 2.0] | 4.0 [4.0, 4.0] |" in lines[4]
     assert lines[4].endswith("| 30.0 [30.0, 30.0] | 16.0 [16.0, 16.0] | 1.875 |")
     assert petit_layer.stage_table({"results": [{"tokens_per_gpu": 1, "stages_ms": {}}]}).count("\n") == 1
+
+
+def test_petit_switches_recorded_and_labelled():
+    env = {"TOKENSPEED_PETIT_FUSE_PREP": "1", "TOKENSPEED_PETIT_STAGE1_N128": "0", "HIP_VISIBLE_DEVICES": "0"}
+    switches = petit_layer.petit_switches(env)
+    assert switches == {"TOKENSPEED_PETIT_FUSE_PREP": "1", "TOKENSPEED_PETIT_STAGE1_N128": "0"}
+    assert petit_layer.switches_label(switches) == "FUSE_PREP=1;STAGE1_N128=0"
+    assert petit_layer.switches_label({}) == "off"
+    assert "petit_switches" in petit_layer.ROW_FIELDS
+
+
+def test_project_step_against_switch_off():
+    def row(profile, act, tok, sw, ms):
+        return {"profile": profile, "mode": "graph", "active_ranks": act, "tokens_per_gpu": tok,
+                "candidate": "petit", "petit_switches": sw, "max_over_ranks_median_ms": ms}
+    rows = [row("dsv41_flash", "1", "6", "off", 0.0912), row("dsv41_flash", "1", "6", "off", 0.0914),
+            row("dsv41_flash", "1", "6", "off", 0.0910), row("dsv41_flash", "1", "6", "FUSE_PREP=1", 0.0862),
+            row("dsv41_flash_dspark", "4", "6", "off", 0.1123), row("dsv41_flash_dspark", "4", "6", "FUSE_PREP=1", 0.1083)]
+    res = petit_layer.project_step(rows)
+    flash = [r for r in res if r["profile"] == "dsv41_flash"][0]
+    assert flash["delta_us"] == -5.0 and flash["draft_delta_us"] == -4.0
+    assert flash["step_delta_ms"] == round((40 * -5.0 + 3 * -4.0) / 1000, 3)
+    assert [r for r in res if r["profile"] == "dsv41_flash_dspark"][0]["delta_us"] == -4.0
