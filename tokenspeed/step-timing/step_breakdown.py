@@ -239,9 +239,14 @@ UNTIMED_TAILS = ("layer tail", "DSpark draft: layer tail")
 
 
 def project_group(name):
-    """Coarse group of a table component (attention, router, petit, shared, norms, head, draft, other)."""
+    """Coarse group of a table component (attention, router, petit, shared, norms, head, draft, row_split,
+    moe_allreduce, other). row_split and moe_allreduce come from markers added at TokenSpeed 649a6353
+    (moe.split, moe.comm); in dumps without them their time stays where it was (router / other)."""
     if name.startswith("DSpark draft") or name.startswith("other: draft:"):
         return "draft"
+    for prefix, group in (("MoE row split", "row_split"), ("MoE output all-reduce", "moe_allreduce")):
+        if name.startswith(prefix):
+            return group
     for key, group in (("norm", "norms"), ("attn", "attention"), ("Petit", "petit"), ("MoE prep", "petit"),
                        ("router", "router"), ("shared", "shared_expert"), ("lm_head", "head"), ("embed", "embed")):
         if key in name:
