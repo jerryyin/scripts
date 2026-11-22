@@ -9,7 +9,9 @@ launched), and compare two compiles' instruction streams.
 compile: a stub Triton driver answers JITFunction.run's target queries (hip / gfx950 / wave 64), the kernel's
 warmup() compiles the specialization Petit's MegaMoESolutionAdapter.Kernels builds (stage1: one row, external inputs;
 stage1_n128: C5's MegaMoEStage1N128Config; stage2_n128: C5b's MegaMoEStage2N128Config; combine_residual: C3's
-MegaMoECombineResidual; trace_ping: TOKENSPEED_PETIT_TRACE's MegaMoETracePing, which needs the switch on). The
+MegaMoECombineResidual; trace_ping: TOKENSPEED_PETIT_TRACE's MegaMoETracePing, which needs the switch on;
+a4w4_ep_finalize: not Petit, the A4W4 EP registration's ep_route_finalize kernel (TOKENSPEED_A4W4_EP_FUSED_FINALIZE)
+at the DeepSeek V4.1 target shape, top-6 or, with --profile dsv41_flash_dspark, the draft's top-3). The
 TokenSpeed switches (TOKENSPEED_PETIT_*) in the environment apply as they do at import in a server, and the AMDGCN is written; prints
 compile time, VGPRs and LDS bytes. The platform is the owner fixture `mi350_platform` of
 tokenspeed-kernel/test/conftest.py (evaluated from that file). Run it with an LD_PRELOAD that refuses /dev/kfd
@@ -28,7 +30,8 @@ import sys
 import time
 from pathlib import Path
 
-KERNELS = ("stage1", "stage1_n128", "stage2", "stage2_n128", "combine", "combine_residual", "trace_ping")
+KERNELS = ("stage1", "stage1_n128", "stage2", "stage2_n128", "combine", "combine_residual", "trace_ping",
+           "a4w4_ep_finalize")
 
 
 def instructions(asm: str) -> list[str]:
@@ -72,6 +75,8 @@ def compile_kernel(ts_src: Path, kernel: str, profile: str = "dsv41_flash"):
 
     driver.set_active(StubDriver())
     _platform(ts_src)
+    if kernel == "a4w4_ep_finalize":
+        return _compile_a4w4_ep_finalize(profile)
     import test_gluon_petit as t  # the owner test's config helpers
     pk = t._import_petit_kernel()
     import lib.moe.rocm.mega_moe as fwd
@@ -107,6 +112,25 @@ def compile_kernel(ts_src: Path, kernel: str, profile: str = "dsv41_flash"):
     vgpr = next((l.split()[-1] for l in asm.splitlines() if ".vgpr_count" in l), "?")
     return asm, {"kernel": kernel, "compile_s": round(time.time() - t0, 1), "vgprs": vgpr,
                  "lds_bytes": getattr(k.metadata, "shared", None), "instructions": len(instructions(asm))}
+
+
+def _compile_a4w4_ep_finalize(profile: str):
+    """ep_route_finalize's kernel as the registration launches it (FP32 weights, BF16 routes and output)."""
+    import torch
+    from tokenspeed_kernel_amd.ops.gfx950.moe.mxfp4 import ep_route_finalize as F
+    top_k = {"dsv41_flash": 6, "dsv41_flash_dspark": 3}[profile]
+    rows, hidden = 6, 5120
+    t0 = time.time()
+    k = F._ep_route_finalize_kernel.warmup(
+        torch.empty(rows * top_k, hidden, dtype=torch.bfloat16), torch.empty(rows * top_k, dtype=torch.int32),
+        torch.empty(rows, top_k, dtype=torch.float32), torch.empty(rows, hidden, dtype=torch.bfloat16),
+        hidden, hidden, top_k, 1, hidden, TOPK=top_k, BLOCK_N=F.EP_ROUTE_FINALIZE_BLOCK_N, num_warps=4,
+        enable_fp_fusion=False, grid=(rows, -(-hidden // F.EP_ROUTE_FINALIZE_BLOCK_N)))
+    asm = k.asm["amdgcn"]
+    vgpr = next((l.split()[-1] for l in asm.splitlines() if ".vgpr_count" in l), "?")
+    return asm, {"kernel": "a4w4_ep_finalize", "compile_s": round(time.time() - t0, 1), "vgprs": vgpr,
+                 "lds_bytes": getattr(k.metadata, "shared", None), "instructions": len(instructions(asm)),
+                 "fma": sum(1 for i in instructions(asm) if "fma" in i.split()[0])}
 
 
 def main(argv=None) -> int:
