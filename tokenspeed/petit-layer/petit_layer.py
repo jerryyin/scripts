@@ -33,6 +33,7 @@ reference then for the timed inputs; the test's check still runs on the test's w
 Analysis modes (no GPU):
   petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]   one CSV row per repetition of each result
   petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
+  petit_layer.py --project ROWS.csv [--baseline off]     call change vs a switch set, per 43-call step
   petit_layer.py --stage-table OUT.json [OUT.json ...]     --stages net times per rank and max over ranks (us)
   petit_layer.py --fit ROWS.csv [ROWS.csv ...] [--where NAME=VALUE ...] [--fit-layers 40]
                  [--fit-chunks C,C,...] [--fit-cap 1024]
@@ -99,7 +100,21 @@ ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ra
               "distinct_local_experts", "distinct_local_experts_max",
               "prep_ms", "s1_ms", "s2_ms", "comb_ms", "post_ms", "marked_call_ms", "marker_cost_ms",
               "prep_net_ms", "s1_net_ms", "s2_net_ms", "comb_net_ms", "post_net_ms", "stage_sum_net_ms",
-              "closure_ratio")
+              "closure_ratio", "petit_switches")
+# Environment switches of TokenSpeed's Petit path (TOKENSPEED_PETIT_*), recorded per run so one
+# commit's switch-off and switch-on runs stay apart in --rows / range_compare keys.
+SWITCH_PREFIX = "TOKENSPEED_PETIT_"
+
+
+def petit_switches(environ=None) -> dict:
+    """The TOKENSPEED_PETIT_* variables of ``environ`` (default: this process), sorted."""
+    environ = os.environ if environ is None else environ
+    return {k: environ[k] for k in sorted(environ) if k.startswith(SWITCH_PREFIX)}
+
+
+def switches_label(switches: dict) -> str:
+    """'off' when none set, else 'NAME=value;...' without the common prefix."""
+    return ";".join(f"{k[len(SWITCH_PREFIX):]}={v}" for k, v in sorted(switches.items())) or "off"
 # --stages: timing points per call, in stream order, and the stage between each point and the next.
 STAGE_MARKS = ("petit.begin", "petit.s1", "petit.s2", "petit.comb", "petit.comb_end", "petit.end")
 STAGES = ("prep", "s1", "s2", "comb", "post")
@@ -131,7 +146,8 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "pass": r["pass"], "iters": args.get("iters"),
                     "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
                     "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source,
-                    **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k)})
+                    **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k),
+                    "petit_switches": switches_label(record.get("petit_switches", {}))})
     return rows
 
 
@@ -427,11 +443,13 @@ def install_forcing() -> None:
             return select(num_experts, activation_function, num_tokens)
         return petit._MegaMoeProducerGeometry[Forcing.candidate.split("/")[0]]
 
-    def forced_kernels(self, external, m64, w8, *rest):  # *rest: later Petit adds arguments (reduce_routes)
+    def forced_kernels(self, external, m64, w8, *rest, **kwargs):
+        # *rest / **kwargs: later Petit adds arguments (reduce_routes; n128 with TOKENSPEED_PETIT_STAGE1_N128)
         if Forcing.candidate is not None:
             m64, w8 = STAGE1_TILES[Forcing.candidate.split("/")[1]]
-        Forcing.launched.add((self.Config.kProducerBlocks, m64, w8))
-        return kernels(self, external, m64, w8, *rest)
+            kwargs.pop("n128", None)  # a forced tile is the tile named by the candidate
+        Forcing.launched.add((self.Config.kProducerBlocks, m64, w8) + (("n128",) if kwargs.get("n128") else ()))
+        return kernels(self, external, m64, w8, *rest, **kwargs)
 
     petit._select_mega_moe_producer_geometry = forced_select
     mega_moe.MegaMoESolutionAdapter.Kernels = forced_kernels
@@ -647,6 +665,42 @@ def fit_table(rows: list[dict], layers: int = 40, chunks: tuple[int, ...] = (), 
     return "\n".join(out)
 
 
+TARGET_CALLS_PER_STEP, DRAFT_CALLS_PER_STEP = 40, 3  # DSv4.1 Flash decode step: 40 target + 3 DSpark draft calls
+
+
+def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_over_ranks_median_ms",
+                 draft_tokens: str = "6") -> list[dict]:
+    """Per switch set and case, the change of the call (median over repetitions of ``metric``, ms)
+    against the ``baseline`` switch set at the same (profile, mode, active_ranks, tokens_per_gpu,
+    candidate), and the projected change per 43-call decode step: 40 x the dsv41_flash case's change
+    + 3 x the dsv41_flash_dspark change at ``draft_tokens`` rows on 4 active ranks (same switch set).
+    Negative = saving."""
+    groups: dict = {}
+    for r in rows:
+        key = (r["profile"], r["mode"], str(r["active_ranks"]), str(r["tokens_per_gpu"]), r.get("candidate", "petit"),
+               r.get("petit_switches") or "off")
+        groups.setdefault(key, []).append(float(r[metric]))
+    med = {k: statistics.median(v) for k, v in groups.items()}
+    out = []
+    for (profile, mode, act, tok, cand, sw), value in sorted(med.items()):
+        base = med.get((profile, mode, act, tok, cand, baseline))
+        if sw == baseline or base is None:
+            continue
+        delta_us = (value - base) * 1000.0
+        row = {"profile": profile, "mode": mode, "active_ranks": act, "tokens_per_gpu": tok, "candidate": cand,
+               "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
+               "delta_us": round(delta_us, 2)}
+        if profile == "dsv41_flash":
+            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, sw))
+            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, baseline))
+            draft_us = (d_draft - b_draft) * 1000.0 if d_draft is not None and b_draft is not None else None
+            row["draft_delta_us"] = None if draft_us is None else round(draft_us, 2)
+            row["step_delta_ms"] = (None if draft_us is None else
+                                    round((TARGET_CALLS_PER_STEP * delta_us + DRAFT_CALLS_PER_STEP * draft_us) / 1000.0, 3))
+        out.append(row)
+    return out
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--rows":  # petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]
@@ -690,10 +744,29 @@ def main(argv=None) -> int:
         print(decide_table(decisions))
         print(json.dumps(decisions))
         return 0
+    if argv and argv[0] == "--project":  # petit_layer.py --project ROWS.csv [--baseline off] [--draft-tokens 6]
+        import csv
+        pp = argparse.ArgumentParser(prog="petit_layer.py --project",
+                                     description="per-call change against a baseline switch set and the "
+                                                 "projected change per 43-call decode step (see project_step)")
+        pp.add_argument("rows_csv", nargs="+")
+        pp.add_argument("--baseline", default="off")
+        pp.add_argument("--metric", default="max_over_ranks_median_ms")
+        pp.add_argument("--draft-tokens", default="6")
+        pa = pp.parse_args(argv[1:])
+        rows = [r for path in pa.rows_csv for r in csv.DictReader(open(path, newline=""))]
+        res = project_step(rows, pa.baseline, pa.metric, pa.draft_tokens)
+        cols = ["profile", "active_ranks", "tokens_per_gpu", "switches", "baseline_us", "call_us", "delta_us",
+                "draft_delta_us", "step_delta_ms"]
+        print("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))
+        for r in res:
+            print("| " + " | ".join("" if r.get(c) is None else str(r.get(c)) for c in cols) + " |")
+        return 0
     if argv and argv[0] == "--stage-table":  # petit_layer.py --stage-table OUT.json [OUT.json ...]
         for path in argv[1:]:
             record = json.loads(Path(path).read_text())
-            print(f"### {Path(path).name}: {record['profile']['name']}\n")
+            print(f"### {Path(path).name}: {record['profile']['name']} "
+                  f"switches={switches_label(record.get('petit_switches', {}))}\n")
             print(stage_table(record) + "\n")
         return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
@@ -1036,6 +1109,7 @@ def main(argv=None) -> int:
             "runtime": dist_timing.runtime_versions(),
             "args": {k: v for k, v in vars(a).items()},
             "petit_capacity": state_capacity,
+            "petit_switches": petit_switches(),
             "world_size": ws,
             "profile": {"name": profile.name, "hidden": profile.hidden, "experts": profile.experts,
                         "top_k": profile.top_k, "experts_per_rank": profile.experts // ws,
