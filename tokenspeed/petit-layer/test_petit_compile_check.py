@@ -34,3 +34,8 @@ def test_cli_compare_exit_code(tmp_path):
     assert pcc.main(["compare", str(a), str(b)]) == 0
     b.write_text(ASM_B + "\ts_endpgm\n")
     assert pcc.main(["compare", str(a), str(b)]) == 1
+
+
+def test_kernel_choices_cover_every_petit_launch():
+    assert set(pcc.KERNELS) == {"stage1", "stage1_n128", "stage2", "stage2_n128", "combine",
+                                "combine_residual", "trace_ping"}

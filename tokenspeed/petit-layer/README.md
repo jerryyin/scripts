@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `petit_compile_check.py` | Compiles Petit's stage-2 and combine kernels (base, C5b `stage2_n128`, C3 `combine_residual`) for gfx950 with no GPU (stub Triton driver, nothing launched) and compares two trees' instruction streams (`compare A.s B.s`), e.g. to show a switch-off path is unchanged; `test_petit_compile_check.py` tests the comparison |
+| `petit_compile_check.py` | Compiles Petit's stage-1, stage-2 and combine kernels (base; C5 `stage1_n128`, C5b `stage2_n128`, C3 `combine_residual`; `trace_ping`, the clock-alignment kernel of `TOKENSPEED_PETIT_TRACE=1`) for gfx950 with no GPU (stub Triton driver, nothing launched; TokenSpeed's `TOKENSPEED_PETIT_*` switches in the environment apply) and compares two trees' instruction streams (`compare A.s B.s`), e.g. to show a switch-off path is unchanged; run it under `board/no-gpu/no-gpu-run`; `test_petit_compile_check.py` tests the comparison and the kernel list |
 | `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
