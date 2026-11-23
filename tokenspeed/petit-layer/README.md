@@ -57,7 +57,12 @@ launched as (producer blocks, 64-row, 8-warp). `--candidates all` or a comma lis
 only, asserts after every capture that the launch path received exactly the forced choice, runs the
 test's check for each, and interleaves the candidates within each timed repetition, so candidates are
 compared within one process (absolute times differ by up to a few percent between processes). With
-128 experts `cta192` equals `cta128` and `all` leaves it out. `--layers N` times N calls per graph
+128 experts `cta192` equals `cta128` and `all` leaves it out. `--stage2-tile n256|n128` forces stage
+2's tile (the `stage2_n128` argument of `Kernels`, in a TokenSpeed with
+`TOKENSPEED_PETIT_STAGE2_N128`; an error otherwise), asserts it in every capture (`launched` gains
+`s2n128`), and labels the run `stage2_tile=n128` in `--rows`, so `--project --baseline off` and
+`range_compare.py` measure the forced tile against the same switch set at Petit's own tile.
+`--layers N` times N calls per graph
 replay on N layers, as a decode step replays consecutive layers (reported time = replay / N);
 `--weights random` gives those layers distinct random MXFP4 weights (the test's check still runs on the
 test's weights, and the timed inputs then have no reference). `--routing skew --skew S` draws expert i

@@ -423,3 +423,47 @@ def test_project_step_keeps_post_modes_apart():
     res = {r["post"]: r for r in petit_layer.project_step(rows)}
     assert res["none"]["delta_us"] == -2.0 and res["add"]["delta_us"] == -6.0
     assert res["add"]["baseline_us"] == 95.0
+
+
+def test_stage2_tile_forcing_and_label():
+    a = petit_layer.parse_args(["--ts-src", "/ts", "--profile", "dsv41_flash", "--tokens", "6", "--out", "x.json"])
+    assert a.stage2_tile == "petit"
+    a = petit_layer.parse_args(["--ts-src", "/ts", "--profile", "dsv41_flash", "--tokens", "6", "--out", "x.json",
+                                "--stage2-tile", "n128"])
+    assert a.stage2_tile == "n128"
+    with pytest.raises(SystemExit):
+        petit_layer.parse_args(["--ts-src", "/ts", "--profile", "dsv41_flash", "--tokens", "6", "--out", "x.json",
+                                "--stage2-tile", "n64"])
+    kw = {"reduce_routes": True}
+    assert petit_layer.stage2_kwargs(kw, None, False) == kw  # Petit's own choice passes through
+    assert petit_layer.stage2_kwargs({"stage2_n128": True}, None, True) == {"stage2_n128": True}
+    assert petit_layer.stage2_kwargs({"stage2_n128": True, "n128": True}, "n256", True) == {"n128": True}
+    assert petit_layer.stage2_kwargs(kw, "n128", True) == {"reduce_routes": True, "stage2_n128": True}
+    assert kw == {"reduce_routes": True}  # not mutated
+    with pytest.raises(RuntimeError, match="stage2_n128"):
+        petit_layer.stage2_kwargs(kw, "n128", False)  # a TokenSpeed without stage2_n128
+    assert petit_layer.expected_launch("cta56/m32", 384) == (56, False, False)
+    assert petit_layer.expected_launch("cta56/m32", 384, "n256") == (56, False, False)
+    assert petit_layer.expected_launch("cta56/m32", 384, "n128") == (56, False, False, "s2n128")
+    assert petit_layer.run_label({}) == "off"
+    assert petit_layer.run_label({}, "n128") == "stage2_tile=n128"
+    sel = {"TOKENSPEED_PETIT_FUSE_PREP": "1"}
+    assert petit_layer.run_label(sel, "petit") == "FUSE_PREP=1"
+    assert petit_layer.run_label(sel, "n256") == "FUSE_PREP=1;stage2_tile=n256"
+    assert "stage2_tile" in petit_layer.ROW_FIELDS
+
+
+def test_rows_and_project_keep_forced_stage2_apart():
+    def record(tile, ms):
+        return {"profile": {"name": "dsv41_flash"}, "world_size": 4, "petit_switches": {},
+                "tokenspeed": {"commit": "c", "test": {"sha256": "t"}},
+                "args": {"routing": "test", "seed": 0, "layers": 40, "iters": 50, "stage2_tile": tile},
+                "results": [{"tokens_per_gpu": 6, "active_ranks": 1, "candidate": "petit", "pass": True,
+                             "timing_ms": {"graph": {"per_repetition": [
+                                 {"max_over_ranks_median_ms": ms, "max_over_ranks_min_ms": ms,
+                                  "max_over_ranks_max_ms": ms, "per_rank_median_ms": [ms]}] * 3}}}]}
+    rows = petit_layer.record_rows(record("petit", 0.0900)) + petit_layer.record_rows(record("n128", 0.0880))
+    assert {r["petit_switches"] for r in rows} == {"off", "stage2_tile=n128"}
+    assert {r["stage2_tile"] for r in rows} == {"petit", "n128"}
+    res = [r for r in petit_layer.project_step(rows) if r["profile"] == "dsv41_flash"]
+    assert len(res) == 1 and res[0]["delta_us"] == -2.0

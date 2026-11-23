@@ -26,6 +26,9 @@ the 64-row tile with 4 or 8 warps), set by patching petit_kernel._select_mega_mo
 and MegaMoESolutionAdapter.Kernels in this process only. Every capture asserts that the launch path
 received exactly the forced choice; without --candidates the launch Petit chose is recorded. Each
 candidate passes the test's check before it is timed, and repetitions interleave the candidates.
+--stage2-tile n256|n128 forces stage 2's tile (C5b's stage2_n128 argument of Kernels; TokenSpeed with
+TOKENSPEED_PETIT_STAGE2_N128 support), checked in every capture and labelled 'stage2_tile=...' in --rows,
+so --project and range_compare compare it against the same switch set at Petit's own tile.
 --layers N times N calls per graph replay on N layers (per-call time = replay / N), as a decode step
 replays consecutive layers; --weights random gives those layers distinct random MXFP4 weights (no
 reference then for the timed inputs; the test's check still runs on the test's weights).
@@ -73,6 +76,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import random
@@ -94,6 +98,9 @@ PETIT_MAX_TOKENS_PER_RANK = 1024
 GEOMETRIES = ("cta56", "cta64", "cta128", "cta192")
 # Stage-1 tile -> the (m64, w8) arguments of MegaMoESolutionAdapter.Kernels.
 STAGE1_TILES = {"m32": (False, False), "m64w4": (True, False), "m64w8": (True, True)}
+# --stage2-tile: Petit's own stage-2 tile, or forced to 256 / 128 columns (the stage2_n128 argument of
+# MegaMoESolutionAdapter.Kernels, TokenSpeed with TOKENSPEED_PETIT_STAGE2_N128 support).
+STAGE2_TILES = ("petit", "n256", "n128")
 PRODUCER_BLOCKS = {"cta56": 56, "cta64": 64, "cta128": 128, "cta192": 192}
 SKEW_PERMUTATION_SEED = 12345  # fixed: the same experts are popular on every rank
 ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ranks", "candidate", "launched",
@@ -103,7 +110,7 @@ ROW_FIELDS = ("profile", "routing", "seed", "mode", "tokens_per_gpu", "active_ra
               "distinct_local_experts", "distinct_local_experts_max",
               "prep_ms", "s1_ms", "s2_ms", "comb_ms", "post_ms", "marked_call_ms", "marker_cost_ms",
               "prep_net_ms", "s1_net_ms", "s2_net_ms", "comb_net_ms", "post_net_ms", "stage_sum_net_ms",
-              "closure_ratio", "petit_switches", "post")
+              "closure_ratio", "petit_switches", "post", "stage2_tile")
 # Environment switches of TokenSpeed's Petit path (TOKENSPEED_PETIT_*), recorded per run so one
 # commit's switch-off and switch-on runs stay apart in --rows / range_compare keys.
 SWITCH_PREFIX = "TOKENSPEED_PETIT_"
@@ -118,6 +125,15 @@ def petit_switches(environ=None) -> dict:
 def switches_label(switches: dict) -> str:
     """'off' when none set, else 'NAME=value;...' without the common prefix."""
     return ";".join(f"{k[len(SWITCH_PREFIX):]}={v}" for k, v in sorted(switches.items())) or "off"
+
+
+def run_label(switches: dict, stage2_tile: str = "petit") -> str:
+    """switches_label plus a forced --stage2-tile ('stage2_tile=n128'), so a forced run keeps its own
+    --rows / --project / range_compare key against the same switch set at Petit's own tile."""
+    label = switches_label(switches)
+    if stage2_tile in (None, "petit"):
+        return label
+    return ("" if label == "off" else label + ";") + f"stage2_tile={stage2_tile}"
 # --stages: timing points per call, in stream order, and the stage between each point and the next.
 STAGE_MARKS = ("petit.begin", "petit.s1", "petit.s2", "petit.comb", "petit.comb_end", "petit.end")
 STAGES = ("prep", "s1", "s2", "comb", "post")
@@ -141,6 +157,7 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "seed": args.get("seed", 0), "mode": mode, "tokens_per_gpu": r["tokens_per_gpu"],
                     "active_ranks": r.get("active_ranks", record.get("world_size")),
                     "candidate": r.get("candidate", "petit"), "launched": r.get("launched", ""),
+                    "stage2_tile": args.get("stage2_tile", "petit"),
                     "layers": args.get("layers", 1), "repetition": k,
                     "max_over_ranks_median_ms": rep["max_over_ranks_median_ms"],
                     "max_over_ranks_min_ms": rep["max_over_ranks_min_ms"],
@@ -150,7 +167,7 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
                     "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source,
                     **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k),
-                    "petit_switches": switches_label(record.get("petit_switches", {})),
+                    "petit_switches": run_label(record.get("petit_switches", {}), args.get("stage2_tile", "petit")),
                     "post": args.get("post") or "none"})
     return rows
 
@@ -423,14 +440,32 @@ def candidate_names(text: str | None, experts: int) -> list[str] | None:
     return names
 
 
-def expected_launch(name: str, experts: int) -> tuple[int, bool, bool]:
+def expected_launch(name: str, experts: int, stage2: str | None = None) -> tuple:
     geometry, tile = name.split("/")
-    return (min(PRODUCER_BLOCKS[geometry], experts), *STAGE1_TILES[tile])
+    return (min(PRODUCER_BLOCKS[geometry], experts), *STAGE1_TILES[tile]) + \
+        (("s2n128",) if stage2 == "n128" else ())
+
+
+def stage2_kwargs(kwargs: dict, stage2: str | None, accepts: bool) -> dict:
+    """--stage2-tile applied to one Kernels call's keyword arguments: None passes Petit's choice through,
+    'n256' drops stage2_n128, 'n128' sets it (an error when this TokenSpeed's Kernels has no stage2_n128)."""
+    out = dict(kwargs)
+    if stage2 is None:
+        return out
+    if stage2 == "n256":
+        out.pop("stage2_n128", None)
+        return out
+    if not accepts:
+        raise RuntimeError("--stage2-tile n128: this TokenSpeed's MegaMoESolutionAdapter.Kernels has no "
+                           "stage2_n128 argument (TOKENSPEED_PETIT_STAGE2_N128, not in this tree)")
+    out["stage2_n128"] = True
+    return out
 
 
 class Forcing:
     """The forced candidate (None: Petit's own choice) and the (producer blocks, m64, w8) launched."""
     candidate: str | None = None
+    stage2: str | None = None  # --stage2-tile: None (Petit's choice), 'n256' or 'n128'
     launched: set = set()
 
 
@@ -441,6 +476,7 @@ def install_forcing() -> None:
     import lib.moe.rocm.mega_moe as mega_moe  # importable once load_petit_kernel() set up Petit's root
 
     select, kernels = petit._select_mega_moe_producer_geometry, mega_moe.MegaMoESolutionAdapter.Kernels
+    accepts_stage2 = "stage2_n128" in inspect.signature(kernels).parameters
 
     def forced_select(num_experts, activation_function, num_tokens):
         if Forcing.candidate is None:
@@ -452,7 +488,9 @@ def install_forcing() -> None:
         if Forcing.candidate is not None:
             m64, w8 = STAGE1_TILES[Forcing.candidate.split("/")[1]]
             kwargs.pop("n128", None)  # a forced tile is the tile named by the candidate
-        Forcing.launched.add((self.Config.kProducerBlocks, m64, w8) + (("n128",) if kwargs.get("n128") else ()))
+        kwargs = stage2_kwargs(kwargs, Forcing.stage2, accepts_stage2)
+        Forcing.launched.add((self.Config.kProducerBlocks, m64, w8) + (("n128",) if kwargs.get("n128") else ())
+                             + (("s2n128",) if kwargs.get("stage2_n128") else ()))
         return kernels(self, external, m64, w8, *rest, **kwargs)
 
     petit._select_mega_moe_producer_geometry = forced_select
@@ -480,6 +518,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "fixed global permutation drawn with weight (i+1)^-S (--skew), the same hot experts "
                          "on every rank")
     ap.add_argument("--skew", type=float, default=0.5, help="exponent S of --routing skew")
+    ap.add_argument("--stage2-tile", choices=STAGE2_TILES, default="petit",
+                    help="force stage 2's tile: n256 or n128 (needs a TokenSpeed whose "
+                         "MegaMoESolutionAdapter.Kernels takes stage2_n128); petit keeps Petit's own")
     ap.add_argument("--candidates", default=None,
                     help="force Petit's launch: 'all' or comma list of GEOMETRY/TILE (cta56..cta192 / m32, "
                          "m64w4, m64w8); default: time Petit's own choice and record it")
@@ -865,6 +906,7 @@ def main(argv=None) -> int:
 
     active = ws if a.active_ranks is None else min(a.active_ranks, ws)
     install_forcing()
+    Forcing.stage2 = None if a.stage2_tile == "petit" else a.stage2_tile
     names = candidate_names(a.candidates, profile.experts) or [None]
     step_timing = None
     if a.stages:
@@ -976,9 +1018,11 @@ def main(argv=None) -> int:
                 timed_check = check(timed_out[0].clone(), mod._reference(x, ids, weights, profile))
                 timed_check["graph_equals_eager"] = bool(torch.equal(timed_out[0], runs[0]()))
             launched = sorted(Forcing.launched)
-            if name is not None and launched != [expected_launch(name, profile.experts)]:
+            if name is not None and launched != [expected_launch(name, profile.experts, Forcing.stage2)]:
                 raise RuntimeError(f"forcing {name} launched {launched}, expected "
-                                   f"{[expected_launch(name, profile.experts)]}")
+                                   f"{[expected_launch(name, profile.experts, Forcing.stage2)]}")
+            if Forcing.stage2 is not None and any(("s2n128" in t) != (Forcing.stage2 == "n128") for t in launched):
+                raise RuntimeError(f"--stage2-tile {Forcing.stage2} launched {launched}")
             per[name] = {"graph": timed_graph, "steps": steps, "timed_check": timed_check, "first": first,
                          "launched": launched}
             if a.stages and "graph" in modes:  # a second graph of the same calls with the timing points
