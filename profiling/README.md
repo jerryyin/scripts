@@ -18,7 +18,9 @@ profiling/
 ├── dist_timing.py        # per-call event timing of a call every torch.distributed rank makes together
 ├── test_dist_timing.py   # non-GPU unit tests for its statistics and argument helpers (pytest)
 ├── stack_sample.py       # py-spy stack samples of running processes (by process group) and runs of identical stacks
-└── test_stack_sample.py  # CPU tests: run summary, attach-failure report, a live dump of a child process (pytest)
+├── test_stack_sample.py  # CPU tests: run summary, attach-failure report, a live dump of a child process (pytest)
+├── gpu_activity.py       # per-GPU activity of stated time windows from amd-tracking admission samples
+└── test_gpu_activity.py  # CPU tests: window activity, unobserved GPUs not called idle, cache writes per window (pytest)
 ```
 
 ## Files
@@ -49,6 +51,11 @@ profiling/
   `HIP_VISIBLE_DEVICES`, the matching amd-smi indices and the GPU processes there, through
   `board/gpu-wait.py`; `appeared` lists the PIDs (host PIDs) that showed up between two snapshots. Run alone it prints `gpu_context()`. Project wrappers supply the call and
   its correctness check, for example `tokenspeed/petit-layer/petit_layer.py`.
+- `gpu_activity.py --samples SAMPLES_JSONL --window LABEL=START_UTC,END_UTC [--margin S] [--cache-listing
+  LISTING] --out-json OUT` — what the GPUs did in a stated window, from amd-tracking `gpu_admission.py`
+  admission samples: per GPU device busy and, for the measured process's own KFD processes, `cu_occupancy`,
+  queues and SDMA time, each GPU busy, idle or unobserved; with `--cache-listing` (a Triton cache file
+  listing) the cache files written in each window grouped per kernel, to tell a JIT compile from a hang.
 - `stack_sample.py run --pgid PGID [--pid PID] [--comm-regex RE] --interval S (--duration S | --stop-file F)
   [--native | --nonblocking] --out STACKS.jsonl` — where a running program's host side is: every interval
   it runs `py-spy dump --json` on every process of the process groups (rescanned each sample, so ranks that
