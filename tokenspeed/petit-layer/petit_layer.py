@@ -1,87 +1,28 @@
 #!/usr/bin/env python3
 """Time TokenSpeed's Gluon Petit MoE layer alone on 4 GPUs (EP4, token exchange included).
 
-Run one rank per GPU under torchrun:
+Run one rank per GPU under torchrun; rank 0 writes one JSON per run:
 
   python3 -m torch.distributed.run --standalone --nproc-per-node=4 petit_layer.py \
       --ts-src $TS_SRC --profile dsv41_flash --tokens 1,6,12,24 --mode both --reps 3 --out petit.json
 
---capacity N sets Petit's per-rank capacity in the plan (plan["gluon_petit_max_tokens_per_rank"], as a
-server with a raised chunk passes it at TokenSpeed 46671ec2 and later) so --tokens may go up to N.
-
-Everything about the layer comes from TokenSpeed's distributed test
-(tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py in --ts-src), imported
-by path, never copied: the profiles (_PROFILES), _TestMoeLayer, _weights, _make_plan, _routing,
-_reference, and the test's input refresh() and run() closures, whose source is cut out of the test
-function and executed (their SHA-256 is recorded). Per token count (tokens per GPU, equal on all
-ranks) the test's check runs first: eager call, graph capture, then for refresh steps 0, 1, 2 graph
-replay vs _reference with the test's tolerance (read from the test source) and graph == eager
-exactly. The timed inputs (--routing) are checked the same way. Then each mode is timed with
-profiling/dist_timing.py: warmup, then --reps blocks of --iters calls, events around every call
-(graph replay in graph mode), a barrier before each block; per rank and max over ranks.
-
---candidates forces Petit's launch choice instead of timing its own: each candidate is a producer
-geometry (cta56/64/128/192, the dispatch's producer blocks) and a stage-1 tile (m32; m64w4 and m64w8,
-the 64-row tile with 4 or 8 warps), set by patching petit_kernel._select_mega_moe_producer_geometry
-and MegaMoESolutionAdapter.Kernels in this process only. Every capture asserts that the launch path
-received exactly the forced choice; without --candidates the launch Petit chose is recorded. Each
-candidate passes the test's check before it is timed, and repetitions interleave the candidates.
---stage2-tile n256|n128 forces stage 2's tile (C5b's stage2_n128 argument of Kernels; TokenSpeed with
-TOKENSPEED_PETIT_STAGE2_N128 support), checked in every capture and labelled 'stage2_tile=...' in --rows,
-so --project and range_compare compare it against the same switch set at Petit's own tile.
---post fused-add|fused-copy-add runs C3 (the post op folded into Combine through TokenSpeed's
-gluon.petit_combine_post); its rows keep post=add|copy-add and are labelled 'post=fused'.
---layers N times N calls per graph replay on N layers (per-call time = replay / N), as a decode step
-replays consecutive layers; --weights random gives those layers distinct random MXFP4 weights (no
-reference then for the timed inputs; the test's check still runs on the test's weights).
+The layer, its reference and its tolerance come from TokenSpeed's distributed test
+(tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py in --ts-src), imported by
+path, never copied. Every token count passes the test's check before it is timed. --candidates,
+--stage2-tile, --post, --stages and --hops are described in --help and in README.md.
 
 Analysis modes (no GPU):
   petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]   one CSV row per repetition of each result
   petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
-  petit_layer.py --project ROWS.csv [--baseline off]     call change vs a switch set, per 43-call step
+  petit_layer.py --fit ROWS.csv [...] [--fit-layers 40] [--fit-chunks C,C,...] [--fit-cap 1024] [--where NAME=VALUE]
+  petit_layer.py --project ROWS.csv [...] [--baseline off] [--draft-tokens 6]
+  petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]
   petit_layer.py --stage-table OUT.json [OUT.json ...]     --stages net times per rank and max over ranks (us)
-  petit_layer.py --fit ROWS.csv [ROWS.csv ...] [--where NAME=VALUE ...] [--fit-layers 40]
-                 [--fit-chunks C,C,...] [--fit-cap 1024]
---fit groups the --rows CSV rows by (profile, routing, mode, active_ranks, candidate) and per group
-gives, per tokens_per_gpu (rows per call), the median [min, max] over repetitions of
-max_over_ranks_median_ms; the least-squares line t = a + b x rows over those medians with each
-count's residual and fixed share a / median; --fit-layers x the median (the Petit ms of one step
-whose MoE layers each see that many rows); and, for each chunk C of --fit-chunks, the Petit ms of a C-token prefill
-chunk split into ceil(C / --fit-cap) calls (full calls at the measured median of --fit-cap rows, or
-the line if it was not measured; the remainder at the line) against one --fit-cap-row chunk. Runs
-that differ in --layers or --seed share a group: select one with --where (for example --where
-layers=8 --where seed=0); --weights is not a CSV column, so fit such runs from separate CSVs.
-
---stages splits each call into prep (entry of the test's run(), i.e. kernel_moe_apply -> Petit's apply:
-quantize and route copies), s1 (MegaMoEStage1), s2 (MegaMoEStage2), comb (MegaMoECombine) and post (after
-Combine until the call returns): a timing point before each of the three launches (thin wrappers around
-lib.moe.rocm.mega_moe.MegaMoEStage1/Stage2/Combine, whose launch objects Invoke looks up per call) plus one at
-entry, one after Combine and one at return. Eager: torch.cuda.Event at each point. Graph: the step-timing
-owner's marker writer (runtime/utils/step_timing.py, taken from tokenspeed/step-timing/instrumentation.diff
-and loaded in this process only; external timing events recorded during capture become graph nodes, on a
-second, marked graph of the same calls; each sampled replay follows one unsampled replay, since reading
-a replay's points needs a host sync); TokenSpeed's files are not changed. Each stage interval holds one
-marker, so stages are reported raw and net of the marker cost: --marker-us (profiling/graph_event_smoke.py's
-per-node cost) or else this run's estimate (marked - unmarked whole call) / 6 markers. Closure per rank and
-max over ranks: stage sum net vs the unmarked whole call of the same run. --tokens 0 times the skeleton
-(every rank, or the non-active ranks, call with 0 rows). Every result carries distinct_local_experts: per
-rank, the distinct experts of its local range that the timed routing of all ranks touches.
---post add|copy-add appends the model's op after Petit to every timed call, so post times it: add is
-DP4's torch.add(routed, shared, out=out); copy-add is tp4ep4-petit's out.copy_(shared) then
-out[start:end].add_(routed) over the replicated rows (shared = zeros, so the check stays exact).
-  petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
   petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
---hops (graph mode) needs a TokenSpeed with TOKENSPEED_PETIT_TRACE: it sets
-TOKENSPEED_PETIT_TRACE=1 before TokenSpeed is imported (refusing a different value already set, since the
-switch is read at import) and, after each token count's timed replays (whose times are the instrumented
-kernels' unmarked call), zeroes the trace region, runs MegaMoETracePing (phase 0), one replay of the
-timed graph (--layers calls), MegaMoETracePing again (phase 1), gathers every rank's region and decodes it
-with petit_hops.py: X (ping RTT/2), clock offsets interpolated between the pings, every site per rank
-relative to the call's first stage-1 entry, and the chain (petit_hops.CHAIN: hop1..hop5, the owner's and
-producers' local work, tile, epilogue, node gaps) per rank and max over ranks, median [min, max] over the
-replay's last 8 calls (the trace ring's 8 slots).
+  petit_layer.py --hop-summary OUT.json [OUT.json ...]     max over ranks of every interval, one column per run
 
-Pure logic (argument parsing, limits, result rows, fit, stage arithmetic) runs without a GPU: test_petit_layer.py.
+Pure logic (argument parsing, limits, result rows, fit, projection, stage arithmetic) runs without a
+GPU: test_petit_layer.py.
 """
 from __future__ import annotations
 
@@ -925,6 +866,15 @@ def main(argv=None) -> int:
                       f"active={r['active_ranks']} switches={switches_label(record.get('petit_switches', {}))} "
                       f"calls={h['calls']} clock={h['clock_mhz']} MHz (host check {h.get('clock_check_mhz')})\n")
                 print(petit_hops.hop_table(h) + "\n")
+        return 0
+    if argv and argv[0] == "--hop-summary":  # petit_layer.py --hop-summary OUT.json [OUT.json ...]
+        cols = []
+        for path in argv[1:]:
+            record = json.loads(Path(path).read_text())
+            for r in record["results"]:
+                if r.get("hops"):
+                    cols.append((f"{Path(path).stem} {r['tokens_per_gpu']}/{r['active_ranks']}", r["hops"]))
+        print(petit_hops.hop_summary(cols))
         return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:

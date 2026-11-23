@@ -234,6 +234,21 @@ def analyze(buffers: list[bytes], producers: list[int], clock_mhz: float = NOMIN
             "clock_drift_ppm_by_peer": drift, "chain_us": chain, "chain_doc": CHAIN, "sites_us_from_call_start": sites}
 
 
+# Gaps between two sites of one kernel, from the per-rank site medians (us from the call's first stage 1 entry).
+# site7_to_9: at counts where a CTA takes several tiles site 9 is its last tile, so the gap is not the first payload's.
+SITE_GAPS = {"site7_to_9": ("stage1", 7, 9, "stage 1 site 9 - site 7 medians per rank (recv sums -> payload seen)")}
+
+
+def site_gap(hops: dict, kernel: str, a: int, b: int) -> list:
+    """Per rank: median(site b) - median(site a) of ``kernel`` (us), None where either site has no stamp."""
+    out = []
+    for r in range(hops["ranks"]):
+        s = (hops.get("sites_us_from_call_start") or {}).get(str(r), {}).get(kernel, {})
+        sa, sb = s.get(str(a)), s.get(str(b))
+        out.append(None if not sa or not sb else round(sb["median"] - sa["median"], 3))
+    return out
+
+
 def hop_table(hops: dict) -> str:
     """Markdown: each chain interval per rank and max over ranks, median [min, max] over calls (us)."""
     ws = hops["ranks"]
@@ -245,7 +260,32 @@ def hop_table(hops: dict) -> str:
     rows = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for k, doc in CHAIN.items():
         rows.append("| " + " | ".join([k] + [cell(a) for a in hops["chain_us"][k]] + [doc]) + " |")
+    for name, (kernel, a, b, doc) in SITE_GAPS.items():
+        gaps = site_gap(hops, kernel, a, b)
+        if any(g is not None for g in gaps):
+            top = max((g for g in gaps if g is not None), default=None)
+            rows.append("| " + " | ".join([name] + ["" if g is None else f"{g:.2f}" for g in gaps]
+                                          + ["" if top is None else f"{top:.2f}", doc]) + " |")
     x = hops.get("x_us")
     rows.append("| X (ping RTT/2) | " + " | ".join(
         [""] + [cell(a) for a in hops["x_us_by_peer"]] + [cell(x), "store/poll one-way, rank 0 <-> rank r"]) + " |")
+    return "\n".join(rows)
+
+
+def hop_summary(columns: list) -> str:
+    """Markdown, one column per (label, hops): every chain interval's and SITE_GAPS' max over ranks (median over
+    calls, us) and X; the side-by-side view of --hop-table across runs and token counts."""
+    def top(hops, k):
+        if k in SITE_GAPS:
+            gaps = [g for g in site_gap(hops, *SITE_GAPS[k][:3]) if g is not None]
+            return f"{max(gaps):.2f}" if gaps else ""
+        if k == "X":
+            x = hops.get("x_us")
+            return "" if x is None else f"{x['median']:.2f}"
+        a = hops["chain_us"][k][-1]
+        return "" if a is None else f"{a['median']:.2f}"
+    keys = list(CHAIN) + list(SITE_GAPS) + ["X"]
+    rows = ["| interval | " + " | ".join(lab for lab, _ in columns) + " |", "|---|" + "---|" * len(columns)]
+    for k in keys:
+        rows.append(f"| {k} | " + " | ".join(top(h, k) for _, h in columns) + " |")
     return "\n".join(rows)
