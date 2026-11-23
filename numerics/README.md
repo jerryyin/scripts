@@ -60,9 +60,15 @@ several configurations and the question is which is faster.
   `lost` (upper bound < 1), else `no verdict`; the paired interval (indices drawn jointly) as a
   sensitivity column when both tables hold the same indices. Three flags read from the owners'
   outputs, never recomputed:
-  - acceptance: `summary[label=X, reference=REF, concurrency=C].accept_share.median` of
-    `tokenspeed/serving/e2e_decompose.py --accept-split` JSON (`--accept-split PATH`), flagged
-    when its absolute value exceeds `--accept-share-limit` (0.10);
+  - acceptance: in the `summary[label=X, reference=REF, concurrency=C]` row of
+    `tokenspeed/serving/e2e_decompose.py --accept-split` JSON (`--accept-split PATH`), the share
+    `accept_part_ms.median / latency_gap_ms.median` (median over repetitions of the acceptance
+    part over median over repetitions of the latency gap, a ratio of medians), flagged when its
+    absolute value exceeds `--accept-share-limit` (0.10; exactly 0.10 is not flagged); when
+    `latency_gap_ms.median` is 0 the share is `undefined` and flagged. The row's
+    `accept_share.median` (the median of per-repetition quotients, ill-conditioned when one
+    repetition's gap is near 0) is printed beside it as information and never used by the rule;
+    missing medians make the point `incomplete`;
   - looping: in `tokenspeed/serving/correctness/compare_outputs.py --accept-test` JSONL
     (`--accept-test C=PATH`, one per point), the row whose `accept_test` holds both labels;
     `accept_test[X].looping_wilson95` and `accept_test[REF].looping_wilson95` (with

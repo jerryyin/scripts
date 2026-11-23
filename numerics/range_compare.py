@@ -22,9 +22,12 @@ list under --rows-field):
              own, unpaired) and the verdict 'won' (lower bound > 1), 'lost' (upper bound < 1) or
              'no verdict'; the paired interval (repetition indices of --rep-field drawn jointly) as
              a sensitivity column when both tables hold the same indices. Flags, read from the
-             owners' outputs (never recomputed): acceptance, |summary[label=X, reference=REF,
-             concurrency=C].accept_share.median| > --accept-share-limit 0.10 of
-             e2e_decompose.py --accept-split JSON; looping, accept_test[X].looping_wilson95 and
+             owners' outputs (never recomputed): acceptance, the share = accept_part_ms.median /
+             latency_gap_ms.median of the summary[label=X, reference=REF, concurrency=C] row of
+             e2e_decompose.py --accept-split JSON (a ratio of medians), flagged when |share| >
+             --accept-share-limit 0.10, and 'undefined' and flagged when latency_gap_ms.median is 0
+             (that row's accept_share.median, the median of per-repetition shares, is shown for
+             information only); looping, accept_test[X].looping_wilson95 and
              accept_test[REF].looping_wilson95 disjoint in the compare_outputs.py --accept-test
              JSONL row of the pair (--accept-test KEY=PATH, one file per point); canonical,
              compare --bounds's range verdict of --canonical-table X=PATH and REF=PATH (won/lost)
@@ -388,16 +391,24 @@ def load_reps(spec: str, key: list[str], rows_field: str | None, metric: str, re
 
 
 def accept_share(split: dict | None, x: str, ref: str, key_value) -> dict:
-    """The acceptance flag from e2e_decompose.py --accept-split JSON: summary[label=x, reference=ref,
-    concurrency=key_value].accept_share.median."""
+    """The acceptance share from e2e_decompose.py --accept-split JSON, row summary[label=x, reference=ref,
+    concurrency=key_value]: share = accept_part_ms.median / latency_gap_ms.median (a ratio of medians over
+    repetitions; None and 'undefined' when the median gap is 0). That row's accept_share.median (the median
+    of per-repetition shares, ill-conditioned when a repetition's gap is near 0) is kept as
+    per_rep_share_median, information only."""
     if split is None:
         return {"flag": None, "reason": "no --accept-split"}
     for row in split.get("summary", []):
         if row.get("label") == x and row.get("reference") == ref and row.get("concurrency") == key_value:
-            share = (row.get("accept_share") or {}).get("median")
-            if share is None:
-                return {"flag": None, "reason": "accept_share.median is null"}
-            return {"share": share, "repetitions": row.get("repetitions"), "flag": None}
+            part = (row.get("accept_part_ms") or {}).get("median")
+            gap = (row.get("latency_gap_ms") or {}).get("median")
+            info = (row.get("accept_share") or {}).get("median")
+            if part is None or gap is None:
+                return {"flag": None, "per_rep_share_median": info,
+                        "reason": "accept_part_ms.median or latency_gap_ms.median is null"}
+            return {"share": part / gap if gap != 0 else None, "undefined": gap == 0,
+                    "accept_part_ms_median": part, "latency_gap_ms_median": gap,
+                    "per_rep_share_median": info, "repetitions": row.get("repetitions"), "flag": None}
     return {"flag": None, "reason": f"no summary row label={x} reference={ref} concurrency={key_value}"}
 
 
@@ -448,8 +459,8 @@ def decide_point(xs: dict, refs: dict, resamples: int, seed: int, share: dict, l
     paired = bootstrap_ratio_paired(xs, refs, resamples, seed, level)
     canon = canon(verdict)  # canonical_check bound to the point: needs this run's verdict
     share = dict(share)
-    if "share" in share:
-        share["flag"] = abs(share["share"]) > share_limit
+    if "share" in share:  # an undefined share (median gap 0) is flagged
+        share["flag"] = share["undefined"] or abs(share["share"]) > share_limit
     loop = dict(loop)
     if "disjoint" in loop:
         loop["flag"] = loop["disjoint"]
@@ -515,7 +526,8 @@ def fmt_flag(f: dict, kind: str) -> str:
         return f"n/a ({f.get('reason', 'missing')})"
     mark = "FLAG" if f["flag"] else "ok"
     if kind == "acceptance":
-        return f"{f['share']:+.3f} {mark}"
+        share = "undefined" if f["undefined"] else f"{f['share']:+.3f}"
+        return f"{share} ({f['accept_part_ms_median']:.1f} / {f['latency_gap_ms_median']:.1f} ms) {mark}"
     if kind == "looping":
         s = list(f["sides"].values())
         return " vs ".join(f"{v['looping']}/{v['outputs']} [{v['wilson95'][0]:.2f},{v['wilson95'][1]:.2f}]"
@@ -523,9 +535,16 @@ def fmt_flag(f: dict, kind: str) -> str:
     return f"{f['ratio']:.2f} [{f['lo']:.2f},{f['hi']:.2f}] {f['verdict']} {mark}"
 
 
+def fmt_info(f: dict) -> str:
+    """accept_share.median of the --accept-split row (median of per-repetition shares): information only."""
+    v = f.get("per_rep_share_median")
+    return "-" if v is None else f"{v:+.3f}"
+
+
 def decide_markdown(rows: list[dict], key: list[str], digits: int, ratio_digits: int) -> str:
     head = key + ["ratio", "run", "n", "medians", "r", "95% CI (unpaired)", "verdict", "paired CI (sensitivity)",
-                  "acceptance share", "looping X vs REF [Wilson 95%]", "canonical range", "run word", "final"]
+                  "acceptance share (median part / median gap)", "per-rep share median (info, not used)",
+                  "looping X vs REF [Wilson 95%]", "canonical range", "run word", "final"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in rows:
         for i, run in enumerate(r["runs"], 1):
@@ -538,7 +557,8 @@ def decide_markdown(rows: list[dict], key: list[str], digits: int, ratio_digits:
                 f"{run['medians'][0]:.{digits}f} / {run['medians'][1]:.{digits}f}", f"{run['ratio']:.{d}f}",
                 f"[{run['interval'][0]:.{d}f}, {run['interval'][1]:.{d}f}]", run["verdict"],
                 f"[{p[0]:.{d}f}, {p[1]:.{d}f}]" if p else "-",
-                fmt_flag(run["flags"]["acceptance"], "acceptance"), fmt_flag(run["flags"]["looping"], "looping"),
+                fmt_flag(run["flags"]["acceptance"], "acceptance"), fmt_info(run["flags"]["acceptance"]),
+                fmt_flag(run["flags"]["looping"], "looping"),
                 fmt_flag(run["flags"]["canonical"], "canonical"), run["word"],
                 r["final"] if i == len([x for x in r["runs"] if x]) else ""]
             lines.append("| " + " | ".join(cells) + " |")
@@ -656,7 +676,8 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--rerun-accept-test", action="append", default=[], help="KEY=PATH of the second run")
     d.add_argument("--resamples", type=int, default=10000)
     d.add_argument("--seed", type=int, default=0)
-    d.add_argument("--accept-share-limit", type=float, default=0.10)
+    d.add_argument("--accept-share-limit", type=float, default=0.10,
+                   help="flag when |accept_part_ms.median / latency_gap_ms.median| exceeds this (default 0.10)")
     d.add_argument("--digits", type=int, default=1)
     d.add_argument("--ratio-digits", type=int, default=2)
     d.add_argument("--format", choices=["md", "json"], default="md")

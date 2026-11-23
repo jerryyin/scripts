@@ -277,10 +277,15 @@ def bench(points: dict[int, list[float]], warm: float | None = 1.0) -> Path:
     return write("benchmark.json", json.dumps({"results": rows}))
 
 
-def split(shares: dict[int, float], label: str = "x", ref: str = "ref") -> Path:
-    return write("split.json", json.dumps({"reference": ref, "summary": [
-        {"label": label, "reference": ref, "concurrency": c, "repetitions": 5,
-         "accept_share": {"median": v, "min": v, "max": v, "n": 5}} for c, v in shares.items()]}))
+def split(shares: dict[int, float | tuple], label: str = "x", ref: str = "ref") -> Path:
+    """An --accept-split JSON: per concurrency a share v (as accept_part_ms.median = 100 v over
+    latency_gap_ms.median = 100, accept_share.median = v) or (part_ms, gap_ms, per-repetition share median)."""
+    def row(c, v):
+        part, gap, per_rep = v if isinstance(v, tuple) else (100.0 * v, 100.0, v)
+        m = lambda x: {"median": x, "min": x, "max": x, "n": 5}  # noqa: E731
+        return {"label": label, "reference": ref, "concurrency": c, "repetitions": 5, "latency_gap_ms": m(gap),
+                "accept_part_ms": m(part), "accept_share": m(per_rep)}
+    return write("split.json", json.dumps({"reference": ref, "summary": [row(c, v) for c, v in shares.items()]}))
 
 
 def accept_test(x_wilson: list[float], ref_wilson: list[float]) -> Path:
@@ -329,12 +334,55 @@ def test_decide_won_lost_no_verdict() -> None:
     assert lo < 1 < hi
 
 
-def test_decide_acceptance_flag_reads_accept_share_median() -> None:
+def test_decide_acceptance_share_is_a_ratio_of_medians() -> None:
     r = run_decide({1: WON, 2: WON}, {1: REF, 2: REF}, shares={1: 0.11, 2: -0.10})
     by_c = {x["key"][0]: x for x in r}
-    assert by_c[1]["runs"][0]["flags"]["acceptance"] == {"share": 0.11, "repetitions": 5, "flag": True}
+    assert by_c[1]["runs"][0]["flags"]["acceptance"] == {
+        "share": 0.11, "undefined": False, "accept_part_ms_median": 11.0, "latency_gap_ms_median": 100.0,
+        "per_rep_share_median": 0.11, "repetitions": 5, "flag": True}
     assert by_c[1]["final"] == "flagged"
     assert by_c[2]["runs"][0]["flags"]["acceptance"]["flag"] is False and by_c[2]["final"] == "won"
+
+
+def test_decide_acceptance_ratio_of_medians_overrides_per_repetition_median() -> None:
+    # the a4w4ff C=1 shape: median acceptance part 0 ms of a 93.7 ms median gap, per-repetition median 0.157
+    r = run_decide({1: WON}, {1: REF}, shares={1: (0.0, 93.73, 0.157)})[0]
+    a = r["runs"][0]["flags"]["acceptance"]
+    assert a["share"] == 0.0 and a["per_rep_share_median"] == 0.157 and a["flag"] is False and r["final"] == "won"
+    # the reverse disagreement: per-repetition median small, ratio of medians large -> flagged
+    r = run_decide({1: WON}, {1: REF}, shares={1: (30.0, 100.0, 0.02)})[0]
+    a = r["runs"][0]["flags"]["acceptance"]
+    assert a["share"] == 0.3 and a["flag"] is True and r["final"] == "flagged"
+
+
+def test_decide_acceptance_boundary_at_the_limit() -> None:
+    # |share| = 0.10 exactly is not flagged (strictly greater), on both signs; just above is
+    for part, flag in ((10.0, False), (-10.0, False), (10.001, True), (-10.001, True)):
+        r = run_decide({1: WON}, {1: REF}, shares={1: (part, 100.0, 0.0)})[0]
+        assert r["runs"][0]["flags"]["acceptance"]["flag"] is flag, part
+        assert r["final"] == ("flagged" if flag else "won")
+    # a negative gap: the sign of the share is the sign of the quotient, the flag reads its magnitude
+    r = run_decide({1: LOST}, {1: REF}, shares={1: (5.0, -40.0, 0.0)}, canon=({1: TIE[:3]}, {1: REF[:3]}))[0]
+    assert r["runs"][0]["flags"]["acceptance"]["share"] == -0.125 and r["final"] == "flagged"
+    # --accept-share-limit moves the boundary
+    r = run_decide({1: WON}, {1: REF}, "--accept-share-limit", "0.2", shares={1: (15.0, 100.0, 0.0)})[0]
+    assert r["runs"][0]["flags"]["acceptance"]["flag"] is False
+
+
+def test_decide_acceptance_zero_gap_is_undefined_and_flagged() -> None:
+    r = run_decide({1: WON}, {1: REF}, shares={1: (0.0, 0.0, 0.05)})[0]
+    a = r["runs"][0]["flags"]["acceptance"]
+    assert a["share"] is None and a["undefined"] is True and a["flag"] is True and r["final"] == "flagged"
+    md = rc.fmt_flag(a, "acceptance")
+    assert md == "undefined (0.0 / 0.0 ms) FLAG" and rc.fmt_info(a) == "+0.050"
+
+
+def test_decide_acceptance_missing_fields_are_incomplete() -> None:
+    p = write("split.json", json.dumps({"summary": [{"label": "x", "reference": "ref", "concurrency": 1,
+                                                       "accept_share": {"median": 0.0}}]}))
+    r = run_decide({1: WON}, {1: REF}, "--accept-split", str(p))[0]
+    a = r["runs"][0]["flags"]["acceptance"]
+    assert a["flag"] is None and "latency_gap_ms.median" in a["reason"] and r["final"] == "incomplete"
 
 
 def test_decide_looping_flag_on_disjoint_wilson_intervals() -> None:
@@ -392,6 +440,13 @@ def test_decide_markdown_and_errors() -> None:
     lines = buf.getvalue().splitlines()
     assert lines[0].startswith("| concurrency | ratio | run |") and len(lines) == 3
     assert "| won |" in lines[2] and lines[2].endswith("| incomplete | incomplete |")
+    assert ("| acceptance share (median part / median gap) | per-rep share median (info, not used) |"
+            in lines[0])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc.main(args + ["--label", "X=x", "--label", "REF=ref", "--accept-split",
+                        str(split({1: (0.0, 93.7, 0.157)}))])
+    assert "| +0.000 (0.0 / 93.7 ms) ok | +0.157 |" in buf.getvalue().splitlines()[2]
     for bad in (["--ratio", "X/NOPE"], ["--metric", "summary.other"]):
         try:
             with redirect_stdout(io.StringIO()), __import__("contextlib").redirect_stderr(io.StringIO()):
