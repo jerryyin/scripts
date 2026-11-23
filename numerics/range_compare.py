@@ -306,12 +306,16 @@ def write_compare(results: dict[str, tuple[list[str], list[dict]]], key: list[st
 
 # ---------------------------------------------------------------- intervals of a ratio of medians over repetitions
 
-def percentile(sorted_vals: list[float], q: float) -> float:
-    """Linear-interpolation percentile (q in [0, 1]) of an ascending list (numpy's default method)."""
-    pos = q * (len(sorted_vals) - 1)
+def percentile(values: list[float], q: float) -> float | None:
+    """Linear-interpolation percentile (q in [0, 1]) of values in any order (numpy's default method); None when
+    there are none. The one percentile of the toolkit's statistics tools."""
+    if not values:
+        return None
+    vals = sorted(values)
+    pos = q * (len(vals) - 1)
     lo = int(pos)
-    hi = min(lo + 1, len(sorted_vals) - 1)
-    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+    hi = min(lo + 1, len(vals) - 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
 
 
 # Fewest repetitions per side that decide bootstraps. The percentile bootstrap of a median only has the

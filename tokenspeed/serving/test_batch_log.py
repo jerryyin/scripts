@@ -187,6 +187,14 @@ def test_line_gaps_per_rank_with_log_timestamps() -> None:
     assert cli == batch_log.line_gap_lines(gaps)
 
 
+def test_acceptance_by_rid_from_accept_and_requeststats_lines() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text(f"[ts] {ts(T)}  INFO ts_control::output: Req: r1 Finish! Accept_num_tokens_avg: 4.5\n"
+                       + finish(T + 1, "r2", 10, 0, acc=3.25) + finish(T + 2, "r3", 10, 0))
+        assert batch_log.acceptance_by_rid([str(log)]) == {"r1": 4.5, "r2": 3.25}
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -7,8 +7,10 @@ usage: compare_outputs.py A.jsonl B.jsonl [--label-a A] [--label-b B] [--out rep
 
 --key pairs records by other fields than idx, e.g. --key prompt_sha256 for amd-tracking
 evalscope_degeneracy.py --requests records (the same prompt in two serving runs; a key seen k times in a
-file pairs its i-th occurrences). --where keeps records whose FIELD equals VALUE (as text), e.g.
---where concurrency=1; FIELD~REGEX keeps records whose FIELD matches REGEX (re.search), e.g. --where 'phase~^measured'. Each row also gives both sides' acceptance (acc_len) and loop period (loop_period
+file pairs its i-th occurrences). --where is numerics/range_compare.py's filter: FIELD=VALUE keeps records
+whose FIELD equals VALUE (as text), e.g. --where concurrency=1, FIELD~REGEX those whose FIELD matches REGEX
+(re.search), e.g. --where 'phase~^measured'; a record without the FIELD is kept. Each row also gives both
+sides' acceptance (acc_len) and loop period (loop_period
 of the record, else computed from the re-encoded ids: the smallest p <= 16 with t[i] == t[i-p] over the
 last 64 tokens, amd-tracking evalscope_degeneracy.loop_period). --rows prints every row as a JSON line.
 
@@ -42,9 +44,14 @@ import json
 import math
 import os
 import random
-import re
 import statistics
 import sys
+
+SERVING = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, SERVING)
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(SERVING)), "numerics"))
+from batch_log import acceptance_by_rid, percentile  # noqa: E402
+from range_compare import keep, parse_where  # noqa: E402
 
 
 LOOP_WINDOW, MAX_LOOP_PERIOD = 64, 16
@@ -60,24 +67,13 @@ def loop_period(tokens, window=LOOP_WINDOW, max_period=MAX_LOOP_PERIOD):
     return None
 
 
-def match(value, op, want):
-    """--where test: op "=" compares as text, op "~" searches the regular expression in the text."""
-    return re.search(want, str(value)) is not None if op == "~" else str(value) == want
-
-
-def parse_where(spec):
-    """FIELD=VALUE or FIELD~REGEX -> (field, op, value); the first of = and ~ splits."""
-    i = min((spec.find(c) for c in "=~" if c in spec), default=-1)
-    if i <= 0:
-        raise ValueError(f"--where {spec!r}: give FIELD=VALUE or FIELD~REGEX")
-    return spec[:i], spec[i], spec[i + 1:]
-
-
 def load(path, key=("idx",), where=()):
+    """{key: record} of a JSONL file; where is range_compare.parse_where's output (a record without the field is
+    kept)."""
     out, seen = {}, {}
     with open(path) as fh:
         for r in map(json.loads, (line for line in fh if line.strip())):
-            if any(not match(r.get(f), op, v) for f, op, v in where):
+            if not keep(r, where):
                 continue
             k = tuple(r.get(f) for f in key)
             n = seen.get(k, 0); seen[k] = n + 1
@@ -171,20 +167,6 @@ def cache_free(rows):
     return [r for r in rows if not any(int(c or 0) for c in r["cache_tokens"])]
 
 
-def server_acceptance(path):
-    """{rid: acc_len} from the server log's batch_log "Accept" lines (and Finish RequestStats acc_len)."""
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from batch_log import parse_lines
-    out = {}
-    with open(path, errors="replace") as fh:
-        for e in parse_lines(fh):
-            if e["kind"] == "Accept":
-                out[e["rid"]] = e["acc_len"]
-            elif e["kind"] == "Finish" and isinstance((e.get("stats") or {}).get("acc_len"), float):
-                out[e["rid"]] = e["stats"]["acc_len"]
-    return out
-
-
 def use_server_acceptance(records, server):
     """Replace acc_len by the server value (by request_id); return how many records matched."""
     n = 0
@@ -220,16 +202,16 @@ def sign_test_p(pos, neg):
 def boot_mean(values, n_boot, rng):
     if len(values) < 2:
         return None
-    m = sorted(statistics.mean(rng.choices(values, k=len(values))) for _ in range(n_boot))
-    return [m[int(0.025 * n_boot)], m[int(0.975 * n_boot) - 1]]
+    m = [statistics.mean(rng.choices(values, k=len(values))) for _ in range(n_boot)]
+    return [percentile(m, 0.025), percentile(m, 0.975)]
 
 
 def boot_diff(a, b, n_boot, rng):
     if len(a) < 2 or len(b) < 2:
         return None
-    m = sorted(statistics.mean(rng.choices(b, k=len(b))) - statistics.mean(rng.choices(a, k=len(a)))
-               for _ in range(n_boot))
-    return [m[int(0.025 * n_boot)], m[int(0.975 * n_boot) - 1]]
+    m = [statistics.mean(rng.choices(b, k=len(b))) - statistics.mean(rng.choices(a, k=len(a)))
+         for _ in range(n_boot)]
+    return [percentile(m, 0.025), percentile(m, 0.975)]
 
 
 def paired_stats(diffs, n_boot, rng):
@@ -327,11 +309,14 @@ def main(argv=None):
     if args.out and len(pairs) > 1:
         ap.error("--out writes one pair's table")
     key = tuple(args.key.split(","))
-    where = [parse_where(w) for w in args.where]
+    try:
+        where = parse_where(args.where)
+    except ValueError as exc:
+        ap.error(str(exc))
     logs = {}
     for spec in args.accept_server_log:
         label, path = spec.split("=", 1)
-        logs.setdefault(label, {}).update(server_acceptance(path))
+        logs.setdefault(label, {}).update(acceptance_by_rid([path]))
     for (la, pa), (lb, pb) in pairs:
         A, B = load(pa, key, where), load(pb, key, where)
         server_matched = {lab: [use_server_acceptance(R, logs[lab]), len(R)]

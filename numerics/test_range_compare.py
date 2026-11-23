@@ -266,6 +266,7 @@ REF = [100.0, 101.0, 102.0, 103.0, 104.0]
 
 def test_percentile_and_bootstrap_are_fixed_by_seed() -> None:
     assert rc.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.5 and rc.percentile([5.0], 0.975) == 5.0
+    assert rc.percentile([4.0, 1.0, 3.0, 2.0], 0.25) == 1.75 and rc.percentile([], 0.5) is None
     assert rc.bootstrap_ratio(WON, REF) == rc.bootstrap_ratio(WON, REF)
     assert rc.bootstrap_ratio_paired({1: 1.0}, {2: 1.0}) is None
 

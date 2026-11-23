@@ -12,6 +12,7 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
   "Accept"                      from `Req: RID Finish! Accept_num_tokens_avg: X` (the finish line of a
                                 TokenSpeed that logs no RequestStats), with "rid" and "acc_len" = X, the
                                 request's mean tokens per speculative verify step.
+acceptance_by_rid(paths) maps each request id to its acceptance ("Accept", else RequestStats acc_len).
 LogTail follows a growing log from its current end.
 dp_spread(events, windows) counts new sequences per attention-DP rank ("#new-seq" of "Prefill batch."
 lines) inside each named time window [start, end).
@@ -49,6 +50,9 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            least-squares line final_step_ms = fixed + per_token x tail_tokens over group medians.
 """
 import collections, datetime as dt, os, re, statistics, sys, time
+
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "numerics"))
+from range_compare import percentile  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS_PATTERNS = [
@@ -143,6 +147,20 @@ def parse_line(raw):
 
 def parse_lines(lines):
     return [e for e in (parse_line(l) for l in lines) if e is not None]
+
+
+def acceptance_by_rid(paths):
+    """{rid: acceptance} from the server logs at paths: the "Accept" line's acc_len, or a Finish line's RequestStats
+    acc_len (a request's mean tokens per speculative verify step)."""
+    out = {}
+    for path in paths:
+        with open(path, errors="replace") as fh:
+            for e in parse_lines(fh):
+                if e["kind"] == "Accept":
+                    out[e["rid"]] = e["acc_len"]
+                elif e["kind"] == "Finish" and isinstance((e.get("stats") or {}).get("acc_len"), float):
+                    out[e["rid"]] = e["stats"]["acc_len"]
+    return out
 
 
 class LogTail:
@@ -253,14 +271,6 @@ def line_gaps_main(argv):
     return 0
 
 
-def quantile(xs, q):
-    xs = sorted(xs)
-    if not xs:
-        return None
-    k = (len(xs) - 1) * q; i = int(k)
-    return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
-
-
 def prefill_point(events, prompt_tokens, requests, start=None, end=None):
     """Server-side metrics of one prefill point from parsed events in [start, end) (see `prefill` in
     the module docstring). Chunk time = gap from a rank's Prefill/Mix line to its next line (lines are
@@ -296,7 +306,7 @@ def prefill_point(events, prompt_tokens, requests, start=None, end=None):
             "first_prefill_line_s": P[0]["ts"], "last_prefill_line_s": P[-1]["ts"],
             "last_chunk_tokens": P[-1].get("new_token", 0),
             "chunk_time_median_s": med, "chunk_time_source": src,
-            "chunk_time_p10_s": quantile(pp, .1), "chunk_time_p90_s": quantile(pp, .9),
+            "chunk_time_p10_s": percentile(pp, .1), "chunk_time_p90_s": percentile(pp, .9),
             "chunk_time_by_tokens": {str(k): {"n": len(v), "median_s": statistics.median(v)}
                                      for k, v in sorted(by.items())},
             "prefill_span_s": span, "prefill_tok_per_s": tok / span if span else None,
@@ -358,8 +368,8 @@ def chunk_cost(points):
                        "B1" if p["requests"] == 1 else "B>=4")
                 pool.setdefault(key, []).append(g["dt_s"])
     return [{"chunk_tokens": k[0], "new_seq": k[1], "completes_request": k[2], "batch_class": k[3], "n": len(v),
-             "median_ms": 1e3 * statistics.median(v), "p10_ms": 1e3 * quantile(v, .1),
-             "p90_ms": 1e3 * quantile(v, .9), "tok_per_s": k[0] / statistics.median(v)}
+             "median_ms": 1e3 * statistics.median(v), "p10_ms": 1e3 * percentile(v, .1),
+             "p90_ms": 1e3 * percentile(v, .9), "tok_per_s": k[0] / statistics.median(v)}
             for k, v in sorted(pool.items())]
 
 

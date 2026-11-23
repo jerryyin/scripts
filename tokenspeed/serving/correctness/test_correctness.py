@@ -120,8 +120,10 @@ def test_compare_outputs_pairs_by_prompt_key_with_loops() -> None:
             {"idx": 3, "concurrency": 1, "prompt_sha256": "p", "text": "xw", "reencoded_ids": loop[:5] + [9] * 75,
              "acc_len": 4.0}]))
         A = co.load(str(a), ("prompt_sha256",), [("concurrency", "=", "1")])
-        B = co.load(str(b), ("prompt_sha256",), [co.parse_where("concurrency=1")])
-        assert len(co.load(str(a), ("prompt_sha256",), [co.parse_where("text~^x")])) == 1
+        B = co.load(str(b), ("prompt_sha256",), co.parse_where(["concurrency=1"]))
+        assert len(co.load(str(a), ("prompt_sha256",), co.parse_where(["text~^x"]))) == 1
+        # a record without the field is kept (range_compare's --where)
+        assert len(co.load(str(a), ("prompt_sha256",), co.parse_where(["phase=measured-1"]))) == 2
         rows = co.compare(A, B)
     assert len(rows) == 1 and rows[0]["first_diff_token"] == 5 and not rows[0]["exact"]
     assert rows[0]["loop_period"] == (2, 1) and rows[0]["acc_len"] == (5.8, 4.0)

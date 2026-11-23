@@ -150,7 +150,7 @@ import argparse, collections, csv, datetime as dt, hashlib, itertools, json, mat
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "profiling"))
-from batch_log import parse_lines, parse_ts  # noqa: E402
+from batch_log import acceptance_by_rid, parse_lines, parse_ts, percentile  # noqa: E402
 from gpu_activity import (load_samples, own_kfd_pids, parse_iso, window_activity, window_state,  # noqa: E402
                           window_timeline)
 
@@ -166,13 +166,6 @@ def sha256(p):
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
     return h.hexdigest()
-
-
-def pct(xs, q):
-    if not xs:
-        return None
-    xs = sorted(xs); k = (len(xs) - 1) * q; i = int(k)
-    return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
 
 
 def busiest_rank(ranks):
@@ -402,7 +395,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
             "estimated_rank_end_s": rank_end - t0, "end_lag_s": t1 - rank_end,
             "prefill_chunks": len(pf), "prefill_tokens": ptok, "requests_by_prefill_tokens": nreq,
             "chunk_tokens_hist": dict(collections.Counter(e.get("new_token", 0) for e in pf)),
-            "chunk_time_s": {"median": cmed_all, "p10": pct(allc, .1), "p90": pct(allc, .9), "n": len(allc)},
+            "chunk_time_s": {"median": cmed_all, "p10": percentile(allc, .1), "p90": percentile(allc, .9), "n": len(allc)},
             "chunk_time_by_size_median_s": {str(k): statistics.median(v) for k, v in sorted(bysize.items())},
             "prefill_time_s": tp, "prefill_time_chunk_model_s": len(pf) * cmed_all,
             "prefill_overhead_vs_chunk_model_s": tp - len(pf) * cmed_all, "prefill_tok_per_s_while_prefilling": ptok / tp if tp else None,
@@ -620,18 +613,6 @@ def _repetition(phase, prefix):
     return None
 
 
-def _server_acceptance(paths):
-    """{rid: acc_len} from batch_log "Accept" lines (and RequestStats acc_len) of the server logs."""
-    out = {}
-    for path in paths:
-        for e in parse_lines(open(path, errors="replace")):
-            if e["kind"] == "Accept":
-                out[e["rid"]] = e["acc_len"]
-            elif e["kind"] == "Finish" and isinstance((e.get("stats") or {}).get("acc_len"), float):
-                out[e["rid"]] = e["stats"]["acc_len"]
-    return out
-
-
 def _range(values):
     v = [x for x in values if x is not None]
     return {"median": statistics.median(v), "min": min(v), "max": max(v), "n": len(v)} if v else None
@@ -651,7 +632,7 @@ def accept_points(label, bench, decomp, interval, server_log=None, requests=None
     for row in point_table([decomp], interval) if decomp else []:
         steps[row["label"]] = row["decode_round_s_upper_median"]
     count = collections.Counter(r["phase"] for r in bj["results"])
-    server = _server_acceptance(server_log) if server_log else {}
+    server = acceptance_by_rid(server_log) if server_log else {}
     per_req = collections.defaultdict(list)
     for path in requests or []:
         for line in open(path):
