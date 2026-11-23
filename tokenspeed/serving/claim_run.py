@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run several serving configurations on one GPU claim: quiet wait, clean-tree check, manage_server, stop.
+"""Run several serving configurations on one GPU claim: quiet wait, manage_server (clean-tree check), stop.
 
   claim_run.py run --out OUT --queue DIR --gpu-count N --host-gpu-count N --amd-tracking AT
                    --tokenspeed TS --tokenspeed-commit SHA --deadline-utc ISO --quiet-seconds S
@@ -17,15 +17,18 @@
       (RLIMIT_CORE 0, inherited by the server). Per configuration: skip it if OUT/STOP exists or fewer
       than its --min-seconds remain before the deadline; require no --forbid-env match in the job
       environment; wait until the claimed GPUs have had no other user's process for --quiet-seconds
-      (amd-tracking gpu_admission.observe_gpu_set; own = this job's process group and
-      GPU_ADMISSION_OWN_PGIDS); require the TokenSpeed worktree at --tokenspeed-commit with no change
-      (`git status --porcelain` empty); run the emitted job in its own session (killed at the
-      deadline, SIGKILL --stop-grace-seconds later); stop that session's leftovers and, if
-      `manage_server.py status` says it is still up, the server it started (`manage_server.py stop`).
-      OUT/STOP stops the remaining configurations; it is written when another user's process shows
-      up during the quiet wait of a --stop-on-foreign configuration (an unguarded start is not
-      safe), when the tree is not clean, when a --forbid-env variable is set, and when the server
-      log has an out-of-memory line. With --start-method guarded the job needs GPU_HOLD_GATE (gpu-queue's
+      (amd-tracking `gpu_admission.py quiet`, giving up --min-seconds before the deadline; own = this
+      job's process group and GPU_ADMISSION_OWN_PGIDS; verdict in OUT/quiet-NAME.json); run the
+      emitted job in its own session (killed at the deadline, SIGKILL --stop-grace-seconds later),
+      whose `manage_server.py run` refuses to start unless the TokenSpeed worktree is at
+      --tokenspeed-commit with no change (emitted with --require-tokenspeed-commit and
+      --require-clean-tokenspeed; run.json status tokenspeed-source-refused); stop that session's
+      leftovers and, if `manage_server.py status` says it is still up, the server it started
+      (`manage_server.py stop`). OUT/STOP stops the remaining configurations; it is written when
+      another user's process shows up during the quiet wait of a --stop-on-foreign configuration
+      (an unguarded start is not safe; the wait ends at that sighting), when manage_server refused
+      the tree, when a --forbid-env variable is set, and when the server log has an out-of-memory
+      line. With --start-method guarded the job needs GPU_HOLD_GATE (gpu-queue's
       --hold-gate-ranks) and puts board/memgate first on PYTHONPATH. Per configuration result:
       OUT/claim-run.json. Exit 0 when every configuration ran with exit 0.
   claim_run.py post OUT/plan.json
@@ -44,18 +47,14 @@
 Every campaign value (paths, configurations, commit, deadline, GPU counts, quiet time) is an input,
 none has a default. The tool runs owners and does not redo their jobs: board/gpu-queue claims the
 GPUs, manage_server.py emits, runs and stops the server (and checks the client venv against the
-lock), gpu_admission.py says who is on a GPU, e2e_decompose.py and range_compare.py analyse.
-Two steps are here only until their owners offer them: the sustained quiet wait (a loop over
-gpu_admission.observe_gpu_set; belongs in gpu_admission.py) and the clean-tree check (belongs in
-manage_server.py, which records the TokenSpeed head but does not refuse a changed tree).
+lock, and refuses a TokenSpeed tree not clean or not at the commit), gpu_admission.py waits for the
+GPUs to be quiet, e2e_decompose.py and range_compare.py analyse.
 """
 from __future__ import annotations
 
 import argparse
 import dataclasses
 import datetime as dt
-import functools
-import importlib.util
 import json
 import os
 import re
@@ -75,9 +74,8 @@ E2E_DECOMPOSE = HERE / 'e2e_decompose.py'
 RANGE_COMPARE = TOOLKIT / 'numerics' / 'range_compare.py'
 MANAGE_SERVER = 'skills/inference_engine/benchmark/scripts/manage_server.py'  # in --amd-tracking
 GPU_ADMISSION = 'apps/shared/gpu_admission.py'  # in --amd-tracking
-KFD_TOPOLOGY = Path('/sys/class/kfd/kfd/topology/nodes')
-KFD_PROCESSES = Path('/sys/class/kfd/kfd/proc')
-PROC = Path('/proc')
+QUIET_EXIT = {0: 'quiet', 3: 'foreign', 4: 'deadline'}  # gpu_admission.py quiet's exit status per verdict
+SOURCE_REFUSED = 'tokenspeed-source-refused'  # manage_server run.json status: tree not clean / not at the commit
 OOM = re.compile(r'OutOfMemory|out of memory|HIPCachingAllocator.*OOM')
 TIMED_OUT = 124  # the exit status coreutils `timeout` gives a command it stopped
 QUEUE_POLL_SECONDS = 30.0
@@ -140,6 +138,10 @@ class Plan:
         return str(Path(self.amd_tracking) / MANAGE_SERVER)
 
     @property
+    def gpu_admission(self) -> str:
+        return str(Path(self.amd_tracking) / GPU_ADMISSION)
+
+    @property
     def deadline(self) -> float:
         return parse_deadline(self.deadline_utc)
 
@@ -189,7 +191,22 @@ def emit_argv(plan: Plan, cfg: Config) -> list[str]:
         argv += ['--evalscope-lock', plan.evalscope_lock]
     for env_file in plan.env_files:
         argv += ['--env-file', env_file]
+    argv += ['--require-tokenspeed-commit', plan.tokenspeed_commit, '--require-clean-tokenspeed']
     return argv + ['--start-method', plan.start_method, '--deadline-utc', plan.deadline_utc]
+
+
+def quiet_file(plan: Plan, cfg: Config) -> Path:
+    return Path(plan.out) / f'quiet-{cfg.name}.json'
+
+
+def quiet_argv(plan: Plan, cfg: Config, gpus: str, own_pgids: list[str]) -> list[str]:
+    """gpu_admission.py quiet on the claimed GPUs, giving up when fewer than cfg.min_seconds would remain."""
+    argv = [sys.executable, plan.gpu_admission, 'quiet', '--gpus', gpus, '--seconds', f'{plan.quiet_seconds:g}',
+            '--give-up-utc', utc(plan.deadline - cfg.min_seconds), '--poll-seconds', f'{plan.quiet_poll_seconds:g}',
+            '--gpu-count', str(plan.host_gpu_count)]
+    for pgid in own_pgids:
+        argv += ['--own-pgid', pgid]
+    return argv + (['--stop-on-foreign'] if cfg.stop_on_foreign else [])
 
 
 def job_argv(plan_path: Path) -> list[str]:
@@ -275,7 +292,7 @@ def summarize_step(plan: Plan, cfg: Config, client: str) -> Step:
 # ---------------------------------------------------------------- the host (replaced in tests)
 
 class Host:
-    """Everything the tool does to the machine: clock, processes, git and the GPU observation."""
+    """Everything the tool does to the machine: clock and processes."""
 
     def now(self) -> float:
         return time.time()
@@ -297,13 +314,6 @@ class Host:
     def capture(self, argv: list[str]) -> str:
         return subprocess.run(argv, capture_output=True, text=True, check=True).stdout
 
-    def foreign(self, plan: Plan, gpu_ids: list[int], own_pgids: list[int]) -> list[str]:
-        """Other users' processes on gpu_ids, as PID:hipGPU (gpu_admission.observe_gpu_set)."""
-        admission = load_module(Path(plan.amd_tracking) / GPU_ADMISSION)
-        seen = admission.observe_gpu_set(KFD_TOPOLOGY, KFD_PROCESSES, PROC, plan.host_gpu_count, gpu_ids,
-                                         own_pgids=own_pgids)
-        return [f"{e['pid']}:hip{gpu}" for gpu, entries in seen['owners'].items() for e in entries]
-
     def run_job(self, script: str, env: dict[str, str], timeout: float, grace: float) -> int:
         """bash SCRIPT in its own session; at the timeout SIGTERM the session, SIGKILL grace s later.
         Whatever is left in the session after the script exits is stopped the same way."""
@@ -317,16 +327,6 @@ class Host:
             return TIMED_OUT
         stop_group(child.pid, grace)
         return rc
-
-
-@functools.cache
-def load_module(path: Path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'cannot load {path}')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def stop_group(pgid: int, grace: float) -> None:
@@ -347,43 +347,8 @@ def stop_group(pgid: int, grace: float) -> None:
 
 # ---------------------------------------------------------------- in the claim
 
-@dataclasses.dataclass
-class QuietWait:
-    status: str  # 'quiet' or 'deadline'
-    waited_s: float
-    foreign: list[str]  # every distinct foreign set seen, in order
-
-
-def quiet_wait(plan: Plan, host: Host, gpu_ids: list[int], own: list[int], need_seconds: float) -> QuietWait:
-    """Wait until gpu_ids have had no foreign process for plan.quiet_seconds; give up ('deadline') as
-    soon as fewer than need_seconds would remain before the deadline."""
-    start = quiet_since = host.now()
-    seen: list[str] = []
-    while True:
-        now = host.now()
-        if plan.deadline - now < need_seconds:
-            log(f'quiet wait: {plan.deadline - now:.0f} s left before {plan.deadline_utc}, needs {need_seconds:g} s')
-            return QuietWait('deadline', now - start, seen)
-        found = ' '.join(host.foreign(plan, gpu_ids, own))
-        if found:
-            quiet_since = now
-            if not seen or seen[-1] != found:
-                log(f'quiet wait: foreign {found}')
-                seen.append(found)
-        if now - quiet_since >= plan.quiet_seconds:
-            log(f'quiet for {plan.quiet_seconds:g} s on GPUs {gpu_ids}')
-            return QuietWait('quiet', now - start, seen)
-        host.sleep(plan.quiet_poll_seconds)
-
-
-def tree_problem(plan: Plan, host: Host) -> str | None:
-    head = host.capture(['git', '-C', plan.tokenspeed, 'rev-parse', 'HEAD']).strip()
-    if head != plan.tokenspeed_commit:
-        return f'TokenSpeed {plan.tokenspeed} is at {head}, not {plan.tokenspeed_commit}'
-    changes = host.capture(['git', '-C', plan.tokenspeed, 'status', '--porcelain']).strip()
-    if changes:
-        return f'TokenSpeed {plan.tokenspeed} has changes: {changes.splitlines()[:5]}'
-    return None
+def read_json(path: Path) -> dict | None:
+    return json.loads(path.read_text()) if path.is_file() else None
 
 
 def env_problem(plan: Plan, env: dict[str, str]) -> str | None:
@@ -454,20 +419,30 @@ class Claim:
         if problem:
             mark_stop(plan, problem)
             return {'status': 'not-run', 'reason': problem}
-        wait = quiet_wait(plan, self.host, self.gpus, self.own, cfg.min_seconds)
-        result = {'quiet_wait': dataclasses.asdict(wait)}
-        if wait.status != 'quiet':
-            return {**result, 'status': 'not-run', 'reason': 'deadline during the quiet wait'}
-        if wait.foreign and cfg.stop_on_foreign:
-            mark_stop(plan, f'guard needed: foreign process during the quiet wait of {cfg.name} ({wait.foreign})')
-            return {**result, 'status': 'not-run', 'reason': 'foreign process during the quiet wait'}
-        problem = tree_problem(plan, self.host)
-        if problem:
+        verdict_path = quiet_file(plan, cfg)
+        rc = self.host.call(Step(quiet_argv(plan, cfg, ','.join(map(str, self.gpus)), list(map(str, self.own))),
+                                 verdict_path))
+        verdict = read_json(verdict_path)
+        if rc not in QUIET_EXIT or verdict is None or verdict.get('status') != QUIET_EXIT[rc]:
+            problem = f'gpu_admission.py quiet failed (exit {rc}; {verdict_path})'
             mark_stop(plan, problem)
-            return {**result, 'status': 'not-run', 'reason': problem}
-        log(f'{cfg.name}: TokenSpeed {plan.tokenspeed_commit} clean; running {cfg.job}')
+            return {'status': 'not-run', 'reason': problem}
+        result = {'quiet_wait': {'verdict': str(verdict_path),
+                                 **{k: verdict[k] for k in ('status', 'waited_seconds', 'foreign_pids')}}}
+        if verdict['status'] == 'deadline':
+            return {**result, 'status': 'not-run', 'reason': 'deadline during the quiet wait'}
+        if verdict['status'] == 'foreign':
+            mark_stop(plan, f'guard needed: foreign process during the quiet wait of {cfg.name} '
+                            f'(PIDs {verdict["foreign_pids"]})')
+            return {**result, 'status': 'not-run', 'reason': 'foreign process during the quiet wait'}
+        log(f'{cfg.name}: quiet; running {cfg.job}')
         rc = self.host.run_job(cfg.job, job_environment(plan, self.env), plan.deadline - self.host.now(),
                                plan.stop_grace_seconds)
+        run = read_json(Path(cfg.run_dir) / 'run.json') or {}
+        if run.get('status') == SOURCE_REFUSED:
+            problem = f'manage_server refused the TokenSpeed tree: {run.get("error")}'
+            mark_stop(plan, problem)
+            return {**result, 'status': 'not-run', 'reason': problem, 'rc': rc}
         result.update(status='ran', rc=rc, stop_rc=self.stop_server(cfg))
         oom = oom_lines(Path(cfg.run_dir) / 'server.stderr.log')
         if oom:
@@ -528,17 +503,17 @@ def print_dry_run(plan: Plan, plan_path: Path) -> None:
         print(f'HIP_VISIBLE_DEVICES= {q(emit_argv(plan, cfg))} > {cfg.job}.emit.json && bash -n {cfg.job}')
     print('# 2. one claim: queue the in-claim job')
     print(q(queue_argv(plan, plan_path)))
-    print(f'# 3. in the claim (ulimit -c 0), per configuration, unless {plan.stop_file} exists:')
+    print(f'# 3. in the claim (ulimit -c 0), per configuration, unless {plan.stop_file} exists '
+          '(CLAIMED_GPUS: GPU_QUEUE_HIP or HIP_VISIBLE_DEVICES; --own-pgid OWN_PGID once per GPU_ADMISSION_OWN_PGIDS '
+          'entry and for the claim job\'s process group):')
     for cfg in plan.configs:
         print(f'#   {cfg.name}: needs {cfg.min_seconds} s before {plan.deadline_utc}'
               + (f'; no job environment variable matches {plan.forbid_env}' if plan.forbid_env else '')
-              + f'; quiet wait {plan.quiet_seconds:g} s (no foreign KFD process on the claimed GPUs'
-              + ('; any foreign process seen: STOP, guard needed' if cfg.stop_on_foreign else '') + ')')
-        print(f'git -C {plan.tokenspeed} rev-parse HEAD  # == {plan.tokenspeed_commit}')
-        print(f'git -C {plan.tokenspeed} status --porcelain  # empty')
+              + ('; exit 3 (foreign): STOP, guard needed' if cfg.stop_on_foreign else '') + '; exit 4 (deadline): skip')
+        print(f'{q(quiet_argv(plan, cfg, "CLAIMED_GPUS", ["OWN_PGID"]))} > {quiet_file(plan, cfg)}')
         pythonpath = f'PYTHONPATH={MEMGATE}:$PYTHONPATH ' if plan.start_method == 'guarded' else ''
         print(f'{pythonpath}setsid bash {cfg.job}  # killed at {plan.deadline_utc}, '
-              f'SIGKILL {plan.stop_grace_seconds:g} s later')
+              f'SIGKILL {plan.stop_grace_seconds:g} s later; run.json status {SOURCE_REFUSED}: STOP')
         print(f'{q(status_argv(plan, cfg))}  # if server.json exists')
         print(f'{q(stop_argv(plan, cfg))} > {Path(plan.out) / f"stop-{cfg.name}.json"}  # if still starting/running')
         print(f'grep -E {shlex.quote(OOM.pattern)} {Path(cfg.run_dir) / "server.stderr.log"}  # a line: STOP')
@@ -641,9 +616,11 @@ def add_run_arguments(r: argparse.ArgumentParser) -> None:
             ('--host-gpu-count', int, 'GPUs on the host (gpu_admission numbering)'),
             ('--amd-tracking', str, 'amd-tracking checkout (manage_server.py, gpu_admission.py, configurations)'),
             ('--tokenspeed', str, 'TokenSpeed worktree the server runs'),
-            ('--tokenspeed-commit', str, 'full commit the worktree must be at, without changes'),
+            ('--tokenspeed-commit', str, 'full commit the worktree must be at, without changes '
+                                         '(manage_server --require-tokenspeed-commit, --require-clean-tokenspeed)'),
             ('--deadline-utc', str, 'ISO 8601 with zone: emitted into every job, ends waits and jobs'),
-            ('--quiet-seconds', float, 'no foreign process on the claimed GPUs for this long before each start'),
+            ('--quiet-seconds', float, 'no foreign process on the claimed GPUs for this long before each start '
+                                      '(gpu_admission.py quiet --seconds)'),
             ('--model-path', str, 'checkpoint (manage_server --model-path)'),
             ('--client-venv', str, 'EvalScope venv (manage_server --client-venv)'),
             ('--confirm', int, 'gpu-queue serve --confirm, if this starts the serve'),
@@ -663,7 +640,7 @@ def add_run_arguments(r: argparse.ArgumentParser) -> None:
                    help='refuse to start (STOP) when a NAME=VALUE of the job environment matches')
     r.add_argument('--stop-on-foreign', action='append', default=[], metavar='NAME',
                    help="STOP (guard needed) when a foreign process appears during NAME's quiet wait")
-    r.add_argument('--quiet-poll-seconds', type=float, default=3.0)
+    r.add_argument('--quiet-poll-seconds', type=float, default=3.0, help='gpu_admission.py quiet --poll-seconds')
     r.add_argument('--hold-busy-free-cap', type=float, metavar='GIB', help='gpu-queue (needed when guarded)')
     r.add_argument('--hold-gate-ranks', type=int, metavar='N', help='gpu-queue (needed when guarded)')
     p = r.add_argument_group('post-processing')
