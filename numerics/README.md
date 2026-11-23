@@ -13,7 +13,8 @@ numerics/
 ├── genRandInput.py     # generate random binary inputs of a given shape/dtype, or a
 │                       #   buffer of special values; also dumps
 ├── range_compare.py    # repeated measurements: median [min,max] per group, and ratios
-│                       #   between configurations with a range-overlap verdict
+│                       #   between configurations with a range-overlap verdict;
+│                       #   decide: bootstrap interval of a ratio of medians (C=1/2 rule)
 ├── sensitivity_classify.py  # does a difference matter, and which of two arms is wrong
 └── ulp_magnitudes.py   # bfloat16 difference in ULPs, absolute and relative; no verdict
 ```
@@ -49,6 +50,48 @@ several configurations and the question is which is faster.
   present; a ratio whose table lacks the row's key is left out (JSON: `consensus.NAME` =
   `{verdict, n}`, `n` the ratios present). Use it to compare layouts by the pooled ratio and every
   start-pair ratio at once. Without it the output is unchanged. Tests: `test_range_compare.py`.
+
+  `decide` is the C=1/2 deciding rule over per-repetition tables (`--table LABEL=PATH` read like
+  `compare`'s, one row per repetition, `--rows-field`/`--where` as there; `--rep-field`, default
+  `phase`, names the repetition index). Per `--key` point and `--ratio X/REF`: r = median(X) /
+  median(REF) of the one `--metric`; its 95 % percentile bootstrap interval (`--resamples 10000`,
+  `--seed 0`, one `random.Random(seed)`; each resample draws X's then REF's repetitions with
+  replacement, unpaired; percentiles by linear interpolation); verdict `won` (lower bound > 1),
+  `lost` (upper bound < 1), else `no verdict`; the paired interval (indices drawn jointly) as a
+  sensitivity column when both tables hold the same indices. Three flags read from the owners'
+  outputs, never recomputed:
+  - acceptance: in the `summary[label=X, reference=REF, concurrency=C]` row of
+    `tokenspeed/serving/e2e_decompose.py --accept-split` JSON (`--accept-split PATH`), the share
+    `accept_part_ms.median / latency_gap_ms.median` (median over repetitions of the acceptance
+    part over median over repetitions of the latency gap, a ratio of medians), flagged when its
+    absolute value exceeds `--accept-share-limit` (0.10; exactly 0.10 is not flagged); when
+    `latency_gap_ms.median` is 0 the share is `undefined` and flagged. The row's
+    `accept_share.median` (the median of per-repetition quotients, ill-conditioned when one
+    repetition's gap is near 0) is printed beside it as information and never used by the rule;
+    missing medians make the point `incomplete`;
+  - looping: in `tokenspeed/serving/correctness/compare_outputs.py --accept-test` JSONL
+    (`--accept-test C=PATH`, one per point), the row whose `accept_test` holds both labels;
+    `accept_test[X].looping_wilson95` and `accept_test[REF].looping_wilson95` (with
+    `looping`/`outputs`/`looping_fraction` shown), flagged when the intervals are disjoint;
+  - canonical: `--canonical-table X=PATH --canonical-table REF=PATH` (the 3-repetition canonical
+    tables, same `--rows-field`/`--where`), `compare --bounds`'s range verdict mapped to
+    won/lost/no verdict, flagged when it is won and the deciding verdict lost or the reverse.
+  `--label LABEL=NAME` names a table label as the owners' outputs name it. Run word: the verdict
+  when no flag, `flagged` when any flag, `incomplete` when a flag's input is missing. With a second
+  deciding run (`--rerun-table`, `--rerun-accept-split`, `--rerun-accept-test`) both runs are
+  printed and the final word of a flagged first run is the second run's word, or `no verdict` when
+  it is flagged too; an unflagged first run stands. `--format md|json`.
+
+  ```bash
+  python3 range_compare.py decide --key concurrency --metric "summary.Output Throughput (tok/s)" \
+      --rows-field results --where 'phase~^measured-' --ratio X/TP4 --label TP4=tp4 \
+      --table X=x/accept-random-c12/tokenspeed/benchmark.json \
+      --table TP4=tp4/accept-random-c12/tokenspeed/benchmark.json \
+      --accept-split accept-split-accept-random-c12.json \
+      --accept-test 1=accept-test-accept-random-c12-c1.jsonl --accept-test 2=accept-test-accept-random-c12-c2.jsonl \
+      --canonical-table X=x/canonical-L50000-O500/tokenspeed/benchmark.json \
+      --canonical-table TP4=tp4/canonical-L50000-O500/tokenspeed/benchmark.json
+  ```
 
   ```bash
   python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \
