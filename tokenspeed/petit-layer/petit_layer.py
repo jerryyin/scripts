@@ -29,6 +29,8 @@ candidate passes the test's check before it is timed, and repetitions interleave
 --stage2-tile n256|n128 forces stage 2's tile (C5b's stage2_n128 argument of Kernels; TokenSpeed with
 TOKENSPEED_PETIT_STAGE2_N128 support), checked in every capture and labelled 'stage2_tile=...' in --rows,
 so --project and range_compare compare it against the same switch set at Petit's own tile.
+--post fused-add|fused-copy-add runs C3 (the post op folded into Combine through TokenSpeed's
+gluon.petit_combine_post); its rows keep post=add|copy-add and are labelled 'post=fused'.
 --layers N times N calls per graph replay on N layers (per-call time = replay / N), as a decode step
 replays consecutive layers; --weights random gives those layers distinct random MXFP4 weights (no
 reference then for the timed inputs; the test's check still runs on the test's weights).
@@ -127,13 +129,16 @@ def switches_label(switches: dict) -> str:
     return ";".join(f"{k[len(SWITCH_PREFIX):]}={v}" for k, v in sorted(switches.items())) or "off"
 
 
-def run_label(switches: dict, stage2_tile: str = "petit") -> str:
-    """switches_label plus a forced --stage2-tile ('stage2_tile=n128'), so a forced run keeps its own
-    --rows / --project / range_compare key against the same switch set at Petit's own tile."""
+def run_label(switches: dict, stage2_tile: str = "petit", post: str = "none") -> str:
+    """switches_label plus a forced --stage2-tile ('stage2_tile=n128') and a fused --post ('post=fused'),
+    so such a run keeps its own --rows / --project / range_compare key against the same switch set at
+    Petit's own tile and with the model's separate post op."""
+    extra = ([f"stage2_tile={stage2_tile}"] if stage2_tile not in (None, "petit") else []) + \
+        (["post=fused"] if (post or "").startswith("fused-") else [])
     label = switches_label(switches)
-    if stage2_tile in (None, "petit"):
+    if not extra:
         return label
-    return ("" if label == "off" else label + ";") + f"stage2_tile={stage2_tile}"
+    return ";".join(([] if label == "off" else [label]) + extra)
 # --stages: timing points per call, in stream order, and the stage between each point and the next.
 STAGE_MARKS = ("petit.begin", "petit.s1", "petit.s2", "petit.comb", "petit.comb_end", "petit.end")
 STAGES = ("prep", "s1", "s2", "comb", "post")
@@ -167,8 +172,9 @@ def record_rows(record: dict, source: str = "") -> list[dict]:
                     "tokenspeed_commit": record["tokenspeed"].get("commit", ""),
                     "test_sha256": record["tokenspeed"]["test"]["sha256"], "source": source,
                     **expert_columns(r), **stage_columns(r.get("stages_ms", {}).get(mode), k),
-                    "petit_switches": run_label(record.get("petit_switches", {}), args.get("stage2_tile", "petit")),
-                    "post": args.get("post") or "none"})
+                    "petit_switches": run_label(record.get("petit_switches", {}), args.get("stage2_tile", "petit"),
+                                                args.get("post") or "none"),
+                    "post": (args.get("post") or "none").removeprefix("fused-")})
     return rows
 
 
@@ -326,9 +332,11 @@ def install_stage_marks() -> None:
     # own module; Invoke resolves the launch objects in that module's globals, so patch them there.
     mega_moe = sys.modules[package.MegaMoESolutionAdapter.__module__]
     for name, before, after in (("MegaMoEStage1", "petit.s1", None), ("MegaMoEStage2", "petit.s2", None),
-                                ("MegaMoECombine", "petit.comb", "petit.comb_end")):
-        kernel = getattr(mega_moe, name)
-        if not isinstance(kernel, _MarkedLaunch):
+                                ("MegaMoECombine", "petit.comb", "petit.comb_end"),
+                                # the fused-post combine (--post fused-*), in a TokenSpeed that has it
+                                ("MegaMoECombineResidual", "petit.comb", "petit.comb_end")):
+        kernel = getattr(mega_moe, name, None)
+        if kernel is not None and not isinstance(kernel, _MarkedLaunch):
             setattr(mega_moe, name, _MarkedLaunch(kernel, before, after))
 
 
@@ -574,7 +582,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     return a
 
 
-POST_MODES = ("none", "add", "copy-add")
+POST_MODES = ("none", "add", "copy-add", "fused-add", "fused-copy-add")
+# fused-*: the same post op folded into Petit's combine through TokenSpeed's gluon.petit_combine_post
+# (TOKENSPEED_PETIT_FUSE_POST in the model). Rows carry post=add / copy-add and the label 'post=fused',
+# so --project and range_compare compare it against the model's separate post op at the same switches.
 
 
 def post_geometry(mode: str, counts: list[int], rank: int) -> tuple[int, int]:
@@ -583,6 +594,7 @@ def post_geometry(mode: str, counts: list[int], rank: int) -> tuple[int, int]:
     copy-add (tp4ep4-petit, _forward_petit_tp_attention): out and shared hold every rank's rows (the
     replicated T = sum(counts) rows), this rank's routed rows land at sum(counts[:rank]); a 0-row rank
     still copies its shared rows and adds nothing."""
+    mode = mode.removeprefix("fused-")
     if mode == "add":
         return counts[rank], 0
     if mode == "copy-add":
@@ -590,13 +602,28 @@ def post_geometry(mode: str, counts: list[int], rank: int) -> tuple[int, int]:
     raise ValueError(f"post mode {mode!r}: use add or copy-add")
 
 
-def with_post(fn, mode: str, shared, out, start: int, count: int):
+def with_post(fn, mode: str, shared, out, start: int, count: int, combine_post=None):
     """fn followed by the model's post op on (shared, out); returns this rank's rows of out, so the
     timed check compares them with Petit's reference. The caller's shared is zeros, which makes the
     post op exact (x + 0 == x) while its kernels are the model's (their time does not depend on values)."""
     import torch
     if mode == "none":
         return fn
+    if mode.startswith("fused-"):
+        if combine_post is None:
+            raise RuntimeError(f"--post {mode}: this TokenSpeed has no gluon.petit_combine_post")
+
+        def fused():
+            if mode == "fused-add":  # Combine writes out = bf16(shared + routes)
+                with combine_post(shared, out=out):
+                    fn()
+                return out
+            out.copy_(shared)  # the shared partial, then Combine adds this rank's rows in place
+            rows = out[start:start + count]
+            with combine_post(rows, out=rows):
+                fn()
+            return rows
+        return fused
 
     def call():
         routed = fn()
@@ -773,8 +800,11 @@ def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_ove
                "post": post, "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
                "delta_us": round(delta_us, 2)}
         if profile == "dsv41_flash":
-            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", sw))
-            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, "none", baseline))
+            # a fused post exists only against the post op it replaces, in the draft too; else the draft
+            # term is the run without a post op
+            draft_post = post if "post=fused" in sw.split(";") else "none"
+            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, draft_post, sw))
+            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, draft_post, baseline))
             draft_us = (d_draft - b_draft) * 1000.0 if d_draft is not None and b_draft is not None else None
             row["draft_delta_us"] = None if draft_us is None else round(draft_us, 2)
             row["step_delta_ms"] = (None if draft_us is None else
@@ -974,7 +1004,12 @@ def main(argv=None) -> int:
             post_bufs = [(torch.zeros((post_rows, profile.hidden), device=device, dtype=torch.bfloat16),
                           torch.empty((post_rows, profile.hidden), device=device, dtype=torch.bfloat16))
                          for _ in runs]
-            runs = [with_post(fn, a.post, sh, o, post_start, count) for fn, (sh, o) in zip(runs, post_bufs)]
+            combine_post = None
+            if a.post.startswith("fused-"):
+                from tokenspeed_kernel.ops.moe import gluon as petit_ops
+                combine_post = getattr(petit_ops, "petit_combine_post", None)
+            runs = [with_post(fn, a.post, sh, o, post_start, count, combine_post)
+                    for fn, (sh, o) in zip(runs, post_bufs)]
         per = {}  # candidate -> its graphs, checks and launch
         for name in names:
             Forcing.candidate, Forcing.launched = name, set()

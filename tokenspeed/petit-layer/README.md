@@ -10,7 +10,7 @@ exchange.
 | File | Role |
 | --- | --- |
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -114,7 +114,12 @@ intervals between consecutive points: `prep`, `s1`, `s2` (holds the S1 to S2 gap
 (after Combine until return; without `--post` this path has no post add, so post net is ~0 and checks
 the marker cost; `--post add` appends DP4's `torch.add(routed, shared, out=out)` and `--post copy-add`
 tp4ep4-petit's `out.copy_(shared)` then `out[start:end].add_(routed)` over the replicated rows, with
-`shared` = zeros so the reference check stays exact; `--rows` writes the mode as the `post` column). The points before the launches come from thin wrappers around the three launch objects
+`shared` = zeros so the reference check stays exact; `--rows` writes the mode as the `post` column;
+`--post fused-add|fused-copy-add` runs the same post op folded into Combine through TokenSpeed's
+`gluon.petit_combine_post`, the path of `TOKENSPEED_PETIT_FUSE_POST=1` (its `MegaMoECombineResidual`
+launch carries the `comb` marks), with rows labelled `post=fused` and `post` = `add`/`copy-add`, so
+`--project --baseline off` and `range_compare.py` compare it against the separate post op). The
+points before the launches come from thin wrappers around the three launch objects
 `MegaMoEStage1/MegaMoEStage2/MegaMoECombine`, which `MegaMoESolutionAdapter.Invoke` looks up per call
 (`kernel[grid](...)`; `warmup`, the compile-only path, passes through). `lib.moe.rocm.mega_moe` is a
 package whose `__getattr__` forwards to the sibling `mega_moe.py`, loaded as its own module, so the
