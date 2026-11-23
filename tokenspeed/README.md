@@ -8,7 +8,7 @@ instrumenting its source. Generic pieces live in the cross-project subjects (`pr
 | --- | --- |
 | `install.sh` | Install TokenSpeed's packages from a checkout into the system Python |
 | `tokenspeed_triton_alias.py` | Import alias for TokenSpeed's Triton package |
-| [serving](serving/README.md) | Measure a running TokenSpeed server: fixed-batch decode, prefill, sustained multi-turn load, end-to-end decomposition, greedy-output comparison, server lifecycle |
+| [serving](serving/README.md) | Measure a running TokenSpeed server: fixed-batch decode, prefill, sustained multi-turn load, end-to-end decomposition, greedy-output comparison, server lifecycle, several serving configurations on one GPU claim (`claim_run.py`) |
 | [petit-layer](petit-layer/README.md) | Time the Gluon Petit MoE layer (DeepSeek V4.1 Flash, EP4 with Petit's token exchange) alone on 4 (or 8) GPUs under `torchrun`, eager and CUDA graph, checked against TokenSpeed's distributed-test reference; Petit's own launch choice or forced producer-geometry and stage-1-tile candidates |
 | [cpu-tests](cpu-tests/README.md) | Run TokenSpeed's Gluon Petit owner tests that need no GPU on a tree (checkout or `git archive` export), per switch set, under `board/no-gpu/no-gpu-run` |
 | [step-timing](step-timing/README.md) | Test-only instrumentation that times each component of a decode step inside the captured graph |

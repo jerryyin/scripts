@@ -419,6 +419,10 @@ def test_hold_options_reach_the_holder_and_add_passes_them_to_the_serve_it_start
     started = []
     quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
     assert started == [(4, ('--hold-busy-free-cap', '16', '--hold-gate-ranks', '4'))], started
+    args = gq.parse(['add', str(root / 'q2'), '--count', '4', '--idle-by', 'process', '--confirm', '20', '--', 'true'])
+    started.clear()
+    quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
+    assert started == [(4, ('--idle-by', 'process', '--confirm', '20'))], started
 
 
 if __name__ == '__main__':
@@ -435,4 +439,5 @@ if __name__ == '__main__':
     test_memory_hold_stop_ends_its_group_and_is_idempotent()
     test_an_exception_while_draining_stops_the_holder()
     test_container_lock_holder_keeps_the_lock_until_stdin_closes()
+    test_hold_options_reach_the_holder_and_add_passes_them_to_the_serve_it_starts()
     print('ok')
