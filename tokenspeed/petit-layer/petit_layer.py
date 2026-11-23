@@ -16,7 +16,6 @@ Analysis modes (no GPU):
   petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
   petit_layer.py --fit ROWS.csv [...] [--fit-layers 40] [--fit-chunks C,C,...] [--fit-cap 1024] [--where NAME=VALUE]
   petit_layer.py --project ROWS.csv [...] [--baseline off] [--draft-tokens 6]
-  petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]
   petit_layer.py --stage-table OUT.json [OUT.json ...]     --stages net times per rank and max over ranks (us)
   petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
   petit_layer.py --hop-summary OUT.json [OUT.json ...]     max over ranks of every interval, one column per run
@@ -96,8 +95,6 @@ STAGE_MARKS = ("petit.begin", "petit.s1", "petit.s2", "petit.comb", "petit.comb_
 STAGES = ("prep", "s1", "s2", "comb", "post")
 STEP_TIMING_REL = "python/tokenspeed/runtime/utils/step_timing.py"
 STEP_TIMING_DIFF = HERE.parent / "step-timing" / "instrumentation.diff"
-# W13 bytes of one dsv41_flash expert (2 x 2560 x 5120 MXFP4 + E8M0 scales) for --decide's C5 rule.
-W13_EXPERT_BYTES = 2 * 2560 * 5120 // 2 + 2 * 2560 * 5120 // 32
 
 
 def record_rows(record: dict, source: str = "") -> list[dict]:
@@ -309,46 +306,6 @@ class EagerMarks:
 
     def times(self) -> list[float]:
         return [self.events[0].elapsed_time(e) for e in self.events]
-
-
-def decide(rows: list[dict], node_us: float | None = None) -> list[dict]:
-    """r0002-p1 section 4 decision rules on --rows CSV rows with --stages columns (one profile, mode,
-    routing and candidate selected by --where): medians over repetitions of the max-over-ranks net stages.
-    Points: b1 = tokens_per_gpu 6 at active_ranks 1 (DP4 batch 1, busy rank); zero = tokens_per_gpu 0.
-    node cost: node_us or the median marker_cost_ms of the rows."""
-    import statistics
-
-    def med(field, tokens, active=None):
-        v = [float(r[field]) for r in rows if r.get(field, "") != "" and int(r["tokens_per_gpu"]) == tokens
-             and (active is None or str(r["active_ranks"]) == str(active))]
-        return statistics.median(v) if v else None
-    costs = [float(r["marker_cost_ms"]) for r in rows if r.get("marker_cost_ms", "") != ""]
-    node = node_us / 1000 if node_us is not None else (statistics.median(costs) if costs else None)
-    prep_b1, s1_b1, s2_0 = med("prep_net_ms", 6, 1), med("s1_net_ms", 6, 1), med("s2_net_ms", 0)
-    s1_0, comb_0, experts_b1 = med("s1_net_ms", 0), med("comb_net_ms", 0), med("distinct_local_experts_max", 6, 1)
-    out = []
-
-    def rule(name, value, threshold, op, text):
-        ok = None if value is None or threshold is None else (value >= threshold if op == ">=" else value > threshold)
-        out.append({"candidate": name, "value_ms": value, "threshold_ms": threshold, "op": op, "build": ok,
-                    "rule": text})
-    rule("C1", prep_b1, 0.008, ">=", "prep_net_ms(tokens 6, active 1) >= 0.008")
-    rule("C2", s2_0, 0.005, ">=", "s2_net_ms(tokens 0) >= 0.005 (s2 holds the S1->S2 gap)")
-    c5 = None if None in (s1_b1, s1_0, experts_b1) else s1_b1 - s1_0 - experts_b1 * W13_EXPERT_BYTES / 6e12 * 1e3
-    rule("C5", c5, 0.005, ">", "s1_net_ms(6, active 1) - s1_net_ms(0) - distinct_local_experts_max(6, active 1)"
-         f" x {W13_EXPERT_BYTES} B / 6 TB/s > 0.005")
-    c67 = None if None in (s1_0, comb_0, node) else s1_0 + comb_0 - 3 * node
-    rule("C6/C7", c67, 0.020, ">=", "s1_net_ms(0) + comb_net_ms(0) - 3 x node cost >= 0.020")
-    return out
-
-
-def decide_table(decisions: list[dict]) -> str:
-    rows = ["| candidate | rule | value ms | threshold ms | build |", "|---|---|---|---|---|"]
-    for d in decisions:
-        v = "n/a" if d["value_ms"] is None else f"{d['value_ms']:.4f}"
-        b = "no data" if d["build"] is None else ("yes" if d["build"] else "no")
-        rows.append(f"| {d['candidate']} | {d['rule']} | {v} | {d['threshold_ms']:.3f} | {b} |")
-    return "\n".join(rows)
 
 
 def write_rows_csv(out: str, inputs: list[str]) -> int:
@@ -813,22 +770,6 @@ def main(argv=None) -> int:
             rows = [r for r in rows if str(r.get(k)) == v]
         chunks = tuple(int(c) for c in fa.fit_chunks.split(",") if c)
         print(fit_table(rows, fa.fit_layers, chunks, fa.fit_cap))
-        return 0
-    if argv and argv[0] == "--decide":  # petit_layer.py --decide ROWS.csv [--where N=V ...] [--node-us U]
-        import csv
-        dp = argparse.ArgumentParser(prog="petit_layer.py --decide",
-                                     description="r0002-p1 decision rules (see decide) on --rows CSVs with --stages")
-        dp.add_argument("rows_csv", nargs="+")
-        dp.add_argument("--where", action="append", default=[], help="NAME=VALUE row filter (repeatable)")
-        dp.add_argument("--node-us", type=float, default=None, help="graph node cost (default: marker_cost_ms)")
-        da = dp.parse_args(argv[1:])
-        rows = [r for path in da.rows_csv for r in csv.DictReader(open(path, newline=""))]
-        for w in da.where:
-            k, v = w.split("=", 1)
-            rows = [r for r in rows if str(r.get(k)) == v]
-        decisions = decide(rows, da.node_us)
-        print(decide_table(decisions))
-        print(json.dumps(decisions))
         return 0
     if argv and argv[0] == "--project":  # petit_layer.py --project ROWS.csv [--baseline off] [--draft-tokens 6]
         import csv

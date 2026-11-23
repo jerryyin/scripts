@@ -249,7 +249,7 @@ def _rep(values):
             "max_over_ranks_min_ms": max(values), "max_over_ranks_max_ms": max(values)}
 
 
-def test_stage_rows_and_decide(tmp_path) -> None:
+def test_stage_rows(tmp_path) -> None:
     def result(tokens, active, s1, s2, comb, prep, experts):
         raw = {"prep": prep + 0.006, "s1": s1 + 0.006, "s2": s2 + 0.006, "comb": comb + 0.006, "post": 0.006}
         stages = {s: _rep([v, v - 0.001, v, v]) for s, v in raw.items()}
@@ -276,21 +276,12 @@ def test_stage_rows_and_decide(tmp_path) -> None:
     assert float(b1["marker_cost_ms"]) == pytest.approx(0.006)
     assert float(b1["s1_net_ms"]) == pytest.approx(0.058) and float(b1["post_net_ms"]) == pytest.approx(0.0)
     assert float(b1["stage_sum_net_ms"]) == pytest.approx(0.104)
-    d = {x["candidate"]: x for x in petit_layer.decide(rows)}
-    assert d["C1"]["build"] is True and d["C1"]["value_ms"] == pytest.approx(0.011)
-    assert d["C2"]["build"] is False and d["C2"]["value_ms"] == pytest.approx(0.004)
-    w13 = 10 * petit_layer.W13_EXPERT_BYTES / 6e12 * 1e3
-    assert d["C5"]["value_ms"] == pytest.approx(0.018 - w13) and d["C5"]["build"] is (0.018 - w13 > 0.005)
-    assert d["C6/C7"]["value_ms"] == pytest.approx(0.057 - 0.018) and d["C6/C7"]["build"] is True
-    assert petit_layer.decide(rows, node_us=15)[3]["build"] is False   # 0.057 - 0.045 < 0.020
-    assert petit_layer.main(["--decide", str(out), "--where", "mode=graph"]) == 0
     # a record without --stages or distinct_local_experts leaves the new columns empty
     old = tmp_path / "old.json"
     old.write_text(json.dumps(_record()))
     assert petit_layer.main(["--rows", str(tmp_path / "old.csv"), str(old)]) == 0
     r0 = next(csv.DictReader((tmp_path / "old.csv").open()))
     assert r0["s1_ms"] == "" and r0["distinct_local_experts"] == ""
-    assert petit_layer.decide([dict(r0)])[0]["build"] is None
 
 
 def test_marked_launch_records_around_the_launch_and_passes_warmup() -> None:

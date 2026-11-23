@@ -12,7 +12,7 @@ exchange.
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
 | `petit_compile_check.py` | Compiles Petit's stage-1, stage-2 and combine kernels (base; C5 `stage1_n128`, C5b `stage2_n128`, C3 `combine_residual`; `trace_ping`, the clock-alignment kernel of `TOKENSPEED_PETIT_TRACE=1`; and, not Petit, `a4w4_ep_finalize`, the A4W4 EP registration's one-launch finalize of `TOKENSPEED_A4W4_EP_FUSED_FINALIZE=1`, top-6 or with `--profile dsv41_flash_dspark` top-3) for gfx950 with no GPU (stub Triton driver, nothing launched; TokenSpeed's `TOKENSPEED_PETIT_*` switches in the environment apply) and compares two trees' instruction streams (`compare A.s B.s`), e.g. to show a switch-off path is unchanged; run it under `board/no-gpu/no-gpu-run`; `test_petit_compile_check.py` tests the comparison and the kernel list |
 | `petit_hops.py` | `--hops` / `--hop-table`: decodes TokenSpeed's `TOKENSPEED_PETIT_TRACE=1` trace region (8-call ring of `s_memrealtime` stamps per kernel, CTA and site, plus `MegaMoETracePing` stamps), aligns ranks' clocks (X = ping RTT/2, offsets interpolated between the pings) and derives the hop chain (`CHAIN`: hop1..hop5, owner and producer local work, tile, epilogue, node gaps) per rank and max over ranks |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--decide`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -171,16 +171,6 @@ for every count.
 **Experts touched.** Every result's `routing.distinct_local_experts` lists, per destination rank, the
 distinct experts of its local range (`experts // world size`) that the timed routing of all ranks
 touches; `--rows` adds `distinct_local_experts` (space separated) and `distinct_local_experts_max`.
-
-`--decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]` applies the decision rules of r0002-p1
-(the fixed-cost study of a batch-1 Petit call) to `--rows` CSVs with stage columns, on the medians
-over repetitions of the max-over-ranks net stages (select one profile, mode, routing, layers and
-candidate with `--where`): C1 (pass the router's ids and weights as Petit's external inputs) if
-`prep_net_ms` at tokens 6, active ranks 1 is >= 0.008; C2 (fuse Stage1 and Stage2) if `s2_net_ms` at
-tokens 0 is >= 0.005; C5 (stage-1 tile N=128) if `s1_net_ms`(6, active 1) - `s1_net_ms`(0) -
-`distinct_local_experts_max`(6, active 1) x 13,926,400 B (one expert's W13) / 6 TB/s is > 0.005; C6/C7
-(launch-ready round, Combine barrier) if `s1_net_ms`(0) + `comb_net_ms`(0) - 3 x node cost is >= 0.020,
-node cost `--node-us` or the median `marker_cost_ms`. It prints a table and the decisions as JSON.
 
 `torchrun --standalone` needs a resolvable hostname; in a container without one, pass
 `--master-addr=127.0.0.1` and a fixed `--master-port` instead.
