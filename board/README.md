@@ -18,6 +18,10 @@ board/
 ├── memgate/
 │   └── sitecustomize.py   # makes a server's ranks wait for gpu-hold before large allocations
 ├── test_memgate.py        # its tests (no GPU needed)
+├── no-gpu/
+│   ├── no-gpu-run         # run a command with every /dev/kfd and /dev/dri open refused and logged
+│   └── nokfd.c            #   its LD_PRELOAD shim (built on first use)
+├── test_no_gpu.py         # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -26,6 +30,14 @@ board/
 ```
 
 ## Files
+
+- `no-gpu/no-gpu-run [--log FILE] -- COMMAND` — runs CPU-only work (unit tests, offline compiles)
+  while other users hold the GPUs: an LD_PRELOAD shim (`nokfd.c`, built into `$NO_GPU_CACHE`,
+  default `~/.cache/no-gpu`, on first use) refuses every `open`/`openat` of `/dev/kfd` and
+  `/dev/dri/*` with EACCES and logs `BLOCKED open PATH pid=PID` (default
+  `$NO_GPU_CACHE/blocked.log`); GPU selection variables are unset and core dumps off. A refused open
+  is the proof that the run touched no device. TokenSpeed's test runner on top of it:
+  `tokenspeed/cpu-tests/`. Tests: `test_no_gpu.py`.
 
 - `gpu-wait.py N` — polls `amd-smi metric` until N GPUs show 0% graphics activity on
   `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Memory
