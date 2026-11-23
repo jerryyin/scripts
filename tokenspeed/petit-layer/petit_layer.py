@@ -71,6 +71,7 @@ DP4's torch.add(routed, shared, out=out); copy-add is tp4ep4-petit's out.copy_(s
 out[start:end].add_(routed) over the replicated rows (shared = zeros, so the check stays exact).
   petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
   petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
+  petit_layer.py --hop-summary OUT.json [OUT.json ...]     max over ranks of every interval, one column per run and count
 --hops (graph mode) needs a TokenSpeed with TOKENSPEED_PETIT_TRACE: it sets
 TOKENSPEED_PETIT_TRACE=1 before TokenSpeed is imported (refusing a different value already set, since the
 switch is read at import) and, after each token count's timed replays (whose times are the instrumented
@@ -924,6 +925,15 @@ def main(argv=None) -> int:
                       f"active={r['active_ranks']} switches={switches_label(record.get('petit_switches', {}))} "
                       f"calls={h['calls']} clock={h['clock_mhz']} MHz (host check {h.get('clock_check_mhz')})\n")
                 print(petit_hops.hop_table(h) + "\n")
+        return 0
+    if argv and argv[0] == "--hop-summary":  # petit_layer.py --hop-summary OUT.json [OUT.json ...]
+        cols = []
+        for path in argv[1:]:
+            record = json.loads(Path(path).read_text())
+            for r in record["results"]:
+                if r.get("hops"):
+                    cols.append((f"{Path(path).stem} {r['tokens_per_gpu']}/{r['active_ranks']}", r["hops"]))
+        print(petit_hops.hop_summary(cols))
         return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:

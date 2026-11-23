@@ -683,3 +683,26 @@ def test_hops_drop_stale_stamps_of_an_older_call():
     out = petit_hops.drop_stale(ring)
     assert out[2, 0, 7, 9] == 0 and out[2, 0, 3, 9] == 900_500 and out[2, 2, 0, 4] == 903_000
     assert (out[2, 0, :4, 0] == ring[2, 0, :4, 0]).all() and ring[2, 0, 7, 9] == 100_000  # a copy
+
+
+def test_hop_table_site_gap_row():
+    """r0002-f9: the site 7 -> 9 gap per rank from the site medians, blank where a rank has no tile."""
+    import petit_hops
+    sites = {"0": {"stage1": {"7": {"median": 13.0}, "9": {"median": 15.5}}},
+             "1": {"stage1": {"7": {"median": 12.0}}}}
+    hops = {"ranks": 2, "sites_us_from_call_start": sites}
+    assert petit_hops.site_gap(hops, "stage1", 7, 9) == [2.5, None]
+    hops.update({"chain_us": {k: [None, None, None] for k in petit_hops.CHAIN}, "x_us": None, "x_us_by_peer": [None]})
+    row = [l for l in petit_hops.hop_table(hops).splitlines() if l.startswith("| site7_to_9 |")]
+    assert row and row[0].startswith("| site7_to_9 | 2.50 |  | 2.50 |")
+
+
+def test_hop_summary_columns():
+    """r0002-f9: --hop-summary puts each run's max-over-ranks medians side by side, with the site gap and X."""
+    import petit_hops
+    chain = {k: [None, None, {"median": 1.0, "min": 1.0, "max": 1.0}] for k in petit_hops.CHAIN}
+    sites = {"0": {"stage1": {"7": {"median": 13.0}, "9": {"median": 15.5}}}}
+    h = {"ranks": 2, "chain_us": chain, "x_us": {"median": 0.5}, "sites_us_from_call_start": sites}
+    out = petit_hops.hop_summary([("a 6/1", h)]).splitlines()
+    assert out[0] == "| interval | a 6/1 |"
+    assert "| call | 1.00 |" in out and "| site7_to_9 | 2.50 |" in out and "| X | 0.50 |" in out

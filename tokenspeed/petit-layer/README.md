@@ -201,7 +201,7 @@ the timed graph, the ping again (phase 1), gathers every rank's region and write
 each result: X from the ping, clock drift, every stamp site per rank relative to the call's first stage-1
 entry, and the chain of `petit_hops.CHAIN` per rank and max over ranks, median [min, max] over the
 last 8 of the `--layers` calls (the ring's 8 slots; stamps an older call left in CTAs the last call did not
-reach are dropped). `--hop-table OUT.json ...` prints the chain as Markdown. `--hop-clock-mhz` overrides the
+reach are dropped). `--hop-table OUT.json ...` prints the chain as Markdown. It ends with `site7_to_9` (stage 1 site 9 − site 7 medians per rank: recv sums → payload seen, h-f6's C11 rule; at counts where a CTA takes several tiles site 9 is its last tile, so the gap is not the first payload's). `--hop-summary OUT.json ...` puts every run's and token count's max over ranks side by side, one column each. `--hop-clock-mhz` overrides the
 nominal 100 MHz `s_memrealtime` rate (the JSON keeps a host-timed check, `clock_check_mhz`).
 
 ```bash
