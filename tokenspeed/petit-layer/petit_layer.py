@@ -14,8 +14,9 @@ path, never copied. Every token count passes the test's check before it is timed
 Analysis modes (no GPU):
   petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]   one CSV row per repetition of each result
   petit_layer.py --summary OUT.json [OUT.json ...]         markdown table of each JSON
-  petit_layer.py --fit ROWS.csv [...] [--fit-layers 40] [--fit-chunks C,C,...] [--fit-cap 1024] [--where NAME=VALUE]
-  petit_layer.py --project ROWS.csv [...] [--baseline off] [--draft-tokens 6]
+  petit_layer.py --fit ROWS.csv [...] --fit-layers N [--fit-chunks C,C,...] [--fit-cap 1024] [--where NAME=VALUE]
+  petit_layer.py --project ROWS.csv [...] --target-profile P --target-layers N --draft-layers M
+                 [--draft-profile P --draft-active-ranks R --draft-tokens T] [--baseline off] [--where NAME=VALUE]
   petit_layer.py --stage-table OUT.json [OUT.json ...]     --stages net times per rank and max over ranks (us)
   petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
   petit_layer.py --hop-summary OUT.json [OUT.json ...]     max over ranks of every interval, one column per run
@@ -26,16 +27,19 @@ GPU: test_petit_layer.py.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import importlib.util
 import inspect
 import json
 import os
 import random
+import re
 import statistics
 import sys
 import textwrap
 import time
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -225,7 +229,6 @@ def step_timing_source(diff_text: str) -> str:
 
 def load_step_timing(out_dir: str):
     """Load the marker writer enabled (every replay harvested), its records kept in memory (module.RECORDS)."""
-    import types
     env = {"TS_STEP_TIMING": "1", "TS_STEP_TIMING_DIR": out_dir, "TS_STEP_TIMING_EVERY": "1",
            "TS_STEP_TIMING_MAX_RECORDS": str(10 ** 9), "TS_STEP_TIMING_LAYER_STRIDE": "1"}
     old = {k: os.environ.get(k) for k in env}
@@ -309,7 +312,6 @@ class EagerMarks:
 
 
 def write_rows_csv(out: str, inputs: list[str]) -> int:
-    import csv
     rows = [row for path in inputs for row in record_rows(json.loads(Path(path).read_text()), path)]
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="") as fh:
@@ -562,7 +564,6 @@ def extract_closures(test_source: str) -> str:
 
 def test_tolerance(test_source: str) -> dict:
     """atol/rtol of the test's reference assert_close."""
-    import re
     m = re.search(r"assert_close\(actual, expected, atol=([0-9.e+-]+), rtol=([0-9.e+-]+)\)", test_source)
     if m is None:
         raise RuntimeError("reference tolerance not found in the test source")
@@ -666,8 +667,6 @@ def fit_table(rows: list[dict], layers: int = 40, chunks: tuple[int, ...] = (), 
     `layers` x t (Petit ms per step at that chunk), and for each chunk C in `chunks` the Petit ms of C
     split into ceil(C/cap) calls (calls of `cap` rows at the measured median, the remainder at the
     line) against one `cap`-row chunk."""
-    import math
-    import statistics
     groups: dict[tuple, dict[int, list[float]]] = {}
     for r in rows:
         key = (r["profile"], r["routing"], r["mode"], str(r["active_ranks"]), r.get("candidate", "petit"))
@@ -705,16 +704,17 @@ def fit_table(rows: list[dict], layers: int = 40, chunks: tuple[int, ...] = (), 
     return "\n".join(out)
 
 
-TARGET_CALLS_PER_STEP, DRAFT_CALLS_PER_STEP = 40, 3  # DSv4.1 Flash decode step: 40 target + 3 DSpark draft calls
-
-
-def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_over_ranks_median_ms",
-                 draft_tokens: str = "6") -> list[dict]:
+def project_step(rows: list[dict], *, baseline: str, target_profile: str, target_layers: int,
+                 draft_profile: str | None = None, draft_layers: int = 0, draft_active_ranks: str | None = None,
+                 draft_tokens: str | None = None, metric: str = "max_over_ranks_median_ms") -> list[dict]:
     """Per switch set and case, the change of the call (median over repetitions of ``metric``, ms)
     against the ``baseline`` switch set at the same (profile, mode, active_ranks, tokens_per_gpu,
-    candidate), and the projected change per 43-call decode step: 40 x the dsv41_flash case's change
-    + 3 x the dsv41_flash_dspark change at ``draft_tokens`` rows on 4 active ranks (same switch set).
-    Negative = saving."""
+    candidate, post). Rows of ``target_profile`` also get the projected change per decode step:
+    target_layers x their change + draft_layers x the ``draft_profile`` change at ``draft_tokens``
+    rows on ``draft_active_ranks`` active ranks (same switch set; None where that draft row is
+    missing). Negative = saving."""
+    if draft_layers and None in (draft_profile, draft_active_ranks, draft_tokens):
+        raise ValueError("draft_layers > 0 needs draft_profile, draft_active_ranks and draft_tokens")
     groups: dict = {}
     for r in rows:
         key = (r["profile"], r["mode"], str(r["active_ranks"]), str(r["tokens_per_gpu"]), r.get("candidate", "petit"),
@@ -730,18 +730,30 @@ def project_step(rows: list[dict], baseline: str = "off", metric: str = "max_ove
         row = {"profile": profile, "mode": mode, "active_ranks": act, "tokens_per_gpu": tok, "candidate": cand,
                "post": post, "switches": sw, "baseline_us": round(base * 1000.0, 2), "call_us": round(value * 1000.0, 2),
                "delta_us": round(delta_us, 2)}
-        if profile == "dsv41_flash":
+        if profile == target_profile and not draft_layers:
+            row["draft_delta_us"] = None
+            row["step_delta_ms"] = round(target_layers * delta_us / 1000.0, 3)
+        elif profile == target_profile:
             # a fused post exists only against the post op it replaces, in the draft too; else the draft
             # term is the run without a post op
             draft_post = post if "post=fused" in sw.split(";") else "none"
-            d_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, draft_post, sw))
-            b_draft = med.get(("dsv41_flash_dspark", mode, "4", draft_tokens, cand, draft_post, baseline))
+            draft = (draft_profile, mode, str(draft_active_ranks), str(draft_tokens), cand, draft_post)
+            d_draft, b_draft = med.get((*draft, sw)), med.get((*draft, baseline))
             draft_us = (d_draft - b_draft) * 1000.0 if d_draft is not None and b_draft is not None else None
             row["draft_delta_us"] = None if draft_us is None else round(draft_us, 2)
             row["step_delta_ms"] = (None if draft_us is None else
-                                    round((TARGET_CALLS_PER_STEP * delta_us + DRAFT_CALLS_PER_STEP * draft_us) / 1000.0, 3))
+                                    round((target_layers * delta_us + draft_layers * draft_us) / 1000.0, 3))
         out.append(row)
     return out
+
+
+def read_rows(paths: list[str], where: list[str]) -> list[dict]:
+    """The rows of --rows CSVs whose columns match every NAME=VALUE of ``where``."""
+    rows = [r for path in paths for r in csv.DictReader(open(path, newline=""))]
+    for w in where:
+        k, v = w.split("=", 1)
+        rows = [r for r in rows if str(r.get(k)) == v]
+    return rows
 
 
 def main(argv=None) -> int:
@@ -751,38 +763,42 @@ def main(argv=None) -> int:
             raise SystemExit("usage: petit_layer.py --rows ROWS.csv OUT.json [OUT.json ...]")
         print(f"[petit_layer] wrote {write_rows_csv(argv[1], argv[2:])} rows to {argv[1]}")
         return 0
-    if argv and argv[0] == "--fit":  # petit_layer.py --fit ROWS.csv [--fit-layers N] [--fit-chunks C,C]
-        import csv
+    if argv and argv[0] == "--fit":  # petit_layer.py --fit ROWS.csv --fit-layers N [--fit-chunks C,C]
         fp = argparse.ArgumentParser(
             prog="petit_layer.py --fit",
             description="Fit per-call Petit time against rows per GPU from --rows CSVs (see fit_table): "
                         "per group median [min, max], line t = a + b x rows, residuals, fixed share, "
                         "per-step ms for --fit-layers layers, and split-chunk cost for --fit-chunks.")
         fp.add_argument("rows_csv", nargs="+", help="CSV(s) written by petit_layer.py --rows")
-        fp.add_argument("--fit-layers", type=int, default=40, help="MoE layers per step (dsv41_flash: 40)")
+        fp.add_argument("--fit-layers", type=int, required=True, help="the model's MoE layers per step")
         fp.add_argument("--fit-chunks", default="", help="chunk tokens to split into <= --fit-cap calls")
         fp.add_argument("--fit-cap", type=int, default=1024, help="rows per Petit call (max_tokens_per_rank)")
         fp.add_argument("--where", action="append", default=[], help="NAME=VALUE row filter (repeatable)")
         fa = fp.parse_args(argv[1:])
-        rows = [r for path in fa.rows_csv for r in csv.DictReader(open(path, newline=""))]
-        for w in fa.where:
-            k, v = w.split("=", 1)
-            rows = [r for r in rows if str(r.get(k)) == v]
         chunks = tuple(int(c) for c in fa.fit_chunks.split(",") if c)
-        print(fit_table(rows, fa.fit_layers, chunks, fa.fit_cap))
+        print(fit_table(read_rows(fa.rows_csv, fa.where), fa.fit_layers, chunks, fa.fit_cap))
         return 0
-    if argv and argv[0] == "--project":  # petit_layer.py --project ROWS.csv [--baseline off] [--draft-tokens 6]
-        import csv
+    if argv and argv[0] == "--project":  # petit_layer.py --project ROWS.csv --target-profile P --target-layers N ...
         pp = argparse.ArgumentParser(prog="petit_layer.py --project",
                                      description="per-call change against a baseline switch set and the "
-                                                 "projected change per 43-call decode step (see project_step)")
-        pp.add_argument("rows_csv", nargs="+")
-        pp.add_argument("--baseline", default="off")
+                                                 "projected change per decode step (see project_step)")
+        pp.add_argument("rows_csv", nargs="+", help="CSV(s) written by petit_layer.py --rows")
+        pp.add_argument("--baseline", default="off", help="switch-set label to compare against ('off': none set)")
         pp.add_argument("--metric", default="max_over_ranks_median_ms")
-        pp.add_argument("--draft-tokens", default="6")
+        pp.add_argument("--target-profile", required=True, help="profile of the target model's MoE")
+        pp.add_argument("--target-layers", type=int, required=True, help="target MoE layers per step (the model's)")
+        pp.add_argument("--draft-layers", type=int, required=True, help="draft MoE layers per step (0 without a draft)")
+        pp.add_argument("--draft-profile", help="profile of the draft model's MoE (with --draft-layers > 0)")
+        pp.add_argument("--draft-active-ranks", help="active ranks of the draft rows (with --draft-layers > 0)")
+        pp.add_argument("--draft-tokens", help="tokens per GPU of the draft rows (with --draft-layers > 0)")
+        pp.add_argument("--where", action="append", default=[], help="NAME=VALUE row filter (repeatable)")
         pa = pp.parse_args(argv[1:])
-        rows = [r for path in pa.rows_csv for r in csv.DictReader(open(path, newline=""))]
-        res = project_step(rows, pa.baseline, pa.metric, pa.draft_tokens)
+        if pa.draft_layers and None in (pa.draft_profile, pa.draft_active_ranks, pa.draft_tokens):
+            pp.error("--draft-layers > 0 needs --draft-profile, --draft-active-ranks and --draft-tokens")
+        res = project_step(read_rows(pa.rows_csv, pa.where), baseline=pa.baseline, metric=pa.metric,
+                           target_profile=pa.target_profile, target_layers=pa.target_layers,
+                           draft_profile=pa.draft_profile, draft_layers=pa.draft_layers,
+                           draft_active_ranks=pa.draft_active_ranks, draft_tokens=pa.draft_tokens)
         cols = ["profile", "active_ranks", "tokens_per_gpu", "post", "switches", "baseline_us", "call_us", "delta_us",
                 "draft_delta_us", "step_delta_ms"]
         print("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))

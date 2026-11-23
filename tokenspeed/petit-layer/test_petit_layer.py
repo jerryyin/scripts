@@ -184,7 +184,10 @@ def test_fit_line_and_split_chunk(tmp_path) -> None:
     assert "| 1024 | 0.7096 [0.6996, 0.7196] | 3 | 0.7096 | +0.0000 | 42% | 28.38 |" in text
     assert "| 8192 | 8 | 227.07 | 8.00x | 27.72 |" in text  # 40 x 8 x 0.7096
     assert "| 1536 | 2 | 48.58 | 1.71x |" in text  # 40 x (0.7096 + 0.3 + 0.0004 x 512)
-    assert petit_layer.main(["--fit", str(rows), "--fit-chunks", "4096", "--where", "routing=test"]) == 0
+    assert petit_layer.main(["--fit", str(rows), "--fit-layers", "40", "--fit-chunks", "4096",
+                             "--where", "routing=test"]) == 0
+    with pytest.raises(SystemExit):  # the model's layer count is not assumed
+        petit_layer.main(["--fit", str(rows)])
 
 
 # --- --stages, --tokens 0, distinct_local_experts ---
@@ -352,6 +355,10 @@ def test_petit_switches_recorded_and_labelled():
     assert "petit_switches" in petit_layer.ROW_FIELDS
 
 
+STEP = dict(baseline="off", target_profile="dsv41_flash", target_layers=40, draft_profile="dsv41_flash_dspark",
+            draft_layers=3, draft_active_ranks="4", draft_tokens="6")
+
+
 def test_project_step_against_switch_off():
     def row(profile, act, tok, sw, ms):
         return {"profile": profile, "mode": "graph", "active_ranks": act, "tokens_per_gpu": tok,
@@ -359,11 +366,34 @@ def test_project_step_against_switch_off():
     rows = [row("dsv41_flash", "1", "6", "off", 0.0912), row("dsv41_flash", "1", "6", "off", 0.0914),
             row("dsv41_flash", "1", "6", "off", 0.0910), row("dsv41_flash", "1", "6", "FUSE_PREP=1", 0.0862),
             row("dsv41_flash_dspark", "4", "6", "off", 0.1123), row("dsv41_flash_dspark", "4", "6", "FUSE_PREP=1", 0.1083)]
-    res = petit_layer.project_step(rows)
+    res = petit_layer.project_step(rows, **STEP)
     flash = [r for r in res if r["profile"] == "dsv41_flash"][0]
     assert flash["delta_us"] == -5.0 and flash["draft_delta_us"] == -4.0
     assert flash["step_delta_ms"] == round((40 * -5.0 + 3 * -4.0) / 1000, 3)
     assert [r for r in res if r["profile"] == "dsv41_flash_dspark"][0]["delta_us"] == -4.0
+    no_draft = petit_layer.project_step(rows, baseline="off", target_profile="dsv41_flash", target_layers=40)
+    assert [r for r in no_draft if r["profile"] == "dsv41_flash"][0]["step_delta_ms"] == round(40 * -5.0 / 1000, 3)
+    with pytest.raises(ValueError, match="draft_profile"):
+        petit_layer.project_step(rows, baseline="off", target_profile="dsv41_flash", target_layers=40, draft_layers=3)
+
+
+def test_project_cli_needs_the_model_counts(tmp_path, capsys):
+    path = tmp_path / "rows.csv"
+    with path.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["profile", "mode", "active_ranks", "tokens_per_gpu", "candidate",
+                                           "post", "petit_switches", "max_over_ranks_median_ms"])
+        w.writeheader()
+        for sw, ms in (("off", 0.0910), ("FUSE_PREP=1", 0.0860)):
+            w.writerow({"profile": "m", "mode": "graph", "active_ranks": 1, "tokens_per_gpu": 6, "candidate": "petit",
+                        "post": "none", "petit_switches": sw, "max_over_ranks_median_ms": ms})
+    with pytest.raises(SystemExit):
+        petit_layer.main(["--project", str(path), "--target-profile", "m", "--target-layers", "61"])
+    with pytest.raises(SystemExit):  # a draft term needs its profile, ranks and tokens
+        petit_layer.main(["--project", str(path), "--target-profile", "m", "--target-layers", "61",
+                          "--draft-layers", "3"])
+    assert petit_layer.main(["--project", str(path), "--target-profile", "m", "--target-layers", "61",
+                             "--draft-layers", "0"]) == 0
+    assert "| m | 1 | 6 | none | FUSE_PREP=1 | 91.0 | 86.0 | -5.0 |  | -0.305 |" in capsys.readouterr().out
 
 
 def test_post_mode_geometry_and_ops():
@@ -410,8 +440,9 @@ def test_project_step_keeps_post_modes_apart():
     def row(post, sw, ms):
         return {"profile": "dsv41_flash", "mode": "graph", "active_ranks": "1", "tokens_per_gpu": "6",
                 "candidate": "petit", "petit_switches": sw, "post": post, "max_over_ranks_median_ms": ms}
-    rows = [row("none", "off", 0.090), row("none", "C3=1", 0.088), row("add", "off", 0.095), row("add", "C3=1", 0.089)]
-    res = {r["post"]: r for r in petit_layer.project_step(rows)}
+    rows = [row("none", "off", 0.090), row("none", "FUSE_POST=1", 0.088), row("add", "off", 0.095),
+            row("add", "FUSE_POST=1", 0.089)]
+    res = {r["post"]: r for r in petit_layer.project_step(rows, **STEP)}
     assert res["none"]["delta_us"] == -2.0 and res["add"]["delta_us"] == -6.0
     assert res["add"]["baseline_us"] == 95.0
 
@@ -456,7 +487,7 @@ def test_rows_and_project_keep_forced_stage2_apart():
     rows = petit_layer.record_rows(record("petit", 0.0900)) + petit_layer.record_rows(record("n128", 0.0880))
     assert {r["petit_switches"] for r in rows} == {"off", "stage2_tile=n128"}
     assert {r["stage2_tile"] for r in rows} == {"petit", "n128"}
-    res = [r for r in petit_layer.project_step(rows) if r["profile"] == "dsv41_flash"]
+    res = [r for r in petit_layer.project_step(rows, **STEP) if r["profile"] == "dsv41_flash"]
     assert len(res) == 1 and res[0]["delta_us"] == -2.0
 
 
@@ -506,7 +537,7 @@ def test_rows_label_fused_post_against_the_separate_post():
     # the draft MoE run the same way: its fused-post change enters the step at the draft's post op
     rows += petit_layer.record_rows(record("dsv41_flash_dspark", 4, "add", 0.1120)) + \
         petit_layer.record_rows(record("dsv41_flash_dspark", 4, "fused-add", 0.1100))
-    res = [r for r in petit_layer.project_step(rows) if r["profile"] == "dsv41_flash"]
+    res = [r for r in petit_layer.project_step(rows, **STEP) if r["profile"] == "dsv41_flash"]
     assert len(res) == 1 and res[0]["delta_us"] == -1.4
     assert res[0]["draft_delta_us"] == -2.0
     assert res[0]["step_delta_ms"] == round((40 * -1.4 + 3 * -2.0) / 1000, 3)

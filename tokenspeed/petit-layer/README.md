@@ -12,7 +12,7 @@ exchange.
 | `petit_layer.py` | The tool (run under `torchrun --nproc-per-node=4`); writes one JSON per run from rank 0 |
 | `petit_compile_check.py` | Compiles Petit's stage-1, stage-2 and combine kernels (base; C5 `stage1_n128`, C5b `stage2_n128`, C3 `combine_residual`; `trace_ping`, the clock-alignment kernel of `TOKENSPEED_PETIT_TRACE=1`; and, not Petit, `a4w4_ep_finalize`, the A4W4 EP registration's one-launch finalize of `TOKENSPEED_A4W4_EP_FUSED_FINALIZE=1`, top-6 or with `--profile dsv41_flash_dspark` top-3) for gfx950 with no GPU (stub Triton driver, nothing launched; TokenSpeed's `TOKENSPEED_PETIT_*` switches in the environment apply) and compares two trees' instruction streams (`compare A.s B.s`), e.g. to show a switch-off path is unchanged; run it under `board/no-gpu/no-gpu-run`; `test_petit_compile_check.py` tests the comparison and the kernel list |
 | `petit_hops.py` | `--hops` / `--hop-table`: decodes TokenSpeed's `TOKENSPEED_PETIT_TRACE=1` trace region (8-call ring of `s_memrealtime` stamps per kernel, CTA and site, plus `MegaMoETracePing` stamps), aligns ranks' clocks (X = ping RTT/2, offsets interpolated between the pings) and derives the hop chain (`CHAIN`: hop1..hop5, owner and producer local work, tile, epilogue, node gaps) per rank and max over ranks |
-| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--stage-table`, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` (C3) |
+| `test_petit_layer.py` | Non-GPU tests: arguments, default token lists, Petit's 1024-token limit, test-source extraction, `--rows` read by `range_compare.py summarize`, `--fit` line and split-chunk arithmetic, `--stages` arithmetic (stage split, marker cost, closure, CSV columns), the launch wrapper, the step-timing writer taken from its diff, `distinct_local_experts`, `--stage-table`, `--project` and its required model counts, `--post` geometry and ops, `--stage2-tile` forcing and labels, `--post fused-*` |
 
 The layer is the test's, never a copy: `petit_layer.py` imports
 `tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py` from `--ts-src` by path
@@ -85,20 +85,20 @@ over repetitions (add `candidate` to `--key` for a candidate sweep, and `--where
 pull one candidate's summary for `compare`); `--summary` prints a markdown table of one JSON.
 
 `--fit ROWS.csv [ROWS.csv ...]` fits Petit's per-call time against the rows per call (tokens per
-GPU) from `--rows` CSVs, without a GPU. Rows are grouped by profile, routing, mode, active ranks
-and candidate; per group it prints, for each `tokens_per_gpu`, the median [min, max] over
-repetitions of `max_over_ranks_median_ms` and their count; the least-squares line t = a + b x rows
-over those medians (a in ms, b in us per row), each count's residual against the line and its fixed
-share a / median; and `--fit-layers` (default 40, the MoE layers of `dsv41_flash`) x the median,
-the Petit ms of one step whose MoE layers each see that many rows. `--fit-chunks C,C,...` adds,
-per chunk of C prefill tokens on a rank, the Petit ms of splitting it into ceil(C / `--fit-cap`)
-calls (default cap 1024, Petit's `max_tokens_per_rank`): the full calls at the measured median of
-`--fit-cap` rows (the line where that count was not measured), the remainder at the line, times
-`--fit-layers`; with the ratio to one `--fit-cap`-row chunk and the ms per 1,000 tokens. That is the
-Petit cost of a large prefill chunk, which Petit must take as several calls of at most 1024 rows.
-`--where NAME=VALUE` (repeatable, any CSV column) selects rows first; runs that differ in `--layers`
-or `--seed` share a group, so select one (`--where layers=8`), and fit runs with different
-`--weights` (not a CSV column) from separate CSVs. A group with one row count gets b = 0.
+GPU) from `--rows` CSVs, without a GPU. Rows are grouped by profile, routing, mode, active ranks and
+candidate; per group it prints, for each `tokens_per_gpu`, the median [min, max] over repetitions of
+`max_over_ranks_median_ms` and their count; the least-squares line t = a + b x rows over those
+medians (a in ms, b in us per row), each count's residual against the line and its fixed share a /
+median; and `--fit-layers` (required: the model's MoE layers per step, 40 for `dsv41_flash`) x the
+median, the Petit ms of one step whose MoE layers each see that many rows. `--fit-chunks C,C,...`
+adds, per chunk of C prefill tokens on a rank, the Petit ms of splitting it into ceil(C /
+`--fit-cap`) calls (default cap 1024, Petit's `max_tokens_per_rank`): the full calls at the measured
+median of `--fit-cap` rows (the line where that count was not measured), the remainder at the line,
+times `--fit-layers`; with the ratio to one `--fit-cap`-row chunk and the ms per 1,000 tokens. That
+is the Petit cost of a large prefill chunk, which Petit must take as several calls of at most 1024
+rows. `--where NAME=VALUE` (repeatable, any CSV column) selects rows first; runs that differ in
+`--layers` or `--seed` share a group, so select one (`--where layers=8`), and fit runs with
+different `--weights` (not a CSV column) from separate CSVs. A group with one row count gets b = 0.
 
 ```bash
 # prefill rows on one active rank, eager mode, then the fit and the split-chunk Petit cost
@@ -171,6 +171,18 @@ for every count.
 **Experts touched.** Every result's `routing.distinct_local_experts` lists, per destination rank, the
 distinct experts of its local range (`experts // world size`) that the timed routing of all ranks
 touches; `--rows` adds `distinct_local_experts` (space separated) and `distinct_local_experts_max`.
+
+`--project ROWS.csv [ROWS.csv ...]` (no GPU) gives, per switch set (the `petit_switches` label of
+`--rows`) and case (profile, mode, active ranks, tokens per GPU, candidate, post), the change of the
+call's median over repetitions against the `--baseline` switch set (default `off`, none set), and
+for rows of `--target-profile` the change per decode step: `--target-layers` x the call's change +
+`--draft-layers` x the change of the `--draft-profile` row at `--draft-tokens` on
+`--draft-active-ranks` (same switch set; a `post=fused` run uses the draft rows of its own post op,
+other runs the draft rows without a post op). The three counts come from the model (DeepSeek V4.1
+Flash with 5 DSpark drafts under DP4 at batch 1: `--target-profile dsv41_flash --target-layers 40
+--draft-profile dsv41_flash_dspark --draft-layers 3 --draft-active-ranks 4 --draft-tokens 5`, see
+the token counts above); `--draft-layers 0` projects the target alone. `--where NAME=VALUE` selects
+rows first, as for `--fit`.
 
 `torchrun --standalone` needs a resolvable hostname; in a container without one, pass
 `--master-addr=127.0.0.1` and a fixed `--master-port` instead.
