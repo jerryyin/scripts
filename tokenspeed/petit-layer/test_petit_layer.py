@@ -467,3 +467,76 @@ def test_rows_and_project_keep_forced_stage2_apart():
     assert {r["stage2_tile"] for r in rows} == {"petit", "n128"}
     res = [r for r in petit_layer.project_step(rows) if r["profile"] == "dsv41_flash"]
     assert len(res) == 1 and res[0]["delta_us"] == -2.0
+
+
+def test_fused_post_modes_and_label():
+    import contextlib
+    assert petit_layer.post_geometry("fused-add", [6, 0, 0, 0], 0) == (6, 0)
+    assert petit_layer.post_geometry("fused-copy-add", [2, 2, 2, 0], 2) == (6, 4)
+    assert petit_layer.run_label({}, "petit", "fused-add") == "post=fused"
+    assert petit_layer.run_label({}, "petit", "add") == "off"
+    assert petit_layer.run_label({"TOKENSPEED_PETIT_FUSE_PREP": "1"}, "n128", "fused-copy-add") == \
+        "FUSE_PREP=1;stage2_tile=n128;post=fused"
+    torch = pytest.importorskip("torch")
+    routed = torch.randn(2, 8).to(torch.bfloat16)
+    scopes = []
+
+    @contextlib.contextmanager
+    def combine_post(residual, out=None, ready=None):  # what Petit's combine does with the scope
+        scopes.append((residual, out))
+        yield
+        out.copy_((residual.float() + routed.float()).to(torch.bfloat16))
+
+    with pytest.raises(RuntimeError, match="petit_combine_post"):
+        petit_layer.with_post(lambda: routed, "fused-add", None, None, 0, 2)
+    shared, out = torch.randn(2, 8).to(torch.bfloat16), torch.empty(2, 8, dtype=torch.bfloat16)
+    got = petit_layer.with_post(lambda: routed, "fused-add", shared, out, 0, 2, combine_post)()
+    assert got is out and scopes[-1][0] is shared and scopes[-1][1] is out
+    assert torch.equal(got, (shared.float() + routed.float()).to(torch.bfloat16))
+    shared6, out6 = torch.randn(6, 8).to(torch.bfloat16), torch.empty(6, 8, dtype=torch.bfloat16)
+    got = petit_layer.with_post(lambda: routed, "fused-copy-add", shared6, out6, 4, 2, combine_post)()
+    assert got.data_ptr() == out6[4:6].data_ptr() and torch.equal(out6[:4], shared6[:4])
+    assert scopes[-1][0].data_ptr() == scopes[-1][1].data_ptr()  # residual aliases out (in place)
+
+
+def test_rows_label_fused_post_against_the_separate_post():
+    def record(post, ms):
+        return {"profile": {"name": "dsv41_flash"}, "world_size": 4, "petit_switches": {},
+                "tokenspeed": {"commit": "c", "test": {"sha256": "t"}},
+                "args": {"routing": "test", "seed": 0, "layers": 40, "iters": 50, "post": post},
+                "results": [{"tokens_per_gpu": 6, "active_ranks": 1, "candidate": "petit", "pass": True,
+                             "timing_ms": {"graph": {"per_repetition": [
+                                 {"max_over_ranks_median_ms": ms, "max_over_ranks_min_ms": ms,
+                                  "max_over_ranks_max_ms": ms, "per_rank_median_ms": [ms]}] * 3}}}]}
+    rows = petit_layer.record_rows(record("add", 0.0954)) + petit_layer.record_rows(record("fused-add", 0.0940))
+    assert {r["post"] for r in rows} == {"add"}
+    assert {r["petit_switches"] for r in rows} == {"off", "post=fused"}
+    res = [r for r in petit_layer.project_step(rows) if r["profile"] == "dsv41_flash"]
+    assert len(res) == 1 and res[0]["delta_us"] == -1.4
+
+
+def test_stage_marks_wrap_the_c3_combine_when_present(monkeypatch):
+    import types
+    for with_c3 in (False, True):
+        mod = types.ModuleType(f"fake_mega_moe_{with_c3}")
+
+        class Adapter:
+            pass
+        Adapter.__module__ = mod.__name__
+        mod.MegaMoESolutionAdapter = Adapter
+        for name in ("MegaMoEStage1", "MegaMoEStage2", "MegaMoECombine") + (("MegaMoECombineResidual",) if with_c3 else ()):
+            setattr(mod, name, object())
+        pkg = types.ModuleType("lib.moe.rocm.mega_moe")
+        pkg.MegaMoESolutionAdapter = Adapter
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        for parent in ("lib", "lib.moe", "lib.moe.rocm"):
+            monkeypatch.setitem(sys.modules, parent, types.ModuleType(parent))
+        monkeypatch.setitem(sys.modules, "lib.moe.rocm.mega_moe", pkg)
+        monkeypatch.setattr(sys.modules["lib.moe.rocm"], "mega_moe", pkg, raising=False)
+        monkeypatch.setattr(sys.modules["lib.moe"], "rocm", sys.modules["lib.moe.rocm"], raising=False)
+        monkeypatch.setattr(sys.modules["lib"], "moe", sys.modules["lib.moe"], raising=False)
+        petit_layer.install_stage_marks()
+        assert isinstance(mod.MegaMoECombine, petit_layer._MarkedLaunch)
+        assert hasattr(mod, "MegaMoECombineResidual") == with_c3
+        if with_c3:
+            assert isinstance(mod.MegaMoECombineResidual, petit_layer._MarkedLaunch)
