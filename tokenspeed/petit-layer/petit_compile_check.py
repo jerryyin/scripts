@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile TokenSpeed's Gluon Petit stage-2 / combine kernels for gfx950 with no GPU (no device opened, nothing
+"""Compile TokenSpeed's Gluon Petit stage-1 / stage-2 / combine kernels for gfx950 with no GPU (no device opened, nothing
 launched), and compare two compiles' instruction streams.
 
   petit_compile_check.py compile --ts-src TREE --kernel stage2|stage2_n128|combine|combine_residual \
@@ -7,8 +7,10 @@ launched), and compare two compiles' instruction streams.
   petit_compile_check.py compare A.s B.s
 
 compile: a stub Triton driver answers JITFunction.run's target queries (hip / gfx950 / wave 64), the kernel's
-warmup() compiles the specialization Petit's MegaMoESolutionAdapter.Kernels builds (stage2_n128: C5b's
-MegaMoEStage2N128Config; combine_residual: C3's MegaMoECombineResidual), and the AMDGCN is written; prints
+warmup() compiles the specialization Petit's MegaMoESolutionAdapter.Kernels builds (stage1: one row, external inputs;
+stage1_n128: C5's MegaMoEStage1N128Config; stage2_n128: C5b's MegaMoEStage2N128Config; combine_residual: C3's
+MegaMoECombineResidual; trace_ping: TOKENSPEED_PETIT_TRACE's MegaMoETracePing, which needs the switch on). The
+TokenSpeed switches (TOKENSPEED_PETIT_*) in the environment apply as they do at import in a server, and the AMDGCN is written; prints
 compile time, VGPRs and LDS bytes. The platform is the owner fixture `mi350_platform` of
 tokenspeed-kernel/test/conftest.py (evaluated from that file). Run it with an LD_PRELOAD that refuses /dev/kfd
 and /dev/dri opens when another process holds the GPUs.
@@ -26,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-KERNELS = ("stage2", "stage2_n128", "combine", "combine_residual")
+KERNELS = ("stage1", "stage1_n128", "stage2", "stage2_n128", "combine", "combine_residual", "trace_ping")
 
 
 def instructions(asm: str) -> list[str]:
@@ -82,7 +84,14 @@ def compile_kernel(ts_src: Path, kernel: str, profile: str = "dsv41_flash"):
     u8 = lambda n: torch.empty(n, dtype=torch.uint8)  # noqa: E731
     bf = lambda *s: torch.empty(*s, dtype=torch.bfloat16)  # noqa: E731
     t0 = time.time()
-    if kernel.startswith("stage2"):
+    if kernel.startswith("stage1"):
+        s1, _, _ = adapter.Kernels(True, False, False, True, **({"n128": True} if kernel == "stage1_n128" else {}))
+        k = K.MegaMoEStage1.warmup(u8(64), u8(64), 1, None, u8(64), 0, u8(64), u8(64), u8(64), s1,
+                                   num_warps=s1.kNumWarps, enable_fp_fusion=False, grid=(s1.kNumSMs,))
+    elif kernel == "trace_ping":  # TOKENSPEED_PETIT_TRACE's clock-alignment kernel
+        ping = K.MegaMoETracePingKernel(adapter.Config)
+        k = K.MegaMoETracePing.warmup(u8(64), 0, 0, 0, ping, num_warps=1, grid=(1,))
+    elif kernel.startswith("stage2"):
         _, s2, _ = adapter.Kernels(True, False, False, True, **({"stage2_n128": True} if kernel == "stage2_n128" else {}))
         k = K.MegaMoEStage2.warmup(u8(64), u8(64), None, u8(64), 0, s2, num_warps=s2.kNumWarps,
                                    enable_fp_fusion=False, grid=(s2.kStage2GridBlocks,))
