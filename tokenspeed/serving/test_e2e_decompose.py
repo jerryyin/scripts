@@ -485,39 +485,50 @@ def test_line_gaps_per_rank_with_log_timestamps() -> None:
     assert e2e.line_gap_lines(gaps)[0] == f"measured-1-c2.log rank 1 Prefill -> Decode {ts(T + 0.1)} -> {ts(T + 1.6)} 1.50s"
 
 
+def _accept_bench(path, rows):
+    """benchmark.json with one result per (phase, tok/s, TTFT ms, TPOT ms, EvalScope summary acceptance), O = 101."""
+    results = [{"phase": ph, "concurrency": 1, "summary": {
+        "Avg Output Tokens": 101.0, "Output Throughput (tok/s)": tps, "Avg TTFT (ms)": ttft,
+        "Avg TPOT (ms)": tpot, "Avg Latency (s)": (ttft + 100 * tpot) / 1e3, "Avg Decoded Tok/Iter": acc}}
+        for ph, tps, ttft, tpot, acc in rows]
+    path.write_text(json.dumps({"results": results}))
+
+
+def _accept_decomp(path, labels_gap):
+    runs = [{"label": lab, "ranks": {"0": {"prefill_time_s": 1.0, "decode_time_s": 1.0, "prefill_chunks": 1,
+                                           "chunk_time_s": {"median": 0.1},
+                                           "full_batch_line_gap_s": {"median": gap},
+                                           "prefill_to_decode_gap_s": {"max": 0.0}}}}
+            for lab, gap in labels_gap]
+    path.write_text(json.dumps(runs))
+
+
+def _accept_requests(path, rows):
+    """Per-request EvalScope records (phase, request id, acc_len) and the server's Accept lines (rid, value)."""
+    path.with_suffix(".req").write_text("".join(json.dumps({"phase": ph, "concurrency": 1, "request_id": rid,
+                                                             "acc_len": acc}) + "\n" for ph, rid, acc, _ in rows))
+    path.with_suffix(".log").write_text("".join(
+        f"[ts] {ts(1.8e9)}  INFO ts_control::output: Req: {rid} Finish! Accept_num_tokens_avg: {srv}\n"
+        for _, rid, _, srv in rows if srv is not None))
+
+
 def test_accept_split_parts_sum_to_the_gap() -> None:
     e2e = load("e2e_decompose.py")
-
-    def bench(path, rows):
-        results = [{"phase": ph, "concurrency": 1, "summary": {
-            "Avg Output Tokens": 101.0, "Output Throughput (tok/s)": tps, "Avg TTFT (ms)": ttft,
-            "Avg TPOT (ms)": tpot, "Avg Latency (s)": (ttft + 100 * tpot) / 1e3, "Avg Decoded Tok/Iter": acc}}
-            for ph, tps, ttft, tpot, acc in rows]
-        path.write_text(json.dumps({"results": results}))
-
-    def decomp(path, labels_gap):
-        runs = [{"label": lab, "ranks": {"0": {"prefill_time_s": 1.0, "decode_time_s": 1.0, "prefill_chunks": 1,
-                                               "chunk_time_s": {"median": 0.1},
-                                               "full_batch_line_gap_s": {"median": gap},
-                                               "prefill_to_decode_gap_s": {"max": 0.0}}}}
-                for lab, gap in labels_gap]
-        path.write_text(json.dumps(runs))
-
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         # REF: step 10 ms, A 5 -> 2 ms/token; X: step 12 ms, A 4 -> 3 ms/token, plus 0.1 ms/token other
-        bench(d / "ref.json", [("measured-1", 300.0, 700.0, 2.0, 5.0), ("measured-2", 300.0, 700.0, 2.0, 5.0)])
-        bench(d / "x.json", [("measured-1", 200.0, 800.0, 3.1, 4.0), ("measured-2", 250.0, 800.0, 2.4, 5.0)])
-        decomp(d / "ref-d.json", [("measured-1", 0.4), ("measured-2", 0.4)])  # 0.4 s / 40 rounds = 10 ms
-        decomp(d / "x-d.json", [("measured-1", 0.48), ("measured-2", 0.48)])
-        (d / "x.log").write_text(
-            f"[ts] {ts(1.8e9)}  INFO ts_control::output: Req: r1 Finish! Accept_num_tokens_avg: 4.0\n")
-        (d / "x.req").write_text(json.dumps({"phase": "measured-1", "concurrency": 1, "request_id": "r1",
-                                             "acc_len": 4.2}) + "\n")
+        _accept_bench(d / "ref.json", [("measured-1", 300.0, 700.0, 2.0, 5.0), ("measured-2", 300.0, 700.0, 2.0, 5.0)])
+        _accept_bench(d / "x.json", [("measured-1", 200.0, 800.0, 3.1, 4.0), ("measured-2", 250.0, 800.0, 2.4, 5.0)])
+        _accept_decomp(d / "ref-d.json", [("measured-1", 0.4), ("measured-2", 0.4)])  # 0.4 s / 40 rounds = 10 ms
+        _accept_decomp(d / "x-d.json", [("measured-1", 0.48), ("measured-2", 0.48)])
+        _accept_requests(d / "ref", [("measured-1", "q1", 5.1, 5.0), ("measured-2", "q2", 5.0, 5.0)])
+        _accept_requests(d / "x", [("measured-1", "r1", 4.2, 4.0), ("measured-2", "r2", 5.0, 5.0)])
         res = e2e.accept_split([("REF", str(d / "ref.json")), ("X", str(d / "x.json"))],
                                {"REF": str(d / "ref-d.json"), "X": str(d / "x-d.json")}, 40,
-                               {"X": [str(d / "x.log")]}, {"X": [str(d / "x.req")]})
+                               {k: [str(d / f"{k.lower()}.log")] for k in ("REF", "X")},
+                               {k: [str(d / f"{k.lower()}.req")] for k in ("REF", "X")})
     p1 = next(p for p in res["pairs"] if p["phase"] == "measured-1")
+    assert p1["acceptance_source"] == "server" and "split_incomplete" not in p1
     assert abs(p1["ttft_part_ms"] - 100.0) < 1e-9
     assert abs(p1["step_part_ms"] - 100 * 2 / 5) < 1e-9          # D (s_X - s_R) / A_R = 40 ms
     assert abs(p1["accept_part_ms"] - 100 * 12 * (1 / 4 - 1 / 5)) < 1e-9  # 60 ms
@@ -526,11 +537,62 @@ def test_accept_split_parts_sum_to_the_gap() -> None:
     assert abs(parts - p1["latency_gap_ms"]) < 1e-9
     assert abs(p1["log_accept"] + p1["log_step"] - (math.log(4 / 5) - math.log(1.2))) < 1e-12
     x1 = next(p for p in res["points"] if p["label"] == "X" and p["phase"] == "measured-1")
-    assert x1["acceptance_source"].startswith("server") and x1["acceptance"] == 4.0
+    assert x1["acceptance_source"] == "server" and x1["acceptance"] == 4.0
     assert abs(x1["acceptance_evalscope_vs_server_max_abs_diff"] - 0.2) < 1e-9
     row = res["summary"][0]
-    assert row["repetitions"] == 2 and row["accept_part_ms"]["min"] == 0.0
+    assert row["repetitions"] == 2 and row["split_incomplete"] == 0 and row["accept_part_ms"]["min"] == 0.0
     assert "acceptance share" in e2e.accept_split_markdown(res)
     ps = {r["label"]: r for r in res["point_summary"]}
     assert set(ps) == {"REF", "X"} and all(r["tok_per_s"]["n"] == r["repetitions"] for r in ps.values())
     assert "| step/A ms |" in e2e.accept_split_markdown(res)
+
+
+def test_accept_split_uses_the_harmonic_mean_of_per_request_acceptance() -> None:
+    """Decode time follows mean(1/A_i): REF requests at A = 3, 3 and X requests at A = 2, 4 have the same
+    arithmetic mean 3, but X's TPOT = s x mean(1/A_i) = 20 x 0.375 = 7.5 ms against REF's 20 / 3 ms. With
+    D = 499 and the same 20 ms step, X decodes 499 x 20 x (0.375 - 1/3) = 415.8 ms longer, all of it acceptance."""
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        for name, tpot, accs in (("ref", 20 / 3, (3.0, 3.0)), ("x", 7.5, (2.0, 4.0))):
+            res = {"phase": "measured-1", "concurrency": 1, "summary": {
+                "Avg Output Tokens": 500.0, "Output Throughput (tok/s)": 100.0, "Avg TTFT (ms)": 50.0,
+                "Avg TPOT (ms)": tpot, "Avg Latency (s)": (50 + 499 * tpot) / 1e3, "Avg Decoded Tok/Iter": 3.0}}
+            (d / f"{name}.json").write_text(json.dumps({"results": [res]}))
+            _accept_decomp(d / f"{name}-d.json", [("measured-1", 0.8)])  # 0.8 s / 40 rounds = 20 ms
+            _accept_requests(d / name, [("measured-1", f"{name}{i}", a, a) for i, a in enumerate(accs)])
+        res = e2e.accept_split([("REF", str(d / "ref.json")), ("X", str(d / "x.json"))],
+                               {"REF": str(d / "ref-d.json"), "X": str(d / "x-d.json")}, 40,
+                               {k: [str(d / f"{k.lower()}.log")] for k in ("REF", "X")},
+                               {k: [str(d / f"{k.lower()}.req")] for k in ("REF", "X")})
+    p = res["pairs"][0]
+    assert abs(p["latency_gap_ms"] - 499 * (7.5 - 20 / 3)) < 1e-9
+    assert abs(p["accept_part_ms"] - 499 * 20 * (0.375 - 1 / 3)) < 1e-9 and abs(p["accept_part_ms"] - 415.83) < 0.01
+    assert abs(p["step_part_ms"]) < 1e-9 and abs(p["other_part_ms"]) < 1e-9 and p["ttft_part_ms"] == 0
+    assert {x["label"]: x["acceptance"] for x in res["points"]} == {"REF": 3.0, "X": 8 / 3}
+
+
+def test_accept_split_pair_needs_one_acceptance_source() -> None:
+    """REF's requests all match server lines, X's do not: the pair has no acceptance split (the server counts
+    verify steps, EvalScope stream chunks), and the summary counts it as incomplete."""
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        _accept_bench(d / "ref.json", [("measured-1", 300.0, 700.0, 2.0, 5.0)])
+        _accept_bench(d / "x.json", [("measured-1", 200.0, 800.0, 3.1, 4.0)])
+        _accept_decomp(d / "ref-d.json", [("measured-1", 0.4)])
+        _accept_decomp(d / "x-d.json", [("measured-1", 0.48)])
+        _accept_requests(d / "ref", [("measured-1", "q1", 5.0, 5.0)])
+        _accept_requests(d / "x", [("measured-1", "r1", 4.0, None)])
+        res = e2e.accept_split([("REF", str(d / "ref.json")), ("X", str(d / "x.json"))],
+                               {"REF": str(d / "ref-d.json"), "X": str(d / "x-d.json")}, 40,
+                               {k: [str(d / f"{k.lower()}.log")] for k in ("REF", "X")},
+                               {k: [str(d / f"{k.lower()}.req")] for k in ("REF", "X")})
+        without = e2e.accept_split([("REF", str(d / "ref.json")), ("X", str(d / "x.json"))],
+                                   {"REF": str(d / "ref-d.json"), "X": str(d / "x-d.json")}, 40)
+    p = res["pairs"][0]
+    assert p["split_incomplete"] == "acceptance sources differ: evalscope requests vs server"
+    assert "accept_part_ms" not in p and res["summary"][0]["split_incomplete"] == 1
+    assert res["summary"][0]["accept_part_ms"] is None and abs(p["ttft_part_ms"] - 100) < 1e-9
+    # without per-request values the EvalScope summary (an arithmetic mean) is not used for the split
+    assert without["pairs"][0]["split_incomplete"].startswith("no per-request acceptance")

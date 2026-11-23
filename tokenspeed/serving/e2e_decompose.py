@@ -132,28 +132,33 @@ that the decomposition only counts (prefill_stalls), e.g. as --activity-window b
 tool's decomposition of that run: --benchmark-json --server-log --out-json) for every label and
 --decode-log-interval N splits each configuration's gap to the first (REF) into DSpark acceptance and speed,
 per point (phase and concurrency) paired with REF's point of the same phase and concurrency (the same prompts).
-Per point and label: output tok/s, mean TTFT and TPOT (EvalScope summary), acceptance A (EvalScope "Avg Decoded
-Tok/Iter": mean over requests of (completion tokens - 1) / (stream chunks - 1)) and the decode step s (the
-full-batch decode round of --point-table: per rank median full-batch Decode-line gap / N, upper median over
-ranks). --accept-server-log LABEL=LOG adds the server's own per-request acceptance (`Req: RID Finish!
-Accept_num_tokens_avg: X`, batch_log kind "Accept") and --accept-requests LABEL=JSONL (amd-tracking
-evalscope_degeneracy.py --requests output) the per-request EvalScope acceptance; both together are matched by
-request id (the stream's completion id is the server's rid) and their largest per-request difference is
-reported. Each mean request of X is TTFT + (O-1) x TPOT. A below is the server's per-request mean when every request of the point matched a server
-line (the server counts verify steps; EvalScope counts stream chunks, which can carry more than one step), else
-EvalScope's (each point names its acceptance_source). With D = (O-1):
+Per point and label: output tok/s, mean TTFT and TPOT (EvalScope summary), the decode step s (the full-batch
+decode round of --point-table: per rank median full-batch Decode-line gap / N, upper median over ranks) and
+the acceptance A from per-request values: --accept-requests LABEL=JSONL (amd-tracking evalscope_degeneracy.py
+--requests output: per request EvalScope's (completion tokens - 1) / (stream chunks - 1)) and, matched by
+request id (the stream's completion id is the server's rid), --accept-server-log LABEL=LOG (the server's
+`Req: RID Finish! Accept_num_tokens_avg: X`, batch_log kind "Accept"). The server's values are used when
+every request of the point matched one (the server counts verify steps; EvalScope counts stream chunks, which
+can carry more than one step), else EvalScope's per-request values; acceptance_source names the one used and
+the largest per-request difference between the two is reported. A request of A_i tokens per step decodes in
+(O-1) / A_i steps, so the mean TPOT is s x mean(1/A_i) and A is the harmonic mean 1 / mean(1/A_i); the
+arithmetic means (EvalScope's "Avg Decoded Tok/Iter" among them) are shown for information. Each mean request
+of X is TTFT + (O-1) x TPOT. With D = (O-1):
   ttft_part_ms   = TTFT_X - TTFT_REF
   step_part_ms   = D x (s_X - s_REF) / A_REF          (X's step at REF's acceptance)
   accept_part_ms = D x s_X x (1/A_X - 1/A_REF)        (X's acceptance at X's step)
   other_part_ms  = D x [(TPOT_X - s_X/A_X) - (TPOT_REF - s_REF/A_REF)]  (decode time per token that is not
                    step / acceptance: prefill rounds interleaved at C >= 2, scheduling gaps)
-which sum to the latency gap D x (TPOT_X - TPOT_REF) + TTFT_X - TTFT_REF exactly; shares are parts / gap.
+which sum to the latency gap D x (TPOT_X - TPOT_REF) + TTFT_X - TTFT_REF exactly; shares are parts / gap. The
+two points of a pair must take A from the same source; a pair whose sources differ, or a point without
+per-request acceptance, has no step, acceptance or other part (split_incomplete names why).
 In log terms the decode rate is A / s, so log(rate_X / rate_REF) = log(A_X / A_REF) - log(s_X / s_REF)
 (log_accept, log_step). Per label and concurrency the measured points (phase measured, measured-N) give
-median [min, max] of every part, share and ratio; warmup points are listed in the per-point table only.
---concurrency-list restricts the concurrencies (e.g. 1,2). point_summary (and the last Markdown table) gives per label and
-concurrency the median [min, max] over the measured points of tok/s, TTFT, TPOT, the acceptance used (with its
-source), EvalScope's acceptance beside it, the decode step and step/A.
+median [min, max] of every part, share and ratio (n counts the repetitions that have the part); warmup points
+are listed in the per-point table only. --concurrency-list restricts the concurrencies (e.g. 1,2).
+point_summary (and the last Markdown table) gives per label and concurrency the median [min, max] over the
+measured points of tok/s, TTFT, TPOT, the acceptance used (with its source), EvalScope's summary acceptance
+beside it, the decode step and step/A.
 """
 import argparse, collections, csv, datetime as dt, hashlib, itertools, json, math, os, statistics, sys
 
@@ -938,9 +943,15 @@ def _range(values):
     return {"median": statistics.median(v), "min": min(v), "max": max(v), "n": len(v)} if v else None
 
 
+def harmonic_mean(values):
+    """1 / mean(1/v): the acceptance whose step count matches a set of requests' (each decodes in D / A_i steps)."""
+    return len(values) / sum(1 / v for v in values)
+
+
 def accept_points(label, bench, decomp, interval, server_log=None, requests=None, concurrencies=None):
-    """Per (phase, concurrency) point of one run: tok/s, TTFT, TPOT, acceptance (EvalScope; per-request
-    EvalScope and server when given) and the decode step (s) from this tool's decomposition JSON."""
+    """Per (phase, concurrency) point of one run: tok/s, TTFT, TPOT, the decode step (s) from this tool's
+    decomposition JSON and the acceptance: the harmonic mean of per-request values, the server's when every
+    request matched a server line, else EvalScope's per-request values, else None (acceptance_source None)."""
     bj = json.load(open(bench))
     steps = {}
     for row in point_table([decomp], interval):
@@ -964,27 +975,28 @@ def accept_points(label, bench, decomp, interval, server_log=None, requests=None
                  "output_tokens": float(s["Avg Output Tokens"]),
                  "tok_per_s": float(s["Output Throughput (tok/s)"]), "ttft_ms": float(s["Avg TTFT (ms)"]),
                  "tpot_ms": float(s["Avg TPOT (ms)"]), "latency_ms": float(s["Avg Latency (s)"]) * 1e3,
-                 "acceptance": s.get("Avg Decoded Tok/Iter"), "acceptance_source": "evalscope Avg Decoded Tok/Iter",
+                 "acceptance": None, "acceptance_source": None,
+                 "acceptance_evalscope_summary": s.get("Avg Decoded Tok/Iter"),
                  "step_ms": None if steps.get(name) is None else steps[name] * 1e3}
         reqs = per_req.get((r["phase"], c), [])
+        acc = [x["acc_len"] for x in reqs if x.get("acc_len") is not None]
+        srv = [server[x["request_id"]] for x in reqs if x.get("request_id") in server]
         if reqs:
-            acc = [x["acc_len"] for x in reqs if x.get("acc_len") is not None]
             point["acceptance_requests"] = acc
             point["acceptance_requests_mean"] = statistics.mean(acc) if acc else None
-            if server:
-                matched = [(x["acc_len"], server.get(x.get("request_id"))) for x in reqs]
-                srv = [b for _, b in matched if b is not None]
-                point["acceptance_server"] = srv
-                point["acceptance_server_mean"] = statistics.mean(srv) if srv else None
-                point["server_matched_requests"] = len(srv)
-                diffs = [abs(a - b) for a, b in matched if a is not None and b is not None]
-                point["acceptance_evalscope_vs_server_max_abs_diff"] = max(diffs) if diffs else None
+        if reqs and server:
+            point["acceptance_server"] = srv
+            point["acceptance_server_mean"] = statistics.mean(srv) if srv else None
+            point["server_matched_requests"] = len(srv)
+            diffs = [abs(x["acc_len"] - server[x["request_id"]]) for x in reqs
+                     if x.get("acc_len") is not None and x.get("request_id") in server]
+            point["acceptance_evalscope_vs_server_max_abs_diff"] = max(diffs) if diffs else None
         # The server counts verify steps; EvalScope counts stream chunks, and one chunk can carry more than
-        # one step's tokens, so the server's mean (when every request matched) is the acceptance used.
-        if point.get("acceptance_server") and len(point["acceptance_server"]) == len(reqs):
-            point["acceptance_evalscope"] = point["acceptance"]
-            point["acceptance"] = point["acceptance_server_mean"]
-            point["acceptance_source"] = "server Accept_num_tokens_avg, mean over requests"
+        # one step's tokens, so the server's values (when every request matched) are the ones used.
+        if reqs and len(srv) == len(reqs):
+            point["acceptance"], point["acceptance_source"] = harmonic_mean(srv), "server"
+        elif reqs and len(acc) == len(reqs):
+            point["acceptance"], point["acceptance_source"] = harmonic_mean(acc), "evalscope requests"
         if point["acceptance"] is not None and point["step_ms"]:
             point["implied_tpot_ms"] = point["step_ms"] / point["acceptance"]
         out[(r["phase"], c)] = point
@@ -1017,8 +1029,16 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
             pair["log_tok_per_s_ratio"] = math.log(pair["tok_per_s_ratio"])
             pair["latency_gap_ms"] = (x["ttft_ms"] + d * x["tpot_ms"]) - (r["ttft_ms"] + d * r["tpot_ms"])
             pair["ttft_part_ms"] = x["ttft_ms"] - r["ttft_ms"]
-            if all(v.get("acceptance") and v.get("step_ms") for v in (x, r)):
+            if x["acceptance_source"] != r["acceptance_source"]:
+                pair["split_incomplete"] = (f"acceptance sources differ: {x['acceptance_source']} vs "
+                                            f"{r['acceptance_source']}")
+            elif x["acceptance_source"] is None:
+                pair["split_incomplete"] = "no per-request acceptance (--accept-requests)"
+            elif not (x["step_ms"] and r["step_ms"]):
+                pair["split_incomplete"] = "no decode step in the decomposition"
+            else:
                 ax, ar, sx, sr = x["acceptance"], r["acceptance"], x["step_ms"], r["step_ms"]
+                pair["acceptance_source"] = x["acceptance_source"]
                 pair.update(acceptance_ratio=ax / ar, step_ratio=sx / sr,
                             log_accept=math.log(ax / ar), log_step=-math.log(sx / sr),
                             step_part_ms=d * (sx - sr) / ar, accept_part_ms=d * sx * (1 / ax - 1 / ar),
@@ -1031,7 +1051,8 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
         for c in cs:
             meas = [p for p in res["pairs"] if p["label"] == label and p["concurrency"] == c
                     and str(p["phase"]).startswith(phase_prefix)]
-            row = {"label": label, "reference": ref, "concurrency": c, "repetitions": len(meas)}
+            row = {"label": label, "reference": ref, "concurrency": c, "repetitions": len(meas),
+                   "split_incomplete": sum("split_incomplete" in p for p in meas)}
             for k in ("tok_per_s_ratio", "acceptance_ratio", "step_ratio", "latency_gap_ms", "ttft_part_ms",
                       "step_part_ms", "accept_part_ms", "other_part_ms", "ttft_share", "step_share",
                       "accept_share", "other_share", "log_tok_per_s_ratio", "log_accept", "log_step"):
@@ -1043,8 +1064,9 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
         for c in sorted({k[1] for k in points[label]}):
             meas = [p for k, p in points[label].items() if k[1] == c and str(k[0]).startswith(phase_prefix)]
             row = {"label": label, "concurrency": c, "repetitions": len(meas),
-                   "acceptance_source": sorted({p["acceptance_source"] for p in meas})}
-            for k in ("tok_per_s", "ttft_ms", "tpot_ms", "acceptance", "acceptance_evalscope", "step_ms", "implied_tpot_ms"):
+                   "acceptance_source": sorted({str(p["acceptance_source"]) for p in meas})}
+            for k in ("tok_per_s", "ttft_ms", "tpot_ms", "acceptance", "acceptance_evalscope_summary", "step_ms",
+                      "implied_tpot_ms"):
                 row[k] = _range([p.get(k) for p in meas])
             res["point_summary"].append(row)
     return res
@@ -1052,11 +1074,12 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
 
 def accept_split_markdown(res):
     f = lambda v, spec: "-" if v is None else format(v, spec)
-    out = ["| config | phase | C | tok/s | TTFT ms | TPOT ms | acceptance used | per-request EvalScope mean "
+    out = ["| config | phase | C | tok/s | TTFT ms | TPOT ms | acceptance used (harmonic; source) | per-request EvalScope mean "
            "| server mean (matched) | max abs diff | decode step ms | step/A ms |", "|" + "---|" * 12]
     for p in res["points"]:
         out.append(f"| {p['label']} | {p['phase']} | {p['concurrency']} | {p['tok_per_s']:.1f} | {p['ttft_ms']:.1f} | "
-                   f"{p['tpot_ms']:.2f} | {f(p['acceptance'], '.3f')} | {f(p.get('acceptance_requests_mean'), '.3f')} | "
+                   f"{p['tpot_ms']:.2f} | {f(p['acceptance'], '.3f')} ({p['acceptance_source'] or '-'}) | "
+                   f"{f(p.get('acceptance_requests_mean'), '.3f')} | "
                    f"{f(p.get('acceptance_server_mean'), '.3f')} ({p.get('server_matched_requests', '-')}) | "
                    f"{f(p.get('acceptance_evalscope_vs_server_max_abs_diff'), '.3f')} | {f(p['step_ms'], '.2f')} | "
                    f"{f(p.get('implied_tpot_ms'), '.2f')} |")
@@ -1077,12 +1100,12 @@ def accept_split_markdown(res):
                    f"{rng(r['latency_gap_ms'], '.0f')} | {rng(r['ttft_part_ms'], '.0f')} | {rng(r['step_part_ms'], '.0f')} | "
                    f"{rng(r['accept_part_ms'], '.0f')} | {rng(r['other_part_ms'], '.0f')} | {rng(r['accept_share'], '.2f')} | "
                    f"{rng(r['step_share'], '.2f')} | {rng(r['ttft_share'], '.2f')} |")
-    out += ["", "| config | C | reps | tok/s | TTFT ms | TPOT ms | acceptance used | EvalScope acceptance | decode step ms "
+    out += ["", "| config | C | reps | tok/s | TTFT ms | TPOT ms | acceptance used (harmonic) | EvalScope summary acceptance | decode step ms "
             "| step/A ms |", "|" + "---|" * 10]
     for r in res.get("point_summary", []):
         out.append(f"| {r['label']} | {r['concurrency']} | {r['repetitions']} | {rng(r['tok_per_s'], '.1f')} | "
                    f"{rng(r['ttft_ms'], '.0f')} | {rng(r['tpot_ms'], '.2f')} | {rng(r['acceptance'], '.2f')} | "
-                   f"{rng(r['acceptance_evalscope'], '.2f')} | {rng(r['step_ms'], '.2f')} | {rng(r['implied_tpot_ms'], '.2f')} |")
+                   f"{rng(r['acceptance_evalscope_summary'], '.2f')} | {rng(r['step_ms'], '.2f')} | {rng(r['implied_tpot_ms'], '.2f')} |")
     return "\n".join(out) + "\n"
 
 
