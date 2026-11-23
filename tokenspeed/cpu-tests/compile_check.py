@@ -2,8 +2,8 @@
 """Compile TokenSpeed MoE kernels for gfx950 with no GPU (no device opened, nothing launched), and compare
 two AMDGCN listings' instruction streams.
 
-  petit_compile_check.py compile --ts-src TREE --kernel KERNEL [--profile dsv41_flash] [--asm-out FILE]
-  petit_compile_check.py compare A.s B.s
+  compile_check.py compile --ts-src TREE --kernel KERNEL [--profile dsv41_flash] [--asm-out FILE]
+  compile_check.py compare A.s B.s
 
 compile: a stub Triton driver answers JITFunction.run's target queries (hip / gfx950 / wave 64) and the kernel's
 warmup() compiles one specialization; prints compile time, VGPRs, LDS bytes and the instruction count, and
@@ -67,7 +67,7 @@ NEEDS_TOKENSPEED = ("a TokenSpeed whose tokenspeed_kernel.ops.moe.gluon has _meg
 def require_megamoe_config(test_module) -> None:
     """Exit naming the TokenSpeed this tool needs when the owner test has no _megamoe_config."""
     if not hasattr(test_module, "_megamoe_config"):
-        raise SystemExit(f"petit_compile_check.py compile needs {NEEDS_TOKENSPEED}; "
+        raise SystemExit(f"compile_check.py compile needs {NEEDS_TOKENSPEED}; "
                          f"{test_module.__file__} imports none")
 
 

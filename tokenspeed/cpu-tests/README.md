@@ -22,5 +22,25 @@ tokenspeed/cpu-tests/run_cpu_tests.sh "$TREE" OFF "TOKENSPEED_PETIT_TRACE=1"
 ```
 
 `test_run_cpu_tests.py` runs it on a fake tree (platform taken from the fixture, device open
-refused, a failing set fails the run). `tokenspeed/petit-layer/petit_compile_check.py` compiles
-Petit kernels offline; run it under `board/no-gpu/no-gpu-run` too.
+refused, a failing set fails the run).
+
+`compile_check.py compile --ts-src TREE --kernel KERNEL` compiles one TokenSpeed MoE kernel for
+gfx950 without a GPU (a stub Triton driver answers the target queries, nothing is launched) and
+prints compile time, VGPRs, LDS bytes and instruction count (`--asm-out` writes the AMDGCN). The
+kernels are Gluon Petit's `stage1`, `stage2`, `combine` and its opt-in variants `stage1_n128`
+(`TOKENSPEED_PETIT_STAGE1_N128`), `stage2_n128` (`TOKENSPEED_PETIT_STAGE2_N128`),
+`combine_residual` (`TOKENSPEED_PETIT_FUSE_POST`) and `trace_ping` (`TOKENSPEED_PETIT_TRACE=1`),
+and, not Petit, `a4w4_ep_finalize`, the A4W4 EP registration's one-launch finalize
+(`TOKENSPEED_A4W4_EP_FUSED_FINALIZE`). TokenSpeed's switches in the environment apply as at a
+server's import. The Petit kernels need a TokenSpeed whose `tokenspeed_kernel.ops.moe.gluon` has
+`_megamoe_config` (46671ec2c and later on `users/jerryyin/ep4-beats-tp4`; upstream main has none,
+and the tool says so and exits). `compile_check.py compare A.s B.s` is generic: it compares the
+instruction lines of any two AMDGCN listings (no directives, labels, comments or debug lines), e.g.
+to show a switch-off kernel is unchanged between two trees, and exits 1 when they differ. Run
+`compile` under `board/no-gpu/no-gpu-run` too; `test_compile_check.py` tests the comparison, the
+usage against the kernel list and the TokenSpeed requirement message.
+
+```bash
+board/no-gpu/no-gpu-run -- python3 tokenspeed/cpu-tests/compile_check.py compile --ts-src "$TREE" \
+    --kernel stage2 --asm-out stage2.s
+```

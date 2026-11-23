@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location("petit_compile_check", HERE / "petit_compile_check.py")
+spec = importlib.util.spec_from_file_location("compile_check", HERE / "compile_check.py")
 pcc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pcc)
 
