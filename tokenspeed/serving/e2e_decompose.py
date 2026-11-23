@@ -27,6 +27,8 @@ Attribution rule (per rank, consecutive lines a -> b of that rank, gap = b.ts - 
     = last line + remaining decode tokens / last gen throughput, capped at run end;
     remaining tokens = rank decode tokens - tokens accounted by Decode lines.
   * idle = run span - prefill - decode (start lag + end lag).
+The busiest rank of a run, in every table, model and fit below, is the rank with the largest prefill + decode
+time (busiest_rank).
 Per rank it also reports residency (max running requests, max queued requests on Decode lines,
 i.e. waiting while the rank decodes) and the gap between
 consecutive Decode lines at the rank's full batch with no prefill between them (one log interval
@@ -112,10 +114,6 @@ the busiest rank (largest prefill + decode time), its prefill chunks x median ch
 (per rank the median full-batch Decode-line gap / N; over the ranks that have one, the upper median, element n // 2
 of the sorted values); and the largest prefill_to_decode_gap_s max over ranks with its rank (Markdown, --out-json).
 
---line-gaps THRESHOLD_S --log SLICE... lists, per log and rank, every gap > THRESHOLD_S s between consecutive
-Prefill/Mix/Decode lines of that rank with both lines' kinds and log timestamps: the times of the prefill-chunk stalls
-that the decomposition only counts (prefill_stalls), e.g. as --activity-window bounds.
-
 --accept-split REF=BENCHMARK_JSON --accept-split X=BENCHMARK_JSON ... (amd-tracking matrix benchmark.json files of
 the same workload) splits each configuration's mean end-to-end latency gap to the first (REF), per point (phase
 and concurrency) paired with REF's point of the same phase and concurrency (the same prompts and repetition), into
@@ -155,7 +153,7 @@ beside it, the decode step and step/A.
 import argparse, collections, csv, datetime as dt, hashlib, itertools, json, math, os, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from batch_log import TS_PATTERNS, parse_lines, parse_ts  # noqa: E402
+from batch_log import parse_lines, parse_ts  # noqa: E402
 
 
 def fmt(value, spec):
@@ -176,6 +174,13 @@ def pct(xs, q):
         return None
     xs = sorted(xs); k = (len(xs) - 1) * q; i = int(k)
     return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
+
+
+def busiest_rank(ranks):
+    """(rank id, record) of the busiest rank of a run's "ranks": the largest prefill + decode time. Every table,
+    model and fit of this tool takes this one rank."""
+    k = max(ranks, key=lambda q: ranks[q]["prefill_time_s"] + ranks[q]["decode_time_s"])
+    return k, ranks[k]
 
 
 def prefill_to_decode_gaps(p2d, cmed, dmed):
@@ -428,8 +433,7 @@ def point_table(paths, interval):
             R = r.get("ranks") or {}
             if not R:
                 continue
-            k = max(R, key=lambda q: R[q]["prefill_time_s"] + R[q]["decode_time_s"])
-            b = R[k]
+            k, b = busiest_rank(R)
             chunk = b["chunk_time_s"]["median"] if b.get("chunk_time_s") else None
             rounds = {q: x["full_batch_line_gap_s"]["median"] / interval for q, x in R.items()
                       if (x.get("full_batch_line_gap_s") or {}).get("median")}
@@ -457,32 +461,6 @@ def point_table_lines(rows):
                    f"{fmt(None if x['decode_round_s_upper_median'] is None else x['decode_round_s_upper_median'] * 1e3, '.1f')}"
                    f" ({per or '-'}) | {x['prefill_to_decode_gap_max_s']:.2f} ({x['prefill_to_decode_gap_max_rank']}) |")
     return out
-
-
-def line_gaps(paths, threshold):
-    """Per log and rank, every gap > threshold s between consecutive Prefill/Mix/Decode lines of that rank
-    (batch_log.parse_line; no #dp-rank -> rank 0), with both lines' kinds and timestamps as written in the log.
-    Gives timestamps to the prefill-chunk stalls the decomposition only counts (prefill_stalls), e.g. as
-    --activity-window bounds."""
-    iso = next(p for p, kind in TS_PATTERNS if kind == "iso")
-    out = []
-    for path in paths:
-        prev = {}
-        for e in parse_lines(open(path, errors="replace")):
-            if e["kind"] in ("Finish", "Accept") or e["ts"] is None:
-                continue
-            m = iso.search(e["line"]); r = e["dp_rank"]
-            text = m.group(0) if m else dt.datetime.fromtimestamp(e["ts"], dt.timezone.utc).isoformat()
-            if r in prev and e["ts"] - prev[r][0] > threshold:
-                out.append({"log": os.path.basename(path), "rank": r, "from_kind": prev[r][1], "to_kind": e["kind"],
-                            "from_utc": prev[r][2], "to_utc": text, "gap_s": e["ts"] - prev[r][0]})
-            prev[r] = (e["ts"], e["kind"], text)
-    return out
-
-
-def line_gap_lines(gaps):
-    return [f"{g['log']} rank {g['rank']} {g['from_kind']} -> {g['to_kind']} {g['from_utc']} -> {g['to_utc']} "
-            f"{g['gap_s']:.2f}s" for g in gaps]
 
 
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
@@ -702,8 +680,8 @@ def markdown(runs, log_interval=None):
     lines = [head, "|" + "---|" * 10]
     for r in runs:
         R = r["ranks"]
-        k = max(R, key=lambda q: R[q]["prefill_time_s"] + R[q]["decode_time_s"])
-        b = R[k]; span = r["server_span_s"]
+        k, b = busiest_rank(R)
+        span = r["server_span_s"]
         g = b["full_batch_line_gap_s"]["median"]
         rnd = f"{g / log_interval * 1e3:.1f}" if g and log_interval else "-"
         acc = [R[q]["avg_accept_len_line_mean"] for q in sorted(R)]
@@ -753,7 +731,7 @@ def run_terms(runs, interval, steps):
     """Medians over runs of the busiest rank's prefill, decode and idle time and Decode-line step."""
     if any(not r["ranks"] for r in runs):
         raise SystemExit("a run has no ranks")
-    b = [max(r["ranks"].values(), key=lambda x: x["prefill_time_s"] + x["decode_time_s"]) for r in runs]
+    b = [busiest_rank(r["ranks"])[1] for r in runs]
     if any(x["decode_line_interval_median_s"] is None for x in b):
         raise SystemExit("a run's busiest rank has no consecutive Decode lines")
     accs = [(r.get("requeststats") or {}).get("acc_len_mean") for r in runs]
@@ -1046,15 +1024,11 @@ def run_concurrency(r):
     return int(c) if sep and c.isdigit() else None
 
 
-def busiest_rank(r):
-    return max(r["ranks"].values(), key=lambda x: x["prefill_time_s"])
-
-
 def fit_chunk_line(runs):
     """(a_s, b_s_per_token, points {size: median s}) of t = a + b x over the runs' busiest ranks."""
     bysize = collections.defaultdict(list)
     for r in runs:
-        for k, v in busiest_rank(r)["chunk_time_by_size_median_s"].items():
+        for k, v in busiest_rank(r["ranks"])[1]["chunk_time_by_size_median_s"].items():
             bysize[int(k)].append(v)
     pts = {k: statistics.median(v) for k, v in sorted(bysize.items())}
     if len(pts) < 2:
@@ -1082,7 +1056,7 @@ def fit_chunk_line_spread(runs):
     by = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in runs:
         n = run_repetition(r)
-        for k, v in busiest_rank(r)["chunk_time_by_size_median_s"].items():
+        for k, v in busiest_rank(r["ranks"])[1]["chunk_time_by_size_median_s"].items():
             by[int(k)][n].append(v)
     if len(by) < 2:
         return None
@@ -1108,7 +1082,7 @@ def decode_steps(runs, interval):
     and line-mean acceptance."""
     by = collections.defaultdict(list)
     for r in runs:
-        c, x = run_concurrency(r), busiest_rank(r)
+        c, x = run_concurrency(r), busiest_rank(r["ranks"])[1]
         if c is not None and x["full_batch_line_gap_s"]["median"] and x["full_batch_accept_len_line_mean"]:
             by[c].append((x["full_batch_line_gap_s"]["median"] / interval, x["full_batch_accept_len_line_mean"]))
     return {c: (statistics.median(v[0] for v in vals), statistics.median(v[1] for v in vals)) for c, vals in by.items()}
@@ -1271,9 +1245,6 @@ def main():
                     help="instead of a decomposition: per run of this tool's JSON(s), busiest rank's chunks x median "
                     "chunk ms, full-batch decode round ms (Decode-line gap / --decode-log-interval, upper median over "
                     "ranks) and max prefill_to_decode_gap_s over ranks")
-    ap.add_argument("--line-gaps", type=float, metavar="THRESHOLD_S",
-                    help="instead of a decomposition: per --log and rank, every gap > THRESHOLD_S between consecutive "
-                    "batch-log lines with both timestamps (e.g. --activity-window bounds of prefill-chunk stalls)")
     cm = ap.add_argument_group("--chunk-model")
     cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit (with its fixed share a/t(x) and [min, max] over repetitions) and chunk-size/placement what-ifs")
     cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s); "
@@ -1310,14 +1281,6 @@ def main():
         if a.out_json:
             json.dump(rows, open(a.out_json, "w"), indent=1)
         print("\n".join(point_table_lines(rows)))
-        return
-    if a.line_gaps is not None:
-        if not a.log:
-            ap.error("--line-gaps needs --log")
-        gaps = line_gaps(a.log, a.line_gaps)
-        if a.out_json:
-            json.dump(gaps, open(a.out_json, "w"), indent=1)
-        print("\n".join(line_gap_lines(gaps)))
         return
     if a.accept_split:
         if a.accept_decompose and not a.decode_log_interval:
@@ -1371,7 +1334,7 @@ def main():
             if es:
                 n = es["Total Requests"]
                 pred = r["sum"]["max_rank_prefill_plus_decode_plus_between_wave_idle_s"]
-                busiest = max(r["ranks"].values(), key=lambda x: x["prefill_time_s"] + x["decode_time_s"] + x["idle_between_waves_s"])
+                busiest = busiest_rank(r["ranks"])[1]
                 model = busiest["prefill_time_chunk_model_s"] + busiest["decode_time_s"] + busiest["idle_between_waves_s"]
                 r["reconciliation"] = {
                     "busiest_rank_model_s (chunks x median chunk + decode + between-wave idle)": model,

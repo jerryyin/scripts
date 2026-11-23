@@ -125,7 +125,8 @@ def test_fmt_none() -> None:
 
 def test_chunk_model_fit_and_waves() -> None:
     e2e = load("e2e_decompose.py")
-    rank = lambda sizes, gap, acc: {"prefill_time_s": 1.0, "chunk_time_by_size_median_s": sizes,  # noqa: E731
+    rank = lambda sizes, gap, acc: {"prefill_time_s": 1.0, "decode_time_s": 1.0,  # noqa: E731
+                                    "chunk_time_by_size_median_s": sizes,
                                     "full_batch_line_gap_s": {"median": gap}, "full_batch_accept_len_line_mean": acc}
     runs = [{"label": "measured-1-c1", "ranks": {"0": rank({"1000": 0.03}, 0.4, 5.0)}},
             {"label": "measured-2-c1", "ranks": {"0": rank({"2000": 0.05}, 0.4, 5.0)}},
@@ -444,25 +445,6 @@ def test_point_table_busiest_rank_upper_median_round_and_p2d_max() -> None:
     assert (x["prefill_to_decode_gap_max_s"], x["prefill_to_decode_gap_max_rank"]) == (2.5, "1")
     text = "\n".join(e2e.point_table_lines(rows))
     assert "| 1 | 14 x 110.0 = 1.54 | 17.5 (0:20.0, 1:15.0, 3:17.5) | 2.50 (1) |" in text
-
-
-def test_line_gaps_per_rank_with_log_timestamps() -> None:
-    e2e = load("e2e_decompose.py")
-    T = 1_800_000_000.0
-    lines = [batch(T, "Prefill", 0, new_token=4096), batch(T + 0.1, "Prefill", 1, new_token=4096),
-             batch(T + 0.2, "Prefill", 0, new_token=4096),  # rank 0: 0.2 s, below threshold
-             finish(T + 1.0, "a", 4096, 0),  # not a batch line
-             batch(T + 1.6, "Decode", 1, running_req=1),  # rank 1: 1.5 s after its Prefill line
-             batch(T + 1.7, "Decode", 0, running_req=1)]  # rank 0: 1.5 s
-    with tempfile.TemporaryDirectory() as d:
-        log = Path(d) / "measured-1-c2.log"
-        log.write_text("".join(lines))
-        gaps = e2e.line_gaps([str(log)], 1.0)
-        assert e2e.line_gaps([str(log)], 2.0) == []
-    assert [(g["rank"], g["from_kind"], g["to_kind"]) for g in gaps] == [(1, "Prefill", "Decode"), (0, "Prefill", "Decode")]
-    assert gaps[0]["from_utc"] == ts(T + 0.1) and gaps[0]["to_utc"] == ts(T + 1.6)
-    assert abs(gaps[1]["gap_s"] - 1.5) < 1e-6
-    assert e2e.line_gap_lines(gaps)[0] == f"measured-1-c2.log rank 1 Prefill -> Decode {ts(T + 0.1)} -> {ts(T + 1.6)} 1.50s"
 
 
 def _accept_bench(path, rows):

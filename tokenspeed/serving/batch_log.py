@@ -21,6 +21,10 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            new sequences per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
            is given, e.g. 2026-11-12T23:05:00Z); a window without START counts nothing, one without END
            runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window.
+       batch_log.py line-gaps THRESHOLD_S LOG [LOG ...] [--out-json PATH]
+           per log and attention-DP rank, every gap above THRESHOLD_S seconds between consecutive
+           Prefill/Mix/Decode lines of that rank, with both lines' kinds and log timestamps (the times of
+           prefill-chunk stalls, e.g. as bounds of a GPU-activity window).
        batch_log.py prefill LOG [LOG ...] (--benchmark-json BJ | --window NAME=START,END ...
                     --prompt-tokens L --requests B) [--chunk-cost] [--tail] [--out-json PATH]
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
@@ -44,7 +48,7 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            final prefill step (last Prefill line to last Finish line) by tail-chunk size and a
            least-squares line final_step_ms = fixed + per_token x tail_tokens over group medians.
 """
-import collections, datetime as dt, re, statistics, sys, time
+import collections, datetime as dt, os, re, statistics, sys, time
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS_PATTERNS = [
@@ -205,6 +209,47 @@ def dp_spread_main(argv):
         counts = dp_spread(parse_lines(fh), windows)
     print(json.dumps({n: {str(r): k for r, k in sorted(c.items())} for n, c in counts.items()}) if a.json
           else render_dp_spread(counts))
+    return 0
+
+
+def line_gaps(paths, threshold):
+    """Per log and rank, every gap > threshold s between consecutive Prefill/Mix/Decode lines of that rank
+    (batch_log.parse_line; no #dp-rank -> rank 0), with both lines' kinds and timestamps as written in the log.
+    Gives timestamps to the prefill-chunk stalls e2e_decompose.py only counts (prefill_stalls), e.g. as
+    activity-window bounds."""
+    iso = next(p for p, kind in TS_PATTERNS if kind == "iso")
+    out = []
+    for path in paths:
+        prev = {}
+        for e in parse_lines(open(path, errors="replace")):
+            if e["kind"] in ("Finish", "Accept") or e["ts"] is None:
+                continue
+            m = iso.search(e["line"]); r = e["dp_rank"]
+            text = m.group(0) if m else dt.datetime.fromtimestamp(e["ts"], dt.timezone.utc).isoformat()
+            if r in prev and e["ts"] - prev[r][0] > threshold:
+                out.append({"log": os.path.basename(path), "rank": r, "from_kind": prev[r][1], "to_kind": e["kind"],
+                            "from_utc": prev[r][2], "to_utc": text, "gap_s": e["ts"] - prev[r][0]})
+            prev[r] = (e["ts"], e["kind"], text)
+    return out
+
+
+def line_gap_lines(gaps):
+    return [f"{g['log']} rank {g['rank']} {g['from_kind']} -> {g['to_kind']} {g['from_utc']} -> {g['to_utc']} "
+            f"{g['gap_s']:.2f}s" for g in gaps]
+
+
+def line_gaps_main(argv):
+    import argparse, json
+    ap = argparse.ArgumentParser(prog="batch_log.py line-gaps",
+                                 description="per log and rank, every gap above THRESHOLD_S between consecutive batch lines")
+    ap.add_argument("threshold", type=float, metavar="THRESHOLD_S")
+    ap.add_argument("log", nargs="+")
+    ap.add_argument("--out-json")
+    a = ap.parse_args(argv)
+    gaps = line_gaps(a.log, a.threshold)
+    if a.out_json:
+        json.dump(gaps, open(a.out_json, "w"), indent=1)
+    print("\n".join(line_gap_lines(gaps)))
     return 0
 
 
@@ -418,6 +463,8 @@ if __name__ == "__main__":
         sys.exit(dp_spread_main(sys.argv[2:]))
     if sys.argv[1:2] == ["prefill"]:
         sys.exit(prefill_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["line-gaps"]:
+        sys.exit(line_gaps_main(sys.argv[2:]))
     if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0 if len(sys.argv) == 2 else 2)
