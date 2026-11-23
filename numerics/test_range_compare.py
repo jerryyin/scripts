@@ -258,6 +258,159 @@ def test_without_consensus_output_is_byte_identical_to_40f9d01() -> None:
     assert "consensus" not in run_consensus(fmt="json") and run_consensus().count("|") == 7 * 6
 
 
+# ---------------------------------------------------------------- decide (C=1/2 deciding rule)
+# Fixtures hold only the rows each case needs: five repetitions per layout at one or two points.
+
+WON = [110.0, 111.0, 112.0, 113.0, 114.0]
+REF = [100.0, 101.0, 102.0, 103.0, 104.0]
+LOST = [90.0, 91.0, 92.0, 93.0, 94.0]
+TIE = [96.0, 99.0, 102.0, 105.0, 108.0]
+
+
+def bench(points: dict[int, list[float]], warm: float | None = 1.0) -> Path:
+    """A benchmark.json-shaped table: results rows with phase, concurrency and summary.tok."""
+    rows = []
+    for c, vals in points.items():
+        if warm is not None:
+            rows.append({"phase": "warmup-1", "concurrency": c, "summary": {"tok": warm}})
+        rows += [{"phase": f"measured-{i}", "concurrency": c, "summary": {"tok": v}} for i, v in enumerate(vals, 1)]
+    return write("benchmark.json", json.dumps({"results": rows}))
+
+
+def split(shares: dict[int, float], label: str = "x", ref: str = "ref") -> Path:
+    return write("split.json", json.dumps({"reference": ref, "summary": [
+        {"label": label, "reference": ref, "concurrency": c, "repetitions": 5,
+         "accept_share": {"median": v, "min": v, "max": v, "n": 5}} for c, v in shares.items()]}))
+
+
+def accept_test(x_wilson: list[float], ref_wilson: list[float]) -> Path:
+    side = lambda w: {"looping": 1, "outputs": 5, "looping_fraction": 0.2, "looping_wilson95": w}  # noqa: E731
+    return write("test.jsonl", json.dumps({"pair": "ref vs x", "accept_test": {"ref": side(ref_wilson),
+                                                                                 "x": side(x_wilson)}}) + "\n")
+
+
+OVERLAP_W = ([0.1, 0.6], [0.2, 0.7])
+
+
+def run_decide(x: dict[int, list[float]], ref: dict[int, list[float]], *extra: str, shares=None, wilson=OVERLAP_W,
+               canon: tuple[dict, dict] | None = ({1: TIE[:3], 2: TIE[:3]}, {1: REF[:3], 2: REF[:3]})) -> list[dict]:
+    args = ["decide", "--key", "concurrency", "--metric", "summary.tok", "--rows-field", "results",
+            "--where", "phase~^measured-", "--table", f"X={bench(x)}", "--table", f"REF={bench(ref)}",
+            "--ratio", "X/REF", "--label", "X=x", "--label", "REF=ref", "--format", "json",
+            "--accept-split", str(split(shares or {c: 0.0 for c in x}))]
+    for c in x:
+        args += ["--accept-test", f"{c}={accept_test(*wilson)}"]
+    if canon:
+        args += ["--canonical-table", f"X={bench(canon[0])}", "--canonical-table", f"REF={bench(canon[1])}"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc.main(args + list(extra))
+    return json.loads(buf.getvalue())
+
+
+def test_percentile_and_bootstrap_are_fixed_by_seed() -> None:
+    assert rc.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.5 and rc.percentile([5.0], 0.975) == 5.0
+    assert rc.bootstrap_ratio(WON, REF) == rc.bootstrap_ratio(WON, REF)
+    lo, hi = rc.bootstrap_ratio(WON, REF, 2000, 0)
+    assert 1 < lo <= 112 / 102 <= hi
+    assert rc.bootstrap_ratio_paired({1: 1.0}, {2: 1.0}) is None
+
+
+def test_decide_won_lost_no_verdict() -> None:
+    rows = run_decide({1: WON, 2: LOST}, {1: REF, 2: REF})
+    by_c = {r["key"][0]: r for r in rows}
+    assert by_c[1]["runs"][0]["verdict"] == "won" and by_c[1]["final"] == "won"
+    assert by_c[2]["runs"][0]["verdict"] == "lost" and by_c[2]["final"] == "lost"
+    assert abs(by_c[1]["runs"][0]["ratio"] - 112 / 102) < 1e-12
+    assert by_c[1]["runs"][0]["paired_interval"] is not None  # same measured-N indices
+    tie = run_decide({1: TIE}, {1: REF})[0]
+    assert tie["runs"][0]["verdict"] == "no verdict" and tie["final"] == "no verdict"
+    lo, hi = tie["runs"][0]["interval"]
+    assert lo < 1 < hi
+
+
+def test_decide_acceptance_flag_reads_accept_share_median() -> None:
+    r = run_decide({1: WON, 2: WON}, {1: REF, 2: REF}, shares={1: 0.11, 2: -0.10})
+    by_c = {x["key"][0]: x for x in r}
+    assert by_c[1]["runs"][0]["flags"]["acceptance"] == {"share": 0.11, "repetitions": 5, "flag": True}
+    assert by_c[1]["final"] == "flagged"
+    assert by_c[2]["runs"][0]["flags"]["acceptance"]["flag"] is False and by_c[2]["final"] == "won"
+
+
+def test_decide_looping_flag_on_disjoint_wilson_intervals() -> None:
+    r = run_decide({1: WON}, {1: REF}, wilson=([0.6, 0.9], [0.1, 0.5]))[0]
+    loop = r["runs"][0]["flags"]["looping"]
+    assert loop["disjoint"] and loop["flag"] and r["final"] == "flagged"
+    assert loop["sides"]["x"]["wilson95"] == [0.6, 0.9] and loop["sides"]["ref"]["fraction"] == 0.2
+    touching = run_decide({1: WON}, {1: REF}, wilson=([0.5, 0.9], [0.1, 0.5]))[0]
+    assert touching["runs"][0]["flags"]["looping"]["flag"] is False and touching["final"] == "won"
+
+
+def test_decide_canonical_cross_check() -> None:
+    # canonical ranges say lost, the deciding run says won: flagged
+    r = run_decide({1: WON}, {1: REF}, canon=({1: LOST[:3]}, {1: REF[:3]}))[0]
+    c = r["runs"][0]["flags"]["canonical"]
+    assert c["verdict"] == "lost" and c["flag"] and r["final"] == "flagged"
+    # canonical no verdict against a won run is not a flag
+    r = run_decide({1: WON}, {1: REF}, canon=({1: TIE[:3]}, {1: REF[:3]}))[0]
+    assert r["runs"][0]["flags"]["canonical"]["verdict"] == "no verdict" and r["final"] == "won"
+    # canonical won against a lost run: flagged
+    r = run_decide({1: LOST}, {1: REF}, canon=({1: WON[:3]}, {1: REF[:3]}))[0]
+    assert r["runs"][0]["flags"]["canonical"]["verdict"] == "won" and r["final"] == "flagged"
+    # no canonical table: the point is incomplete, never silently decided
+    r = run_decide({1: WON}, {1: REF}, canon=None)[0]
+    assert r["runs"][0]["flags"]["canonical"]["flag"] is None and r["final"] == "incomplete"
+
+
+def test_decide_rerun_rule() -> None:
+    clean = split({1: 0.0})
+    flagged = split({1: 0.5})
+    tests = ["--rerun-accept-test", f"1={accept_test(*OVERLAP_W)}"]
+    # first run flagged, second clean: the second run's verdict
+    r = run_decide({1: WON}, {1: REF}, "--rerun-table", f"X={bench({1: LOST})}", "--rerun-table",
+                   f"REF={bench({1: REF})}", "--rerun-accept-split", str(clean), *tests, shares={1: 0.5},
+                   canon=({1: TIE[:3]}, {1: REF[:3]}))[0]
+    assert [x["word"] for x in r["runs"]] == ["flagged", "lost"] and r["final"] == "lost"
+    # both runs flagged: no verdict
+    r = run_decide({1: WON}, {1: REF}, "--rerun-table", f"X={bench({1: WON})}", "--rerun-table",
+                   f"REF={bench({1: REF})}", "--rerun-accept-split", str(flagged), *tests, shares={1: 0.5})[0]
+    assert [x["word"] for x in r["runs"]] == ["flagged", "flagged"] and r["final"] == "no verdict"
+    # an unflagged first run stands; a re-run is reported beside it
+    r = run_decide({1: WON}, {1: REF}, "--rerun-table", f"X={bench({1: TIE})}", "--rerun-table",
+                   f"REF={bench({1: REF})}", "--rerun-accept-split", str(clean), *tests)[0]
+    assert [x["word"] for x in r["runs"]] == ["won", "no verdict"] and r["final"] == "won"
+    assert rc.final_word({"word": "flagged"}, None) == "flagged"
+
+
+def test_decide_markdown_and_errors() -> None:
+    args = ["decide", "--key", "concurrency", "--metric", "summary.tok", "--rows-field", "results",
+            "--where", "phase~^measured-", "--table", f"X={bench({1: WON})}", "--table", f"REF={bench({1: REF})}",
+            "--ratio", "X/REF"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc.main(args)
+    lines = buf.getvalue().splitlines()
+    assert lines[0].startswith("| concurrency | ratio | run |") and len(lines) == 3
+    assert "| won |" in lines[2] and lines[2].endswith("| incomplete | incomplete |")
+    for bad in (["--ratio", "X/NOPE"], ["--metric", "summary.other"]):
+        try:
+            with redirect_stdout(io.StringIO()), __import__("contextlib").redirect_stderr(io.StringIO()):
+                rc.main(args + bad)
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"{bad} must be refused")
+    dup = write("dup.json", json.dumps({"results": [{"phase": "measured-1", "concurrency": 1, "summary": {"tok": 1}},
+                                                    {"phase": "measured-1", "concurrency": 1, "summary": {"tok": 2}}]}))
+    try:
+        with redirect_stdout(io.StringIO()), __import__("contextlib").redirect_stderr(io.StringIO()):
+            rc.main(args[:-4] + ["--table", f"X={dup}", "--table", f"REF={bench({1: REF})}", "--ratio", "X/REF"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a repeated repetition index must be refused")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
