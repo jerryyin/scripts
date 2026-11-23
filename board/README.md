@@ -64,8 +64,9 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   root), logs each, and waits again. `gpu-queue add DIR [--name NAME] [--count N] -- COMMAND` (or
   `--file SCRIPT`) and `gpu-queue status DIR` run where DIR is local, normally inside the container.
   One serve runs per DIR (it holds `DIR/serve.lock`), and `add --count N` starts one for N GPUs
-  when none runs; it exits when the queue empties. Serves of different DIRs do not see each other's
-  claims, so share one DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
+  when none runs (with the `--idle-by`, `--confirm` and hold options given to `add`); it exits
+  when the queue empties. Serves of different DIRs do not see each other's claims, so share one
+  DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
   not the caller's, so a job script sets up its own directory and environment; output and exit
   status land in `DIR/done/` or `DIR/failed/`. A local serve stopped by SIGTERM, SIGINT or SIGHUP
   (or failing with an error) stops its memory holder's process group and releases `DIR/serve.lock`;

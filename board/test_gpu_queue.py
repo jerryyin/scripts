@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -412,13 +412,26 @@ def test_container_lock_holder_keeps_the_lock_until_stdin_closes(tmp=None):
 def test_hold_options_reach_the_holder_and_add_passes_them_to_the_serve_it_starts(tmp=None):
     root = Path(tmp or tempfile.mkdtemp())
     hold = gq.MemoryHold('0,1,2,3', root / 'serve.log', root, busy_free_cap=16, gate_ranks=4)
-    assert hold.options == ['--busy-free-cap', '16', '--gate', str(root / 'hold.gate'), '--gate-ranks', '4']
+    assert hold.options == ['--busy-free-cap', '16.0', '--gate', str(root / 'hold.gate'), '--gate-ranks', '4']
     assert gq.MemoryHold('0', root / 'serve.log', root).options == [], 'the default holder is unchanged'
     args = gq.parse(['add', str(root / 'q'), '--count', '4', '--hold-busy-free-cap', '16',
                      '--hold-gate-ranks', '4', '--', 'true'])
     started = []
     quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
-    assert started == [(4, ('--hold-busy-free-cap', '16', '--hold-gate-ranks', '4'))], started
+    assert started == [(4, ('--hold-busy-free-cap', '16.0', '--hold-gate-ranks', '4'))], started
+    args = gq.parse(['add', str(root / 'q2'), '--count', '4', '--idle-by', 'process', '--confirm', '20', '--', 'true'])
+    started.clear()
+    quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
+    assert started == [(4, ('--idle-by', 'process', '--confirm', '20'))], started
+    assert gq.hold_argv(gq.parse(['add', 'q', '--hold-busy-free-cap', '32.123456789', '--', 'true'])) == [
+        '--hold-busy-free-cap', '32.123456789'], 'the cap is passed on exactly'
+    args = gq.parse(['add', str(root / 'q3'), '--count', '4', '--hold-busy-free-cap', '16', '--confirm', '20',
+                     '--', 'true'])
+    started.clear()
+    err = io.StringIO()
+    with served(root / 'q3'), redirect_stderr(err):
+        quiet(gq.add, args, spawn=lambda _queue, count, *rest: started.append((count, rest)) or 4242)
+    assert not started and '--hold-busy-free-cap 16.0 --confirm 20 ignored' in err.getvalue(), err.getvalue()
 
 
 if __name__ == '__main__':
@@ -435,4 +448,5 @@ if __name__ == '__main__':
     test_memory_hold_stop_ends_its_group_and_is_idempotent()
     test_an_exception_while_draining_stops_the_holder()
     test_container_lock_holder_keeps_the_lock_until_stdin_closes()
+    test_hold_options_reach_the_holder_and_add_passes_them_to_the_serve_it_starts()
     print('ok')

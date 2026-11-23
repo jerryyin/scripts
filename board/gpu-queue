@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A GPU job queue for a shared host with no scheduler: claim GPUs once, run queued jobs back to back.
 
-usage: gpu-queue add DIR [--name NAME] [--count N] (--file SCRIPT | -- COMMAND...)
+usage: gpu-queue add DIR [--name NAME] [--count N [--idle-by usage|process] [--confirm N]]
+                     (--file SCRIPT | -- COMMAND...)
        gpu-queue status DIR
        gpu-queue serve DIR --count N [--container NAME] [--poll 1] [--confirm 2]
                        [--idle-by usage|process] [--log FILE] [--once]
@@ -28,8 +29,8 @@ holder's state (hold, busy, yielded) in the file named by GPU_QUEUE_HOLD_STATE.
 --hold-busy-free-cap GIB sets the free memory the holder leaves per GPU while our process starts
 (default gpu-hold's 240); --hold-gate-ranks N gives the holder a gate directory (DIR/hold.gate,
 exported to jobs as GPU_HOLD_GATE) at which N server ranks that load board/memgate wait before their
-large allocations, so a small cap does not starve them. `add --count` passes both to the serve it
-starts.
+large allocations, so a small cap does not starve them. `add --count` passes both, and --idle-by and
+--confirm, to the serve it starts; when a serve already runs, add warns that they are ignored.
 
 One serve runs per DIR: it holds an flock on DIR/serve.lock, which records its --count, and exits
 if another serve holds it. `add --count N` starts `serve DIR --count N --once` in the background
@@ -347,7 +348,7 @@ class MemoryHold:
         self.hip, self.log = hip, log
         self.ready, self.state = queue / 'hold.ready', queue / 'hold.state'
         self.gate = queue / 'hold.gate' if gate_ranks else None
-        self.options = ([] if busy_free_cap is None else ['--busy-free-cap', f'{busy_free_cap:g}']) + (
+        self.options = ([] if busy_free_cap is None else ['--busy-free-cap', repr(float(busy_free_cap))]) + (
             ['--gate', str(self.gate), '--gate-ranks', str(gate_ranks)] if gate_ranks else [])
         self.process: subprocess.Popen | None = None
 
@@ -460,8 +461,14 @@ def hold_options(args: argparse.Namespace) -> dict:
 def hold_argv(args: argparse.Namespace) -> list[str]:
     """The serve options that reproduce hold_options(args)."""
     options = hold_options(args)
-    return ((['--hold-busy-free-cap', f"{options['busy_free_cap']:g}"] if 'busy_free_cap' in options else [])
+    return ((['--hold-busy-free-cap', repr(float(options['busy_free_cap']))] if 'busy_free_cap' in options else [])
             + (['--hold-gate-ranks', str(options['gate_ranks'])] if 'gate_ranks' in options else []))
+
+
+def wait_argv(args: argparse.Namespace) -> list[str]:
+    """The serve's idle-check options an `add --count` was given (the serve's defaults otherwise)."""
+    return ((['--idle-by', args.idle_by] if getattr(args, 'idle_by', None) else [])
+            + (['--confirm', str(args.confirm)] if getattr(args, 'confirm', None) is not None else []))
 
 
 def add(args: argparse.Namespace, spawn=start_serve) -> int:
@@ -495,11 +502,14 @@ def add(args: argparse.Namespace, spawn=start_serve) -> int:
     print(job)
     if serving(queue) is None:  # also a --once serve that stopped after the check above
         if args.count:
-            pid = spawn(queue, args.count, *hold_argv(args))
+            pid = spawn(queue, args.count, *hold_argv(args), *wait_argv(args))
             print(f'started serve {pid} for {args.count} GPUs; log: {queue / SERVE_LOG}', file=sys.stderr)
         else:
             print(f'warning: no serve holds {queue} now; if the job stays pending, run '
                   f'`gpu-queue serve {queue} --count N`', file=sys.stderr)
+    elif hold_argv(args) or wait_argv(args):
+        print(f'warning: a serve already holds {queue}; {shlex.join(hold_argv(args) + wait_argv(args))} '
+              'ignored (they apply only to a serve add starts)', file=sys.stderr)
     return 0
 
 
@@ -554,6 +564,8 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument('--file')
     p.add_argument('--count', type=int, help='GPUs the job needs; starts a serve for that many if none runs')
     hold_flags(p)
+    p.add_argument('--idle-by', choices=('usage', 'process'), help="the serve's idle check, if add starts it")
+    p.add_argument('--confirm', type=int, help="the serve's consecutive idle polls, if add starts it")
     p = sub.add_parser('status', help='list jobs by state (run where DIR is local)')
     p.add_argument('dir')
     p = sub.add_parser('serve', help='claim GPUs and run queued jobs (run on the host)')
