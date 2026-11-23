@@ -239,84 +239,64 @@ def test_tpot_from_number_or_retained_kv_repetition_table() -> None:
                 raise AssertionError(point)
 
 
-if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn()
-    print("ok")
-
-
-def _gap_bench(ttft, tpot, lat, out=11, phases=None, top_out=None):
+def _gap_bench(ttft, tpot, out=11, phases=None):
     """A matrix benchmark.json with one warmup row and one measured row per repetition at C=1."""
-    def summ(t, p, l):
-        return {"Avg TTFT (ms)": t, "Avg TPOT (ms)": p, "Avg Latency (s)": l, "Avg Output Tokens": out}
-    res = [{"phase": "warmup-1", "concurrency": 1, "summary": summ(1.0, 1.0, 1.0)}]
+    def summ(t, p):
+        return {"Avg TTFT (ms)": t, "Avg TPOT (ms)": p, "Avg Latency (s)": (t + (out - 1) * p) / 1e3,
+                "Avg Output Tokens": out, "Output Throughput (tok/s)": 100.0}
+    res = [{"phase": "warmup-1", "concurrency": 1, "summary": summ(1.0, 1.0)}]
     phases = phases or [f"measured-{i + 1}" for i in range(len(ttft))]
-    for ph, t, p, l in zip(phases, ttft, tpot, lat):
-        res.append({"phase": ph, "concurrency": 1, "summary": summ(t, p, l)})
-    return {"prompt_tokens": 100, "output_tokens": out if top_out is None else top_out, "results": res}
+    for ph, t, p in zip(phases, ttft, tpot):
+        res.append({"phase": ph, "concurrency": 1, "summary": summ(t, p)})
+    return {"prompt_tokens": 100, "output_tokens": out, "results": res}
 
 
-def test_gap_split_ttft_and_decode_parts() -> None:
+def _split(e2e, d, a, b):
+    (d / "a.json").write_text(json.dumps(a))
+    (d / "b.json").write_text(json.dumps(b))
+    return e2e.accept_split([("B", str(d / "b.json")), ("A", str(d / "a.json"))], None, None)
+
+
+def test_accept_split_ttft_and_decode_parts_without_a_decomposition() -> None:
     e2e = load("e2e_decompose.py")
     with tempfile.TemporaryDirectory() as d:
-        a, b = Path(d) / "a.json", Path(d) / "b.json"
-        a.write_text(json.dumps(_gap_bench([300, 310, 320], [12, 12, 13], [0.43, 0.44, 0.45])))
-        b.write_text(json.dumps(_gap_bench([100, 100, 100], [10, 10, 10], [0.2, 0.2, 0.2])))
-        r = e2e.gap_split([("A", str(a)), ("B", str(b))])
-        row = r["rows"][0]
-        assert r["output_tokens"] == 11
-        assert abs(row["ttft_part_ms"] - 210) < 1e-9 and abs(row["decode_part_ms"] - 20) < 1e-9
-        assert row["larger_part"] == "ttft" and row["n_a"] == 3
-        assert row["ttft_part_ms_paired_range"] == [200, 220]
-        assert row["decode_part_ms_paired_range"] == [20, 30]
-        assert abs(row["residual_ms"] - (240 - 230)) < 1e-9
-        assert "| 1 |" in e2e.gap_split_markdown(r)
+        res = _split(e2e, Path(d), _gap_bench([300, 310, 320], [12, 12, 13]), _gap_bench([100, 100, 100], [10, 10, 10]))
+    row = res["summary"][0]
+    assert row["repetitions"] == 3 and row["split_incomplete"] == 3 and row["accept_part_ms"] is None
+    assert row["ttft_part_ms"] == {"median": 210, "min": 200, "max": 220, "n": 3}
+    assert row["decode_part_ms"] == {"median": 20, "min": 20, "max": 30, "n": 3}  # O - 1 = 10 x dTPOT
+    assert row["latency_gap_ms"]["median"] == 230 and len(res["pairs"]) == 4  # the warmup pair is listed too
 
 
-def test_gap_split_uses_file_output_length_and_pairs_by_repetition() -> None:
+def test_accept_split_is_a_median_of_per_repetition_differences() -> None:
+    """TTFT A = 1, 2, 10 and B = 0, 9, 10 at repetitions 1..3: the per-repetition differences 1, -7, 0 have
+    median 0 (the difference of the medians, 2 - 9 = -7, mixes repetitions). measured-10 pairs with
+    measured-10 whatever the order in the file."""
     e2e = load("e2e_decompose.py")
     with tempfile.TemporaryDirectory() as d:
-        a, b = Path(d) / "a.json", Path(d) / "b.json"
-        # O = 501 from the file: decode part = 500 x dTPOT. Phases listed out of order, and
-        # measured-10 must pair with measured-10 (not by lexical sort).
-        a.write_text(json.dumps(_gap_bench([5, 7, 6], [2.0, 2.2, 2.1], [1.0, 1.0, 1.0], out=501,
-                                           phases=["measured-2", "measured-10", "measured-1"])))
-        b.write_text(json.dumps(_gap_bench([1, 1, 4], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0], out=501,
-                                           phases=["measured-1", "measured-2", "measured-10"])))
-        row = e2e.gap_split([("A", str(a)), ("B", str(b))])["rows"][0]
-        assert row["paired_repetitions"] == [1, 2, 10]
-        # pairs: rep1 6-1=5, rep2 5-1=4, rep10 7-4=3
-        assert row["ttft_part_ms_paired_range"] == [3, 5]
-        assert abs(row["decode_part_ms"] - 500 * 0.1) < 1e-9
-        # a single unsuffixed "measured" phase (--repetitions 1) is repetition 1
-        a.write_text(json.dumps(_gap_bench([5], [2.0], [1.0], phases=["measured"])))
-        b.write_text(json.dumps(_gap_bench([1], [2.0], [1.0], phases=["measured"])))
-        assert e2e.gap_split([("A", str(a)), ("B", str(b))])["rows"][0]["ttft_part_ms"] == 4
-        # differing output lengths are refused, not split with a constant
-        a.write_text(json.dumps(_gap_bench([5], [2.0], [1.0], out=500)))
-        b.write_text(json.dumps(_gap_bench([1], [2.0], [1.0], out=11)))
-        try:
-            e2e.gap_split([("A", str(a)), ("B", str(b))])
-            raise AssertionError("expected SystemExit")
-        except SystemExit:
-            pass
+        res = _split(e2e, Path(d), _gap_bench([10, 1, 2], [2.0] * 3, phases=["measured-10", "measured-1", "measured-2"]),
+                     _gap_bench([0, 9, 10], [2.0] * 3, phases=["measured-1", "measured-2", "measured-10"]))
+        assert res["summary"][0]["ttft_part_ms"] == {"median": 0, "min": -7, "max": 1, "n": 3}
+        # differing output lengths give no parts
+        diff = _split(e2e, Path(d), _gap_bench([5], [2.0], out=500), _gap_bench([1], [2.0], out=11))
+    pair = diff["pairs"][1]
+    assert pair["split_incomplete"] == "output lengths differ: 500 vs 11" and "decode_part_ms" not in pair
 
 
-def test_gap_split_cli_writes_json() -> None:
+def test_accept_split_cli_without_a_decomposition_writes_json() -> None:
     e2e = load("e2e_decompose.py")
     with tempfile.TemporaryDirectory() as d:
         a, b, out = Path(d) / "a.json", Path(d) / "b.json", Path(d) / "gap.json"
-        a.write_text(json.dumps(_gap_bench([300], [12], [0.43])))
-        b.write_text(json.dumps(_gap_bench([100], [10], [0.2])))
+        a.write_text(json.dumps(_gap_bench([300], [12])))
+        b.write_text(json.dumps(_gap_bench([100], [10])))
         argv = sys.argv
-        sys.argv = ["e2e_decompose.py", "--gap-split", f"EP4={a}", "--gap-split", f"TP4={b}", "--out-json", str(out)]
+        sys.argv = ["e2e_decompose.py", "--accept-split", f"TP4={b}", "--accept-split", f"EP4={a}", "--out-json", str(out)]
         try:
             e2e.main()
         finally:
             sys.argv = argv
         r = json.loads(out.read_text())
-        assert r["a"] == "EP4" and r["b"] == "TP4" and r["rows"][0]["ttft_part_ms"] == 200
+    assert r["reference"] == "TP4" and r["summary"][0]["ttft_part_ms"]["median"] == 200
 
 
 def _sample(t, busy, cu, sdma=0):
@@ -596,3 +576,10 @@ def test_accept_split_pair_needs_one_acceptance_source() -> None:
     assert res["summary"][0]["accept_part_ms"] is None and abs(p["ttft_part_ms"] - 100) < 1e-9
     # without per-request values the EvalScope summary (an arithmetic mean) is not used for the split
     assert without["pairs"][0]["split_incomplete"].startswith("no per-request acceptance")
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+    print("ok")

@@ -107,18 +107,6 @@ Decode-line gap / --decode-log-interval and its line-mean acceptance),
 the throughput of one wave whose first tokens wait for the whole wave's prefill. Ratios are printed
 against the first scenario.
 
---gap-split A=BENCHMARK_JSON --gap-split B=BENCHMARK_JSON (two amd-tracking matrix benchmark.json files
-of the same workload) splits A's extra mean end-to-end latency per request over B, per concurrency, into
-  ttft_part_ms   = TTFT_A - TTFT_B                       (EvalScope "Avg TTFT (ms)")
-  decode_part_ms = (O - 1) x (TPOT_A - TPOT_B)           (EvalScope "Avg TPOT (ms)", O output tokens)
-from the medians over the measured phases (phase measured or measured-N), with the measured latency
-difference (EvalScope "Avg Latency (s)", converted to ms) and the residual beside them, and names the
-larger part. O is the run's output length read from the files (summary "Avg Output Tokens", one value
-over every measured row of both files and equal to the manifest's output_tokens). Per-repetition pairs
-(A_i - B_i, measured-i of A with measured-i of B) give the [min, max] of each part. Under EvalScope's
-per-request TPOT = (latency - TTFT) / (O - 1), the residual is near zero when every request has O tokens;
-it is not exactly zero because the three medians are taken separately and EvalScope rounds its summary.
-
 --point-table JSON... --decode-log-interval N tabulates this tool's JSON (a decomposition), one row per run with ranks:
 the busiest rank (largest prefill + decode time), its prefill chunks x median chunk ms; the full-batch decode round
 (per rank the median full-batch Decode-line gap / N; over the ranks that have one, the upper median, element n // 2
@@ -128,10 +116,14 @@ of the sorted values); and the largest prefill_to_decode_gap_s max over ranks wi
 Prefill/Mix/Decode lines of that rank with both lines' kinds and log timestamps: the times of the prefill-chunk stalls
 that the decomposition only counts (prefill_stalls), e.g. as --activity-window bounds.
 
---accept-split REF=BENCHMARK_JSON --accept-split X=BENCHMARK_JSON ... with --accept-decompose LABEL=JSON (this
-tool's decomposition of that run: --benchmark-json --server-log --out-json) for every label and
---decode-log-interval N splits each configuration's gap to the first (REF) into DSpark acceptance and speed,
-per point (phase and concurrency) paired with REF's point of the same phase and concurrency (the same prompts).
+--accept-split REF=BENCHMARK_JSON --accept-split X=BENCHMARK_JSON ... (amd-tracking matrix benchmark.json files of
+the same workload) splits each configuration's mean end-to-end latency gap to the first (REF), per point (phase
+and concurrency) paired with REF's point of the same phase and concurrency (the same prompts and repetition), into
+  ttft_part_ms   = TTFT_X - TTFT_REF                    (EvalScope "Avg TTFT (ms)")
+  decode_part_ms = D x (TPOT_X - TPOT_REF)              (EvalScope "Avg TPOT (ms)", D = O - 1, O "Avg Output Tokens")
+(a pair whose output lengths differ has no parts), and with --accept-decompose LABEL=JSON (this tool's
+decomposition of that run: --benchmark-json --server-log --out-json) for every label and --decode-log-interval
+N the decode part into DSpark acceptance and speed (below).
 Per point and label: output tok/s, mean TTFT and TPOT (EvalScope summary), the decode step s (the full-batch
 decode round of --point-table: per rank median full-batch Decode-line gap / N, upper median over ranks) and
 the acceptance A from per-request values: --accept-requests LABEL=JSONL (amd-tracking evalscope_degeneracy.py
@@ -142,19 +134,19 @@ every request of the point matched one (the server counts verify steps; EvalScop
 can carry more than one step), else EvalScope's per-request values; acceptance_source names the one used and
 the largest per-request difference between the two is reported. A request of A_i tokens per step decodes in
 (O-1) / A_i steps, so the mean TPOT is s x mean(1/A_i) and A is the harmonic mean 1 / mean(1/A_i); the
-arithmetic means (EvalScope's "Avg Decoded Tok/Iter" among them) are shown for information. Each mean request
-of X is TTFT + (O-1) x TPOT. With D = (O-1):
-  ttft_part_ms   = TTFT_X - TTFT_REF
+arithmetic means (EvalScope's "Avg Decoded Tok/Iter" among them) are shown for information. The decode
+part splits into
   step_part_ms   = D x (s_X - s_REF) / A_REF          (X's step at REF's acceptance)
   accept_part_ms = D x s_X x (1/A_X - 1/A_REF)        (X's acceptance at X's step)
   other_part_ms  = D x [(TPOT_X - s_X/A_X) - (TPOT_REF - s_REF/A_REF)]  (decode time per token that is not
                    step / acceptance: prefill rounds interleaved at C >= 2, scheduling gaps)
-which sum to the latency gap D x (TPOT_X - TPOT_REF) + TTFT_X - TTFT_REF exactly; shares are parts / gap. The
+which sum to decode_part_ms, and with ttft_part_ms to the latency gap, exactly; shares are parts / gap. The
 two points of a pair must take A from the same source; a pair whose sources differ, or a point without
 per-request acceptance, has no step, acceptance or other part (split_incomplete names why).
 In log terms the decode rate is A / s, so log(rate_X / rate_REF) = log(A_X / A_REF) - log(s_X / s_REF)
 (log_accept, log_step). Per label and concurrency the measured points (phase measured, measured-N) give
-median [min, max] of every part, share and ratio (n counts the repetitions that have the part); warmup points
+median [min, max] of every part, share and ratio over the per-repetition differences (n counts the repetitions
+that have the part); warmup points
 are listed in the per-point table only. --concurrency-list restricts the concurrencies (e.g. 1,2).
 point_summary (and the last Markdown table) gives per label and concurrency the median [min, max] over the
 measured points of tok/s, TTFT, TPOT, the acceptance used (with its source), EvalScope's summary acceptance
@@ -842,90 +834,6 @@ def _repetition(phase, prefix):
     return None
 
 
-def gap_split(specs, phase_prefix="measured"):
-    """Per concurrency, split the mean end-to-end latency gap of the first benchmark.json over the
-    second into a TTFT part and a decode part ((O-1) x TPOT difference); medians over measured phases.
-
-    Reads, per result of an amd-tracking run_evalscope_matrix.py benchmark.json: phase, concurrency and
-    the EvalScope summary "Avg TTFT (ms)", "Avg TPOT (ms)", "Avg Latency (s)" and "Avg Output Tokens"
-    (O, the run's real output length; it must be one value over every measured row of both files)."""
-    if len(specs) != 2:
-        raise SystemExit("--gap-split needs exactly two LABEL=BENCHMARK_JSON (A then B)")
-    (la, pa), (lb, pb) = specs
-
-    def rows(path):
-        with open(path) as fh:
-            bj = json.load(fh)
-        out = collections.defaultdict(dict)
-        outs = set()
-        for r in bj["results"]:
-            rep = _repetition(r["phase"], phase_prefix) if str(r["phase"]).startswith(phase_prefix) else None
-            if rep is None:
-                continue
-            s, c = r["summary"], int(r["concurrency"])
-            if rep in out[c]:
-                raise SystemExit(f"--gap-split: {path}: two results for {r['phase']} at concurrency {c}")
-            o = float(s["Avg Output Tokens"])
-            outs.add(o)
-            out[c][rep] = {"phase": r["phase"], "ttft_ms": float(s["Avg TTFT (ms)"]),
-                           "tpot_ms": float(s["Avg TPOT (ms)"]), "latency_ms": float(s["Avg Latency (s)"]) * 1e3,
-                           "output_tokens": o}
-        if not out:
-            raise SystemExit(f"--gap-split: {path}: no results with phase {phase_prefix}[-N]")
-        return bj, out, outs
-
-    ba, ra, oa = rows(pa); bb, rb, ob = rows(pb)
-    if ba.get("prompt_tokens") != bb.get("prompt_tokens"):
-        raise SystemExit(f"--gap-split: prompt lengths differ ({ba.get('prompt_tokens')} vs {bb.get('prompt_tokens')})")
-    outs = oa | ob
-    if len(outs) != 1 or not float(next(iter(outs))).is_integer():
-        raise SystemExit(f"--gap-split: measured rows need one integral output length (Avg Output Tokens), "
-                         f"got {sorted(outs)}")
-    o = int(next(iter(outs)))
-    for bj, path in ((ba, pa), (bb, pb)):
-        if bj.get("output_tokens") is not None and int(bj["output_tokens"]) != o:
-            raise SystemExit(f"--gap-split: {path}: output_tokens {bj['output_tokens']} != Avg Output Tokens {o}")
-    med = statistics.median
-    res = {"a": la, "b": lb, "a_benchmark_json": pa, "a_sha256": sha256(pa), "b_benchmark_json": pb,
-           "b_sha256": sha256(pb), "prompt_tokens": ba.get("prompt_tokens"), "output_tokens": o,
-           "phase_prefix": phase_prefix, "concurrencies_only_in_a": sorted(set(ra) - set(rb)),
-           "concurrencies_only_in_b": sorted(set(rb) - set(ra)), "rows": []}
-    for c in sorted(set(ra) & set(rb)):
-        A, B = ra[c], rb[c]
-        row = {"concurrency": c, "n_a": len(A), "n_b": len(B)}
-        for k in ("ttft_ms", "tpot_ms", "latency_ms"):
-            row[f"a_{k}_median"] = med([x[k] for x in A.values()])
-            row[f"b_{k}_median"] = med([x[k] for x in B.values()])
-        row["ttft_part_ms"] = row["a_ttft_ms_median"] - row["b_ttft_ms_median"]
-        row["decode_part_ms"] = (o - 1) * (row["a_tpot_ms_median"] - row["b_tpot_ms_median"])
-        row["latency_gap_ms"] = row["a_latency_ms_median"] - row["b_latency_ms_median"]
-        row["residual_ms"] = row["latency_gap_ms"] - row["ttft_part_ms"] - row["decode_part_ms"]
-        reps = sorted(set(A) & set(B))  # pair repetition i of A with repetition i of B
-        row["paired_repetitions"] = reps
-        tt = [A[i]["ttft_ms"] - B[i]["ttft_ms"] for i in reps]
-        dd = [(o - 1) * (A[i]["tpot_ms"] - B[i]["tpot_ms"]) for i in reps]
-        row["ttft_part_ms_paired_range"] = [min(tt), max(tt)] if tt else None
-        row["decode_part_ms_paired_range"] = [min(dd), max(dd)] if dd else None
-        row["larger_part"] = "ttft" if abs(row["ttft_part_ms"]) >= abs(row["decode_part_ms"]) else "decode"
-        res["rows"].append(row)
-    return res
-
-
-def gap_split_markdown(res):
-    a, b, o = res["a"], res["b"], res["output_tokens"]
-    lines = [f"| C | TTFT {a} ms | TTFT {b} ms | TPOT {a} ms | TPOT {b} ms | TTFT part ms [paired min, max] "
-             f"| decode part {o - 1} x dTPOT ms [paired min, max] | latency gap ms | residual ms | larger |",
-             "|" + "---|" * 10]
-    f = lambda x: f"{x:.1f}"
-    for r in res["rows"]:
-        rng = lambda x: f"[{f(x[0])}, {f(x[1])}]" if x else "[none]"
-        lines.append(f"| {r['concurrency']} | {f(r['a_ttft_ms_median'])} | {f(r['b_ttft_ms_median'])} | "
-                     f"{r['a_tpot_ms_median']:.2f} | {r['b_tpot_ms_median']:.2f} | {f(r['ttft_part_ms'])} {rng(r['ttft_part_ms_paired_range'])} | "
-                     f"{f(r['decode_part_ms'])} {rng(r['decode_part_ms_paired_range'])} | {f(r['latency_gap_ms'])} | {f(r['residual_ms'])} | "
-                     f"{r['larger_part']} |")
-    return "\n".join(lines) + "\n"
-
-
 def _server_acceptance(paths):
     """{rid: acc_len} from batch_log "Accept" lines (and RequestStats acc_len) of the server logs."""
     out = {}
@@ -954,7 +862,7 @@ def accept_points(label, bench, decomp, interval, server_log=None, requests=None
     request matched a server line, else EvalScope's per-request values, else None (acceptance_source None)."""
     bj = json.load(open(bench))
     steps = {}
-    for row in point_table([decomp], interval):
+    for row in point_table([decomp], interval) if decomp else []:
         steps[row["label"]] = row["decode_round_s_upper_median"]
     count = collections.Counter(r["phase"] for r in bj["results"])
     server = _server_acceptance(server_log) if server_log else {}
@@ -1007,15 +915,18 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
                  phase_prefix="measured"):
     if len(specs) < 2:
         raise SystemExit("--accept-split needs REF=BENCHMARK_JSON and at least one more LABEL=BENCHMARK_JSON")
-    server_logs, requests = server_logs or {}, requests or {}
+    server_logs, requests, decomps = server_logs or {}, requests or {}, decomps or {}
     missing = [l for l, _ in specs if l not in decomps]
-    if missing:
+    if decomps and missing:
         raise SystemExit(f"--accept-split: no --accept-decompose for {missing}")
-    points = {l: accept_points(l, p, decomps[l], interval, server_logs.get(l), requests.get(l), concurrencies)
+    prompts = {json.load(open(p)).get("prompt_tokens") for _, p in specs} - {None}
+    if len(prompts) > 1:
+        raise SystemExit(f"--accept-split: prompt lengths differ ({sorted(prompts)})")
+    points = {l: accept_points(l, p, decomps.get(l), interval, server_logs.get(l), requests.get(l), concurrencies)
               for l, p in specs}
     ref = specs[0][0]
     res = {"reference": ref, "decode_log_interval": interval,
-           "inputs": {l: {"benchmark_json": p, "sha256": sha256(p), "decompose_json": decomps[l],
+           "inputs": {l: {"benchmark_json": p, "sha256": sha256(p), "decompose_json": decomps.get(l),
                           "server_logs": server_logs.get(l), "requests": requests.get(l)} for l, p in specs},
            "points": [pt for l, _ in specs for pt in points[l].values()], "pairs": [], "summary": []}
     for label, _ in specs[1:]:
@@ -1027,9 +938,17 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
             d = x["output_tokens"] - 1
             pair["tok_per_s_ratio"] = x["tok_per_s"] / r["tok_per_s"]
             pair["log_tok_per_s_ratio"] = math.log(pair["tok_per_s_ratio"])
-            pair["latency_gap_ms"] = (x["ttft_ms"] + d * x["tpot_ms"]) - (r["ttft_ms"] + d * r["tpot_ms"])
+            pair["latency_gap_ms"] = ((x["ttft_ms"] + d * x["tpot_ms"])
+                                      - (r["ttft_ms"] + (r["output_tokens"] - 1) * r["tpot_ms"]))
             pair["ttft_part_ms"] = x["ttft_ms"] - r["ttft_ms"]
-            if x["acceptance_source"] != r["acceptance_source"]:
+            if x["output_tokens"] != r["output_tokens"]:
+                pair["split_incomplete"] = f"output lengths differ: {x['output_tokens']:g} vs {r['output_tokens']:g}"
+                res["pairs"].append(pair)
+                continue
+            pair["decode_part_ms"] = d * (x["tpot_ms"] - r["tpot_ms"])
+            if not decomps:
+                pair["split_incomplete"] = "no --accept-decompose (TTFT and decode parts only)"
+            elif x["acceptance_source"] != r["acceptance_source"]:
                 pair["split_incomplete"] = (f"acceptance sources differ: {x['acceptance_source']} vs "
                                             f"{r['acceptance_source']}")
             elif x["acceptance_source"] is None:
@@ -1054,7 +973,7 @@ def accept_split(specs, decomps, interval, server_logs=None, requests=None, conc
             row = {"label": label, "reference": ref, "concurrency": c, "repetitions": len(meas),
                    "split_incomplete": sum("split_incomplete" in p for p in meas)}
             for k in ("tok_per_s_ratio", "acceptance_ratio", "step_ratio", "latency_gap_ms", "ttft_part_ms",
-                      "step_part_ms", "accept_part_ms", "other_part_ms", "ttft_share", "step_share",
+                      "decode_part_ms", "step_part_ms", "accept_part_ms", "other_part_ms", "ttft_share", "step_share",
                       "accept_share", "other_share", "log_tok_per_s_ratio", "log_accept", "log_step"):
                 row[k] = _range([p.get(k) for p in meas])
             res["summary"].append(row)
@@ -1083,21 +1002,23 @@ def accept_split_markdown(res):
                    f"{f(p.get('acceptance_server_mean'), '.3f')} ({p.get('server_matched_requests', '-')}) | "
                    f"{f(p.get('acceptance_evalscope_vs_server_max_abs_diff'), '.3f')} | {f(p['step_ms'], '.2f')} | "
                    f"{f(p.get('implied_tpot_ms'), '.2f')} |")
-    out += ["", "| config vs ref | phase | C | tok/s ratio | A ratio | step ratio | latency gap ms | TTFT part | step part "
-            "| acceptance part | other part | acceptance share |", "|" + "---|" * 12]
+    out += ["", "| config vs ref | phase | C | tok/s ratio | A ratio | step ratio | latency gap ms | TTFT part | decode part "
+            "| step part | acceptance part | other part | acceptance share |", "|" + "---|" * 13]
     for p in res["pairs"]:
         out.append(f"| {p['label']} vs {p['reference']} | {p['phase']} | {p['concurrency']} | {p['tok_per_s_ratio']:.3f} | "
                    f"{f(p.get('acceptance_ratio'), '.3f')} | {f(p.get('step_ratio'), '.3f')} | {p['latency_gap_ms']:.1f} | "
-                   f"{p['ttft_part_ms']:.1f} | {f(p.get('step_part_ms'), '.1f')} | {f(p.get('accept_part_ms'), '.1f')} | "
+                   f"{p['ttft_part_ms']:.1f} | {f(p.get('decode_part_ms'), '.1f')} | {f(p.get('step_part_ms'), '.1f')} | "
+                   f"{f(p.get('accept_part_ms'), '.1f')} | "
                    f"{f(p.get('other_part_ms'), '.1f')} | {f(p.get('accept_share'), '.2f')} |")
     rng = lambda x, spec: "-" if not x else f"{format(x['median'], spec)} [{format(x['min'], spec)}, {format(x['max'], spec)}]"
     out += ["", "| config vs ref | C | reps | tok/s ratio | A ratio | step ratio | latency gap ms | TTFT part ms "
-            "| step part ms | acceptance part ms | other part ms | acceptance share | step share | TTFT share |",
-            "|" + "---|" * 14]
+            "| decode part ms | step part ms | acceptance part ms | other part ms | acceptance share | step share "
+            "| TTFT share |", "|" + "---|" * 15]
     for r in res["summary"]:
         out.append(f"| {r['label']} vs {r['reference']} | {r['concurrency']} | {r['repetitions']} | "
                    f"{rng(r['tok_per_s_ratio'], '.3f')} | {rng(r['acceptance_ratio'], '.3f')} | {rng(r['step_ratio'], '.3f')} | "
-                   f"{rng(r['latency_gap_ms'], '.0f')} | {rng(r['ttft_part_ms'], '.0f')} | {rng(r['step_part_ms'], '.0f')} | "
+                   f"{rng(r['latency_gap_ms'], '.0f')} | {rng(r['ttft_part_ms'], '.0f')} | {rng(r['decode_part_ms'], '.0f')} | "
+                   f"{rng(r['step_part_ms'], '.0f')} | "
                    f"{rng(r['accept_part_ms'], '.0f')} | {rng(r['other_part_ms'], '.0f')} | {rng(r['accept_share'], '.2f')} | "
                    f"{rng(r['step_share'], '.2f')} | {rng(r['ttft_share'], '.2f')} |")
     out += ["", "| config | C | reps | tok/s | TTFT ms | TPOT ms | acceptance used (harmonic) | EvalScope summary acceptance | decode step ms "
@@ -1340,12 +1261,12 @@ def main():
                     "repeatable); each window gets cache_writes, the files modified in it grouped per kernel")
     ac = ap.add_argument_group("--accept-split")
     ac.add_argument("--accept-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
-                    help="acceptance/speed split of each run's gap to the first (needs --accept-decompose, --decode-log-interval)")
+                    help="split each run's latency gap to the first into TTFT and decode parts, and with "
+                    "--accept-decompose, --decode-log-interval and per-request acceptance the decode part into step, "
+                    "acceptance and other")
     ac.add_argument("--accept-decompose", action="append", default=[], metavar="LABEL=JSON")
     ac.add_argument("--accept-server-log", action="append", default=[], metavar="LABEL=LOG")
     ac.add_argument("--accept-requests", action="append", default=[], metavar="LABEL=JSONL")
-    ap.add_argument("--gap-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
-                    help="twice (A then B): split A's mean latency gap over B into TTFT and decode parts per concurrency")
     ap.add_argument("--point-table", action="extend", nargs="+", default=[], metavar="JSON",
                     help="instead of a decomposition: per run of this tool's JSON(s), busiest rank's chunks x median "
                     "chunk ms, full-batch decode round ms (Decode-line gap / --decode-log-interval, upper median over "
@@ -1399,8 +1320,8 @@ def main():
         print("\n".join(line_gap_lines(gaps)))
         return
     if a.accept_split:
-        if not a.decode_log_interval:
-            ap.error("--accept-split needs --decode-log-interval")
+        if a.accept_decompose and not a.decode_log_interval:
+            ap.error("--accept-decompose needs --decode-log-interval")
         multi = lambda xs, flag: {k: [v] for k, v in (split_spec(x, flag) for x in xs)}
         res = accept_split([split_spec(x, "--accept-split") for x in a.accept_split],
                            dict(split_spec(x, "--accept-decompose") for x in a.accept_decompose),
@@ -1410,12 +1331,6 @@ def main():
         if a.out_json:
             json.dump(res, open(a.out_json, "w"), indent=1)
         print(accept_split_markdown(res), end="")
-        return
-    if a.gap_split:
-        res = gap_split([split_spec(x, "--gap-split") for x in a.gap_split])
-        if a.out_json:
-            json.dump(res, open(a.out_json, "w"), indent=1)
-        print(gap_split_markdown(res), end="")
         return
     if a.chunk_model:
         if not a.chunk_scenario or not a.prompt_tokens or not a.output_tokens or not a.concurrency_list:
