@@ -17,9 +17,9 @@ token where the re-encoded outputs differ, the common token prefix, finish reaso
 token counts and prefix-cache hits. Prints a summary line per pair (exact, token-identical, differing
 at token 0, median, minimum and maximum first differing token, first_diff_buckets: how many
 token-differing prompts first differ at token 0, 1-4, 5-31, 32-127, 128+, each such prompt counted
-once, total common prefix, mean / min / max acceptance length of each side) and, with --out,
-writes a Markdown table. --cache-free adds the same counts over the prompts with no prefix-cache
-hit on either side. Exits 0 whether or not the outputs match; deciding what a mismatch means is
+once, total common prefix, unmatched: records of either side with no partner, mean / min / max
+acceptance length of each side) and, with --out, writes a Markdown table. --cache-free adds the same
+counts over the prompts with no prefix-cache hit on either side. Exits 0 whether or not the outputs match; deciding what a mismatch means is
 the caller's job.
 
 --accept-server-log LABEL=LOG (repeatable) replaces each record's acc_len of side LABEL with the server's own
@@ -139,7 +139,9 @@ def acceptance(outputs):
 FIRST_DIFF_BUCKETS = (("0", 0, 0), ("1-4", 1, 4), ("5-31", 5, 31), ("32-127", 32, 127), ("128+", 128, float("inf")))
 
 
-def summarize(rows, label):
+def summarize(rows, label, b_only=0):
+    """Counts over compare()'s rows (one per record of A); b_only is the number of B records with no A record,
+    counted in unmatched with A's records that have no B record."""
     diffs = [r["first_diff_token"] for r in rows if r["first_diff_token"] is not None]
     return {
         "pair": label,
@@ -155,7 +157,7 @@ def summarize(rows, label):
         },
         "total_common_prefix": sum(r["common_prefix"] for r in rows),
         "mismatching_idx": [r["idx"] for r in rows if not r["exact"]],
-        "unmatched": sum(not r.get("matched", True) for r in rows),
+        "unmatched": sum(not r.get("matched", True) for r in rows) + b_only, "unmatched_b_only": b_only,
         "looping": [sum(r.get("loop_period", (None, None))[k] is not None for r in rows) for k in (0, 1)],
         "same_loop_period": sum(len(set(r.get("loop_period", (None, None)))) == 1 for r in rows),
     }
@@ -335,7 +337,7 @@ def main(argv=None):
         server_matched = {lab: [use_server_acceptance(R, logs[lab]), len(R)]
                           for lab, R in ((la, A), (lb, B)) if lab in logs}
         rows = compare(A, B)
-        summary = summarize(rows, f"{la} vs {lb}")
+        summary = summarize(rows, f"{la} vs {lb}", sum(k not in A for k in B))
         if args.rows:
             for r in rows:
                 print(json.dumps({"pair": summary["pair"], **{k: (list(v) if isinstance(v, tuple) else v)

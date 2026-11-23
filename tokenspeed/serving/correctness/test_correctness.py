@@ -188,6 +188,20 @@ def test_looping_counts_each_prompt_once() -> None:
     assert s["looping_wilson95"] == co.wilson(1, 3) and abs(s["looping_fraction"] - 1 / 3) < 1e-12
 
 
+def test_records_only_in_b_are_unmatched() -> None:
+    co = load("compare_outputs.py")
+    rec = lambda i: json.dumps({"idx": i, "text": "x", "reencoded_ids": [1, 2]})  # noqa: E731
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.jsonl", Path(d) / "b.jsonl"
+        a.write_text(rec(0) + "\n" + rec(1) + "\n")
+        b.write_text(rec(0) + "\n" + rec(2) + "\n" + rec(3) + "\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            co.main(["--pair", f"A={a},B={b}"])
+    s = json.loads(buf.getvalue())
+    assert s["prompts"] == 2 and s["unmatched"] == 3 and s["unmatched_b_only"] == 2
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
