@@ -540,3 +540,146 @@ def test_stage_marks_wrap_the_c3_combine_when_present(monkeypatch):
         assert hasattr(mod, "MegaMoECombineResidual") == with_c3
         if with_c3:
             assert isinstance(mod.MegaMoECombineResidual, petit_layer._MarkedLaunch)
+
+
+# --- --hops / --hop-table (TOKENSPEED_PETIT_TRACE): synthetic traces, no GPU ---
+
+import numpy as np  # noqa: E402
+
+import petit_hops  # noqa: E402
+
+THETA0, THETA1, X_TICKS, TURN = 1000.0, 1100.0, 150.0, 2.0  # rank 1's clock offset before/after; one-way hop
+
+
+def _theta(t0):
+    """Rank 1 minus rank 0 ticks at rank-0 time t0 (linear between the two ping medians)."""
+    tb, ta = 10000 + 31.5 * 10, 90000 + 31.5 * 10
+    return THETA0 + (t0 - tb) / (ta - tb) * (THETA1 - THETA0)
+
+
+def _synthetic(ws=2, slots=(5, 6)):
+    rings = [np.zeros((8, 3, 256, 16), dtype="<u8") for _ in range(ws)]
+    pings = [np.zeros((2, 8, 64, 2), dtype="<u8") for _ in range(ws)]
+    for phase, start in ((0, 10000), (1, 90000)):
+        for i in range(64):
+            send = start + i * 10
+            for r in range(1, ws):
+                seen_r = send + X_TICKS + _theta(send + X_TICKS)
+                pings[0][phase, r, i] = (send, send + 2 * X_TICKS + TURN)
+                pings[r][phase, r, i] = (round(seen_r), round(seen_r + TURN))
+    for call, slot in enumerate(slots):
+        t = 20000 + call * 10000
+        for r in range(ws):
+            lag = 50 * r  # rank r enters 0.5 us later
+            def put(kernel, row, site, t0):
+                rings[r][slot, kernel, row, site] = round(t0 + (_theta(t0) if r else 0))
+            for row in range(4):
+                put(0, row, 0, t + lag)
+                put(0, row, 14, t + lag + 1)
+                put(0, row, 12, t + lag + 2000)
+            for site, d in ((1, 10), (2, 110), (3, 160), (4, 260), (5, 300)):
+                put(0, 0, site, t + lag + d)
+            put(0, 1, 2, t + lag + 310); put(0, 1, 3, t + lag + 410); put(0, 1, 5, t + lag + 700)
+            put(0, 2, 2, t + lag + 310); put(0, 2, 3, t + lag + 420)
+            put(0, 3, 8, t + lag + 320); put(0, 3, 9, t + lag + 800)
+            put(0, 3, 10, t + lag + 1800); put(0, 3, 11, t + lag + 1900)
+            put(1, 0, 0, t + lag + 2300); put(1, 0, 2, t + lag + 2400); put(1, 0, 3, t + lag + 2900)
+            for site, d in ((0, 3000), (1, 3010), (2, 3100), (4, 3300), (5, 3400)):
+                put(2, 0, site, t + lag + d)
+    return [ring.tobytes() + ping.tobytes() for ring, ping in zip(rings, pings)]
+
+
+def test_hops_decode_layout_matches_tokenspeed_trace_offsets():
+    buf = _synthetic()[0]
+    assert len(buf) == petit_hops.TRACE_BYTES == 8 * 3 * 256 * 16 * 8 + 2 * 8 * 64 * 2 * 8
+    ring, ping = petit_hops.decode(buf)
+    words = np.frombuffer(buf, dtype="<u8")
+    # TraceOffset(slot, kernel, row, site) = base + (((slot*3 + kernel)*256 + row)*16 + site)*8
+    assert ring[5, 0, 0, 3] == words[((5 * 3 + 0) * 256 + 0) * 16 + 3] != 0
+    assert ring[6, 2, 0, 5] == words[((6 * 3 + 2) * 256 + 0) * 16 + 5] != 0
+    # TracePingStampOffset(phase, peer, it, which) after the ring
+    assert ping[1, 1, 7, 1] == words[8 * 3 * 256 * 16 + ((1 * 8 + 1) * 64 + 7) * 2 + 1]
+    with pytest.raises(ValueError):
+        petit_hops.decode(buf[:-8])
+
+
+def test_hops_ping_gives_x_and_offset():
+    bufs = _synthetic()
+    _, p0 = petit_hops.decode(bufs[0])
+    _, p1 = petit_hops.decode(bufs[1])
+    f = petit_hops.ping_fit(p0, p1, 1, 0)
+    assert f["n"] == 64 and all(abs(x - X_TICKS) <= 1 for x in f["x_ticks"])
+    assert abs(f["theta"] - _theta(f["t0"] + X_TICKS)) <= 1
+
+
+def test_hops_offset_interpolation():
+    off = {"before": (0.0, 1000.0), "after": (100000.0, 1100.0), "x_ticks": []}
+    out = petit_hops.to_rank0(np.array([50000 + 1050.0, 0.0]), off)
+    assert abs(out[0] - 50000) < 0.1 and np.isnan(out[1])
+    same = petit_hops.to_rank0(np.array([7.0]), {"before": (0.0, 0.0), "after": (1.0, 0.0)})
+    assert same[0] == 7.0
+
+
+def test_hops_chain_reconstruction():
+    h = petit_hops.analyze(_synthetic(), [2, 2])
+    assert h["calls"] == 2 and h["slots"] == [5, 6] and h["ranks"] == 2
+    med = {k: [None if a is None else round(a["median"], 2) for a in v] for k, v in h["chain_us"].items()}
+    assert med["stamp_cost"] == [0.01, 0.01, 0.01]
+    assert med["hop1_admit"][:2] == [1.0, 1.0] and med["s13_counts"][0] == 0.5
+    assert med["hop2_countdone"][0] == 1.0 and med["s15_plan"][0] == 0.4
+    assert med["hop3_planready"][0] == 1.05 and med["push_chain"][0] == 2.9
+    assert med["hop4_payload"][0] == 4.8 and med["tile"][0] == 10.0 and med["epilogue"][0] == 1.0
+    assert med["s1_to_s2"][0] == 3.0 and med["w2_tile"][0] == 5.0
+    assert med["combine_barrier"][0] == 0.9 and med["hop5_epoch"][0] == 2.0 and med["reduce"][0] == 1.0
+    assert abs(med["launch_skew"][2] - 0.5) <= 0.02  # rank 1's later entry, after clock alignment
+    assert abs(med["push_to_payload"][2] - 3.9) <= 0.02  # rank 0's PlanReady seen -> rank 0's payload seen
+    assert abs(med["call"][2] - 34.5) <= 0.02
+    assert abs(h["x_us"]["median"] - 1.5) <= 0.01
+    # site 3: the owner at 1.6 us and two producers at 4.1, 4.2 us
+    assert h["sites_us_from_call_start"]["0"]["stage1"]["3"]["median"] == pytest.approx(4.1)
+    json.dumps(h)  # the hops section is JSON as written
+    table = petit_hops.hop_table(h)
+    assert table.count("\n") == len(petit_hops.CHAIN) + 2 and "| hop2_countdone | 1.00 [1.00, 1.00]" in table
+
+
+def test_hops_refuses_without_the_switch(monkeypatch):
+    env = {"TOKENSPEED_PETIT_TRACE": "0"}
+    with pytest.raises(SystemExit):
+        petit_layer.hop_switch(env)
+    env = {}
+    petit_layer.hop_switch(env)
+    assert env["TOKENSPEED_PETIT_TRACE"] == "1"
+    with pytest.raises(SystemExit):
+        petit_layer.hop_module(object())  # a TokenSpeed without the trace
+    traced = type("M", (), {"kPetitTrace": True, "MegaMoETracePingRun": staticmethod(lambda *a: 0)})
+    petit_layer.hop_module(traced)
+    base = ["--ts-src", "/ts", "--out", "o.json", "--profile", "x", "--tokens", "1", "--hops"]
+    with pytest.raises(SystemExit):
+        petit_layer.parse_args(base)  # --mode both
+    with pytest.raises(SystemExit):
+        petit_layer.parse_args(base + ["--mode", "graph", "--candidates", "all"])
+    a = petit_layer.parse_args(base + ["--mode", "graph", "--layers", "40"])
+    assert a.hops and a.hop_clock_mhz == 100.0
+
+
+def test_hop_table_cli(tmp_path, capsys):
+    h = petit_hops.analyze(_synthetic(), [2, 2])
+    record = {"profile": {"name": "dsv41_flash"}, "petit_switches": {"TOKENSPEED_PETIT_TRACE": "1"},
+              "results": [{"tokens_per_gpu": 6, "active_ranks": 1, "hops": h}, {"tokens_per_gpu": 0}]}
+    path = tmp_path / "h.json"
+    path.write_text(json.dumps(record))
+    assert petit_layer.main(["--hop-table", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "tokens/GPU=6" in out and "| tile | 10.00 [10.00, 10.00]" in out and out.count("###") == 1
+
+
+def test_hops_drop_stale_stamps_of_an_older_call():
+    ring = np.zeros((8, 3, 256, 16), dtype="<u8")
+    ring[2, 0, :4, 0] = 900_000 + np.arange(4)       # the slot's latest call: CTAs 0-3 enter at ~900000
+    ring[2, 0, :4, 12] = 902_000
+    ring[2, 0, 7, 9] = 100_000                       # CTA 7's tile stamp from the call 8 calls earlier
+    ring[2, 0, 3, 9] = 900_500                       # CTA 3's tile stamp from the latest call
+    ring[2, 2, 0, 4] = 903_000
+    out = petit_hops.drop_stale(ring)
+    assert out[2, 0, 7, 9] == 0 and out[2, 0, 3, 9] == 900_500 and out[2, 2, 0, 4] == 903_000
+    assert (out[2, 0, :4, 0] == ring[2, 0, :4, 0]).all() and ring[2, 0, 7, 9] == 100_000  # a copy
