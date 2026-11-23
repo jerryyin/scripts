@@ -70,6 +70,16 @@ rank, the distinct experts of its local range that the timed routing of all rank
 DP4's torch.add(routed, shared, out=out); copy-add is tp4ep4-petit's out.copy_(shared) then
 out[start:end].add_(routed) over the replicated rows (shared = zeros, so the check stays exact).
   petit_layer.py --decide ROWS.csv [--where NAME=VALUE ...] [--node-us U]   r0002-p1 decision rules
+  petit_layer.py --hop-table OUT.json [OUT.json ...]       the --hops chain per rank and max over ranks (us)
+--hops (graph mode) needs a TokenSpeed with TOKENSPEED_PETIT_TRACE: it sets
+TOKENSPEED_PETIT_TRACE=1 before TokenSpeed is imported (refusing a different value already set, since the
+switch is read at import) and, after each token count's timed replays (whose times are the instrumented
+kernels' unmarked call), zeroes the trace region, runs MegaMoETracePing (phase 0), one replay of the
+timed graph (--layers calls), MegaMoETracePing again (phase 1), gathers every rank's region and decodes it
+with petit_hops.py: X (ping RTT/2), clock offsets interpolated between the pings, every site per rank
+relative to the call's first stage-1 entry, and the chain (petit_hops.CHAIN: hop1..hop5, the owner's and
+producers' local work, tile, epilogue, node gaps) per rank and max over ranks, median [min, max] over the
+replay's last 8 calls (the trace ring's 8 slots).
 
 Pure logic (argument parsing, limits, result rows, fit, stage arithmetic) runs without a GPU: test_petit_layer.py.
 """
@@ -91,6 +101,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "profiling"))
 import dist_timing  # noqa: E402
+import petit_hops  # noqa: E402
 
 TEST_REL = "tokenspeed-kernel/test/amd/gfx950/ops/moe/test_gluon_petit_distributed.py"
 # Petit's per-rank token capacity: MegaMoeConfig.max_tokens_per_rank = 1024
@@ -554,8 +565,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="the model's op after Petit's call, timed as the post stage (see post_geometry): "
                          "none; add = DP4's torch.add(routed, shared, out=out); copy-add = tp4ep4-petit's "
                          "out.copy_(shared) then out[start:end].add_(routed) over the replicated rows")
+    ap.add_argument("--hops", action="store_true",
+                    help="per-hop trace (TokenSpeed TOKENSPEED_PETIT_TRACE=1, set by this flag): after the timed "
+                         "replays, one traced replay between two clock pings; writes a hops section per result")
+    ap.add_argument("--hop-clock-mhz", type=float, default=petit_hops.NOMINAL_CLOCK_MHZ,
+                    help="s_memrealtime rate (default 100 MHz on gfx942/gfx950); the JSON records a host check")
     ap.add_argument("--out", required=True, help="output JSON (written by rank 0)")
     a = ap.parse_args(argv)
+    if a.hops and (a.mode != "graph" or a.candidates is not None):
+        ap.error("--hops needs --mode graph and no --candidates")
     if a.capacity < 1 or a.capacity % 32:
         ap.error("--capacity must be a positive multiple of 32 (Petit rounds capacities to 32-row blocks)")
     if not a.ts_src:
@@ -651,6 +669,21 @@ def test_tolerance(test_source: str) -> dict:
     if m is None:
         raise RuntimeError("reference tolerance not found in the test source")
     return {"atol": float(m.group(1)), "rtol": float(m.group(2))}
+
+
+def hop_switch(environ) -> None:
+    """--hops: set TOKENSPEED_PETIT_TRACE=1 before TokenSpeed is imported; refuse another value (read at import)."""
+    value = environ.get("TOKENSPEED_PETIT_TRACE")
+    if value not in (None, "1"):
+        raise SystemExit(f"--hops needs TOKENSPEED_PETIT_TRACE=1 (read at TokenSpeed's import); it is {value!r}")
+    environ["TOKENSPEED_PETIT_TRACE"] = "1"
+
+
+def hop_module(module) -> None:
+    """Refuse --hops when the imported TokenSpeed does not have (or did not turn on) the trace."""
+    if not getattr(module, "kPetitTrace", False) or not hasattr(module, "MegaMoETracePingRun"):
+        raise SystemExit("--hops: this TokenSpeed has no TOKENSPEED_PETIT_TRACE instrumentation "
+                         "(lib.moe.rocm.mega_moe.kPetitTrace / MegaMoETracePingRun)")
 
 
 def load_test(ts_src: Path):
@@ -881,6 +914,18 @@ def main(argv=None) -> int:
                   f"switches={switches_label(record.get('petit_switches', {}))}\n")
             print(stage_table(record) + "\n")
         return 0
+    if argv and argv[0] == "--hop-table":  # petit_layer.py --hop-table OUT.json [OUT.json ...]
+        for path in argv[1:]:
+            record = json.loads(Path(path).read_text())
+            for r in record["results"]:
+                if not r.get("hops"):
+                    continue
+                h = r["hops"]
+                print(f"### {Path(path).name}: {record['profile']['name']} tokens/GPU={r['tokens_per_gpu']} "
+                      f"active={r['active_ranks']} switches={switches_label(record.get('petit_switches', {}))} "
+                      f"calls={h['calls']} clock={h['clock_mhz']} MHz (host check {h.get('clock_check_mhz')})\n")
+                print(petit_hops.hop_table(h) + "\n")
+        return 0
     if argv and argv[0] == "--summary":  # petit_layer.py --summary OUT.json [OUT.json ...]
         for path in argv[1:]:
             record = json.loads(Path(path).read_text())
@@ -895,6 +940,8 @@ def main(argv=None) -> int:
     from datetime import timedelta
 
     ts_src = Path(a.ts_src).resolve()
+    if a.hops:
+        hop_switch(os.environ)
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl", timeout=timedelta(minutes=10))
@@ -973,6 +1020,58 @@ def main(argv=None) -> int:
         return out
 
     layers = timed_layers()
+    hop_seq = [0]
+
+    def capture_hops(graph, count):
+        """Zero the trace region, ping, one traced replay, ping; every rank's region on rank 0, decoded."""
+        from tokenspeed_kernel.ops.moe import gluon as petit_ops
+        petit_ops._import_petit_kernel()
+        import lib.moe.rocm.mega_moe as forwarding
+        mm = sys.modules[forwarding.MegaMoESolutionAdapter.__module__]
+        hop_module(mm)
+        spaces = list(petit_ops._workspace_cache.values())
+        if len(spaces) != 1:
+            raise RuntimeError(f"--hops: expected one Petit workspace, found {len(spaces)}")
+        w = spaces[0]
+        sid = w.config._solution_id_for_tokens(count)
+        info = mm.GetMegaMoEWorkspaceInfo(rank, sid)
+        if info.trace_bytes != petit_hops.TRACE_BYTES:
+            raise RuntimeError(f"--hops: trace_bytes {info.trace_bytes}, petit_hops expects {petit_hops.TRACE_BYTES}")
+        base = w.heap.local_tensor().view(torch.uint8)
+        region = base[info.trace_offset:info.trace_offset + info.trace_bytes]
+        stream = torch.cuda.current_stream(device)
+
+        def ping(phase):
+            torch.cuda.synchronize()
+            dist.barrier()
+            rc = mm.MegaMoETracePingRun(sid, base, rank, phase, hop_seq[0], stream)
+            hop_seq[0] += petit_hops.PING_ITERS
+            if rc:
+                raise RuntimeError(f"MegaMoETracePingRun returned {rc}")
+            torch.cuda.synchronize()
+            return time.perf_counter()
+
+        torch.cuda.synchronize()
+        dist.barrier()
+        region.zero_()
+        h0 = ping(0)
+        dist.barrier()
+        graph.replay()
+        torch.cuda.synchronize()
+        h1 = ping(1)
+        producers = PRODUCER_BLOCKS[w.config.launch_choice(count)[0]]
+        gathered, prods = [None] * ws, [None] * ws
+        dist.all_gather_object(gathered, region.cpu().numpy().tobytes())
+        dist.all_gather_object(prods, producers)
+        if rank != 0:
+            return None
+        hops = petit_hops.analyze(gathered, prods, a.hop_clock_mhz)
+        _, ping0 = petit_hops.decode(gathered[0])
+        sends = ping0[:, 1:ws, :, 0].astype("float64")
+        t_before, t_after = float(sends[0][sends[0] > 0].min()), float(sends[1][sends[1] > 0].min())
+        hops["clock_check_mhz"] = round((t_after - t_before) / ((h1 - h0) * 1e6), 3)
+        hops["producers_by_rank"] = prods
+        return hops
 
     def timed_routing(count):
         if a.routing == "test":
@@ -1189,6 +1288,7 @@ def main(argv=None) -> int:
                             s: dist_timing.summarize([c["max_over_ranks"]["stage_net_ms"][s] for c in closures])
                             for s in STAGES},
                     }
+        hops = capture_hops(per[names[0]]["graph"], count) if a.hops else None
         Forcing.candidate = None
         for name in names:
             mine = per[name]
@@ -1213,6 +1313,7 @@ def main(argv=None) -> int:
                             "distinct_local_experts": distinct_local_experts(load_list, ws)},
                 "timing_ms": timing[name],
                 **({"stages_ms": stage_timing[name]} if a.stages else {}),
+                **({"hops": hops} if a.hops else {}),
             })
             if rank == 0:
                 t = {m: round(timing[name][m]["max_over_ranks_ms"]["median"], 4) for m in timing[name]}
