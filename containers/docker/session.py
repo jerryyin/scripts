@@ -18,17 +18,17 @@ def role_directory(environment: dict[str, str]) -> tuple[str, Path, Path]:
     if not marker.is_file() or marker.read_text().strip() != scope:
         raise ValueError(f'Vault scope mismatch or missing .vault-scope: {vault}')
     root = Path(environment.get('DEVENV_ROLE_ROOT', str(home))).expanduser().resolve()
-    if root == home:
-        return scope, vault, root
-    if home.is_relative_to(root) or vault.is_relative_to(root) or root.is_relative_to(vault):
-        raise ValueError('A separate role directory cannot contain the host home or a vault checkout')
     marker = root / '.vault-scope'
-    if root.exists() and any(root.iterdir()) and not marker.is_file():
-        raise ValueError('Use a new role directory; existing unclassified storage cannot be imported')
+    if root != home:
+        if home.is_relative_to(root) or vault.is_relative_to(root) or root.is_relative_to(vault):
+            raise ValueError('A separate role directory cannot contain the host home or a vault checkout')
+        if root.exists() and any(root.iterdir()) and not marker.is_file():
+            raise ValueError('Use a new role directory; existing unclassified storage cannot be imported')
     if marker.exists() and marker.read_text().strip() != scope:
-        raise ValueError('Persistent directory belongs to another vault scope')
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
+        raise ValueError(f'Persistent directory belongs to another vault scope: {marker}')
+    if root != home:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
     if not marker.exists():
         marker.write_text(scope + '\n')
     return scope, vault, root

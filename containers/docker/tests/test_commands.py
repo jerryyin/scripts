@@ -204,6 +204,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
                 self.assertEqual(env['DEVENV_ROLE_ROOT'], str(root))
                 self.assertEqual(env['DEVENV_VAULT_DIR'], str(self.root / 'home' / f'vault-{scope}'))
                 self.assertEqual(env['DOCKER_CONFIG'], str(root / '.docker'))
+                (root / '.vault-scope').unlink()
                 self.assertEqual(env['DEVENV_MODELS_DIR'], str(self.root / 'home/.local/share/devenv/models'))
                 self.assertIsNone(env['SSH_AUTH_SOCK'])
 
@@ -258,6 +259,17 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
         self.assertEqual((target / 'id_rsa').read_text(), 'imported earlier\n')
         result = self.invoke('drun', 'triton')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_host_home_is_marked_for_its_scope_and_refuses_another(self) -> None:
+        result = self.invoke('drun', 'triton')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'home/.vault-scope').read_text(), 'work\n')
+        calls = len(self.calls())
+        self.environment['VAULT_SCOPE'] = 'homelab'
+        result = self.invoke('drun', 'triton')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('another vault scope', result.stderr)
+        self.assertEqual(len(self.calls()), calls)
 
     def test_wrong_vault_or_host_home_mount_is_rejected_before_docker(self) -> None:
         self.environment['VAULT_DIR'] = str(self.root / 'home/vault-homelab')
