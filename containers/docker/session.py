@@ -41,12 +41,29 @@ def models_directory(environment: dict[str, str], vault: Path, root: Path) -> Pa
     return models
 
 
+def gpu_lock_directory(environment: dict[str, str], root: Path) -> Path:
+    """Return the host directory to mount at /data/lock, where board/gpu-lock and gpu-wait.py look.
+
+    A host without a shared lock directory gets a private one in the role directory.
+    """
+    lock = Path(environment.get('DEVENV_GPU_LOCK_DIR', '/data/lock')).expanduser().resolve()
+    if lock.is_dir():
+        return lock
+    if 'DEVENV_GPU_LOCK_DIR' in environment:
+        raise ValueError(f'GPU lock directory does not exist: {lock}')
+    print(f'No host GPU lock at {lock}; containers get a private /data/lock', file=sys.stderr)
+    private = root / '.gpu-lock'
+    private.mkdir(exist_ok=True)
+    return private
+
+
 def prepare() -> dict[str, str]:
     environment = dict(os.environ)
     scope, vault, root = role_directory(environment)
     home = Path.home().resolve()
     environment.update(VAULT_SCOPE=scope, DEVENV_ROLE_ROOT=str(root), DEVENV_VAULT_DIR=str(vault),
                        DEVENV_MODELS_DIR=str(models_directory(environment, vault, root)),
+                       DEVENV_GPU_LOCK_DIR=str(gpu_lock_directory(environment, root)),
                        DOCKER_CONFIG=str(root / '.docker'))
     for name in ('SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'DOCKER_AUTH_CONFIG', 'DOCKER_AUTH_FILE'):
         environment.pop(name, None)
@@ -90,6 +107,7 @@ def main() -> None:
                      '-v', environment['DEVENV_ROLE_ROOT'] + ':/zyin',
                      '-v', environment['DEVENV_VAULT_DIR'] + ':/zyin/vault-' + environment['VAULT_SCOPE'] + ':ro',
                      '-v', environment['DEVENV_MODELS_DIR'] + ':/models:ro',
+                     '-v', environment['DEVENV_GPU_LOCK_DIR'] + ':/data/lock',
                      '-e', 'VAULT_SCOPE=' + environment['VAULT_SCOPE'],
                      '-e', 'DEVENV_PERSISTENT_ROOT=/zyin', *caller]
     else:

@@ -34,6 +34,8 @@ x-base-service: &base-service
     - ${DEVENV_ROLE_ROOT:?Use dcompose, dbuild or drun}:/zyin
     - ${DEVENV_VAULT_DIR:?Select a role vault}:/zyin/vault-${VAULT_SCOPE:-work}:ro
     - ${DEVENV_MODELS_DIR:?Use dcompose, dbuild or drun}:/models:ro
+    # The host's shared GPU lock, so board/gpu-lock in the container queues with the host.
+    - ${DEVENV_GPU_LOCK_DIR:?Use dcompose, dbuild or drun}:/data/lock
     # tools_volume:/usr/local intentionally omitted — testing whether
     # any service actually relies on tools-setup's /usr/local overlay.
     # If you need ctags or other packelf'd tools, re-add the mount AND

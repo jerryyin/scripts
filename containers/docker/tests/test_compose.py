@@ -20,7 +20,9 @@ class ComposeRoles(unittest.TestCase):
             directory = Path(scratch)
             for scope in ('work', 'homelab'):
                 root, vault = directory / scope, directory / f'vault-{scope}'
-                env = dict(os.environ, VAULT_SCOPE=scope, DEVENV_ROLE_ROOT=str(root), DEVENV_VAULT_DIR=str(vault))
+                lock = directory / 'lock'
+                env = dict(os.environ, VAULT_SCOPE=scope, DEVENV_ROLE_ROOT=str(root), DEVENV_VAULT_DIR=str(vault),
+                           DEVENV_MODELS_DIR=str(directory / 'models'), DEVENV_GPU_LOCK_DIR=str(lock))
                 command = [*CLI, '-f', str(ROOT / 'docker-compose.yml')]
                 profiles = subprocess.check_output([*command, 'config', '--profiles'], env=env, text=True).splitlines()
                 self.assertIn('triton-b0', profiles)
@@ -34,6 +36,10 @@ class ComposeRoles(unittest.TestCase):
                         self.assertEqual(selected['source'], str(vault))
                         self.assertTrue(selected['read_only'])
                         self.assertNotIn('/data', mounts)
+                        # The simulator service has no GPU to lock.
+                        if profile != 'triton-mi450':
+                            self.assertEqual(mounts['/data/lock']['source'], str(lock))
+                            self.assertFalse(mounts['/data/lock'].get('read_only', False))
                         self.assertNotIn(str(Path.home()), [item['source'] for item in mounts.values()])
                         self.assertEqual(service['environment']['VAULT_SCOPE'], scope)
                         self.assertEqual(service['build']['context'], str(ROOT))

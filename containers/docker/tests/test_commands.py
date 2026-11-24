@@ -46,12 +46,15 @@ class CommandTests(unittest.TestCase):
                      'VAULT_SCOPE', 'VAULT_DIR', 'DEVENV_ROLE_ROOT', 'DEVENV_MODELS_DIR', 'RC_FILES_DIR',
                      'DOCKER_CONFIG'):
             self.environment.pop(name, None)
+        self.lock = self.root / 'host lock'
+        self.lock.mkdir()
+        self.environment['DEVENV_GPU_LOCK_DIR'] = str(self.lock)
         self.executable('docker', '''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ['CALL_LOG'], 'a') as stream:
     stream.write(json.dumps({'args': sys.argv[1:], 'project': os.environ.get('COMPOSE_PROJECT_NAME')}) + '\\n')
 with open(os.environ['CALL_LOG'] + '.env', 'w') as stream:
-    json.dump({name: os.environ.get(name) for name in ('VAULT_SCOPE', 'DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DEVENV_MODELS_DIR', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK')}, stream)
+    json.dump({name: os.environ.get(name) for name in ('VAULT_SCOPE', 'DEVENV_ROLE_ROOT', 'DEVENV_VAULT_DIR', 'DEVENV_MODELS_DIR', 'DEVENV_GPU_LOCK_DIR', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK')}, stream)
 if os.environ.get('FAIL_DOCKER_COMMAND') == sys.argv[1]:
     sys.exit(23)
 if sys.argv[1] == 'ps':
@@ -185,6 +188,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
             self.assertIn('--device=/dev/kfd', arguments)
             self.assertIn(str(self.root / 'home/.local/share/devenv/work') + ':/zyin', arguments)
             self.assertIn(str(self.root / 'home/.local/share/devenv/models') + ':/models:ro', arguments)
+            self.assertIn(str(self.lock) + ':/data/lock', arguments)
             self.assertNotIn(str(self.root / 'home') + ':/zyin', arguments)
             names.append(arguments[arguments.index('--name') + 1])
         self.assertNotEqual(names[0], names[1])
@@ -221,6 +225,17 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('models directory', result.stderr)
                 self.assertEqual(len(self.calls()), calls)
+
+    def test_gpu_lock_directory_is_passed_to_compose_and_must_exist(self) -> None:
+        result = self.invoke('drun', 'triton')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(str(self.log) + '.env').read_text())['DEVENV_GPU_LOCK_DIR'], str(self.lock))
+        calls = len(self.calls())
+        self.environment['DEVENV_GPU_LOCK_DIR'] = str(self.root / 'absent')
+        result = self.invoke('drun', 'triton')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('GPU lock directory does not exist', result.stderr)
+        self.assertEqual(len(self.calls()), calls)
 
     def test_seeded_keys_reach_the_role_directory_without_replacing_imports(self) -> None:
         source = self.root / 'home/.ssh'
