@@ -186,10 +186,9 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
             arguments = self.calls()[-1]['args']
             self.assertEqual(arguments[-4:], ['fixture:image', 'bash', '-c', 'echo two words'])
             self.assertIn('--device=/dev/kfd', arguments)
-            self.assertIn(str(self.root / 'home/.local/share/devenv/work') + ':/zyin', arguments)
+            self.assertIn(str(self.root / 'home') + ':/zyin', arguments)
             self.assertIn(str(self.root / 'home/.local/share/devenv/models') + ':/models:ro', arguments)
             self.assertIn(str(self.lock) + ':/data/lock', arguments)
-            self.assertNotIn(str(self.root / 'home') + ':/zyin', arguments)
             names.append(arguments[arguments.index('--name') + 1])
         self.assertNotEqual(names[0], names[1])
 
@@ -201,7 +200,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
                 result = self.invoke(command, 'triton')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 env = json.loads(Path(str(self.log) + '.env').read_text())
-                root = self.root / 'home/.local/share/devenv' / scope
+                root = self.root / 'home'
                 self.assertEqual(env['DEVENV_ROLE_ROOT'], str(root))
                 self.assertEqual(env['DEVENV_VAULT_DIR'], str(self.root / 'home' / f'vault-{scope}'))
                 self.assertEqual(env['DOCKER_CONFIG'], str(root / '.docker'))
@@ -218,7 +217,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(Path(str(self.log) + '.env').read_text())['DEVENV_MODELS_DIR'], str(disk))
         calls = len(self.calls())
-        for models in (self.root / 'home', self.root / 'home/.local/share/devenv', self.root):
+        for models in (self.root / 'home', self.root):
             with self.subTest(models=models):
                 self.environment['DEVENV_MODELS_DIR'] = str(models)
                 result = self.invoke('drun', 'triton')
@@ -243,6 +242,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
         for name in ('id_rsa', 'id_enterprise'):
             (source / name).write_text(f'{name} private\n')
             (source / f'{name}.pub').write_text(f'{name} public\n')
+        self.environment['DEVENV_ROLE_ROOT'] = str(self.root / 'home/.local/share/devenv/work')
         seed = [sys.executable, str(self.checkout / 'session.py'), 'seed-ssh', 'id_rsa', 'id_enterprise']
         result = self.invoke(*seed)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -266,7 +266,7 @@ if sys.argv[1] == 'compose' and 'config' in sys.argv:
         self.assertIn('scope', result.stderr)
         self.assertEqual(self.calls(), [])
         self.environment.pop('VAULT_DIR')
-        self.environment['DEVENV_ROLE_ROOT'] = str(self.root / 'home')
+        self.environment['DEVENV_ROLE_ROOT'] = str(self.root)
         result = self.invoke('drun', 'triton')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('home', result.stderr)

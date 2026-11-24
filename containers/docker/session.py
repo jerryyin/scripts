@@ -1,4 +1,4 @@
-"""Run Docker with one vault and a separate persistent directory for its role."""
+"""Run Docker with one vault and the host home (or a separate role directory) as persistent storage."""
 
 from __future__ import annotations
 
@@ -17,9 +17,11 @@ def role_directory(environment: dict[str, str]) -> tuple[str, Path, Path]:
     marker = vault / '.vault-scope'
     if not marker.is_file() or marker.read_text().strip() != scope:
         raise ValueError(f'Vault scope mismatch or missing .vault-scope: {vault}')
-    root = Path(environment.get('DEVENV_ROLE_ROOT', str(home / '.local/share/devenv' / scope))).expanduser().resolve()
+    root = Path(environment.get('DEVENV_ROLE_ROOT', str(home))).expanduser().resolve()
+    if root == home:
+        return scope, vault, root
     if home.is_relative_to(root) or vault.is_relative_to(root) or root.is_relative_to(vault):
-        raise ValueError('The role directory cannot mount the host home or contain a vault checkout')
+        raise ValueError('A separate role directory cannot contain the host home or a vault checkout')
     marker = root / '.vault-scope'
     if root.exists() and any(root.iterdir()) and not marker.is_file():
         raise ValueError('Use a new role directory; existing unclassified storage cannot be imported')
