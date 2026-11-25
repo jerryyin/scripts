@@ -188,6 +188,7 @@ def admissible(rep: dict) -> bool:
 def compare(args) -> int:
     rc = range_compare
     from_counts = getattr(args, "counts_from_summary", False)
+    admissible_only = bool(getattr(args, "admissible_only", False))
     runs: dict[str, list[dict]] = {}
     excluded = []
     override = {}
@@ -197,7 +198,7 @@ def compare(args) -> int:
     for s in args.summaries:
         summ = json.loads(Path(s).read_text())
         for r in summ["repetitions"]:
-            if getattr(args, "admissible_only", False) and not admissible(r):
+            if admissible_only and not admissible(r):
                 excluded.append({"layout": summ["label"], "rep": r["rep"], "client": r.get("client"),
                                  "admissible": r.get("admissible"), "record_admissible": r.get("record_admissible")})
                 continue
@@ -219,7 +220,7 @@ def compare(args) -> int:
     labels = list(runs)
     report = {"dataset": args.dataset, "expected_total": args.expected_total, "rule": "agree iff |median_A-median_B| <= 1.96*sqrt(pA(1-pA)/n+pB(1-pB)/n)",
               "mode": "counts-from-summary" if from_counts else "per-question-reviews",
-              "admissible_only": bool(getattr(args, "admissible_only", False)), "excluded": excluded,
+              "admissible_only": admissible_only, "excluded": excluded,
               "layouts": {}, "pairs": []}
     for l in labels:
         s, totals = summary[(l,)] if (l,) in summary else summary[l], {r["total"] for r in runs[l]}
@@ -272,16 +273,14 @@ def compare(args) -> int:
               + ("" if from_counts else f" within-discordant {[d['discordant'] for d in v['within_discordance']]} "
                                         f"unstable {v['questions_not_stable_across_reps']}"))
     for p in report["pairs"]:
-        if from_counts:
-            print(f"{p['a']} vs {p['b']}: diff {p['median_diff']:+.4f} threshold {p['threshold_95']:.4f} -> {p['verdict']}; "
-                  f"ranges overlap: {p['ranges_overlap']}")
-            continue
         print(f"{p['a']} vs {p['b']}: diff {p['median_diff']:+.4f} threshold {p['threshold_95']:.4f} -> {p['verdict']}; "
-              f"ranges overlap: {p['ranges_overlap']}; between-discordant median {p['between_discordant_median']} "
-              f"[{p['between_discordant_min_max'][0]}, {p['between_discordant_min_max'][1]}] "
-              f"{[d['discordant'] for d in p['between_discordance']]}; "
-              f"all {p['a']} reps right & all {p['b']} reps wrong: {len(p['a_all_right_b_all_wrong'])} {p['a_all_right_b_all_wrong']}; "
-              f"all {p['b']} reps right & all {p['a']} reps wrong: {len(p['b_all_right_a_all_wrong'])} {p['b_all_right_a_all_wrong']}")
+              f"ranges overlap: {p['ranges_overlap']}"
+              + ("" if from_counts else
+                 f"; between-discordant median {p['between_discordant_median']} "
+                 f"[{p['between_discordant_min_max'][0]}, {p['between_discordant_min_max'][1]}] "
+                 f"{[d['discordant'] for d in p['between_discordance']]}; "
+                 f"all {p['a']} reps right & all {p['b']} reps wrong: {len(p['a_all_right_b_all_wrong'])} {p['a_all_right_b_all_wrong']}; "
+                 f"all {p['b']} reps right & all {p['a']} reps wrong: {len(p['b_all_right_a_all_wrong'])} {p['b_all_right_a_all_wrong']}"))
     return 0
 
 
