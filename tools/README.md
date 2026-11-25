@@ -7,6 +7,7 @@ Each utility here serves one dedicated use case and works independently when cop
 | `windows_wsl.py` | Execute a noninteractive script on Windows or WSL without nested quoting | Calling-host Python 3.10+; destination Bash or PowerShell 7; WSL interop for cross-OS calls |
 | `github_attachments.py` | Download attachment links from one GitHub issue into a directory | Python, `requests`, `beautifulsoup4`; network access to the issue and files |
 | `gdb_print_lanes.py` | Print one variable across selected GPU lanes | GDB Python with a `lane` command and an active debugging session |
+| `ckpt_index_check.py` | Check a safetensors checkpoint for completeness against its `model.safetensors.index.json` and split its bytes by tensor kind, from `stat` and shard headers only | Python 3.8+ standard library; read access to the checkpoint directory |
 
 ## GitHub issue attachments
 
@@ -24,6 +25,14 @@ Load the script in the debugger, then pass a variable expression and an inclusiv
 ```text
 (gdb) source /path/to/scripts/tools/gdb_print_lanes.py
 (gdb) python print_variable_for_lanes("first.data", 0, 3)
+```
+
+## Checkpoint completeness
+
+`ckpt_index_check.py [--split-bytes] [--json] CHECKPOINT...` checks each checkpoint directory (a Hugging Face snapshot's symlinks are followed) against its `model.safetensors.index.json` from `stat` alone: shard and tensor counts, indexed shards missing or empty, `*.safetensors` files the index does not name, and shard bytes against the index's `total_size`. `--split-bytes` also reads each shard's JSON header (never tensor data) and sums tensor bytes into routed experts, shared experts, the MTP layer (layers at or beyond `config.json` `num_hidden_layers`, or `mtp`/`nextn` names) and other, checked against `total_size`. `--json` prints one object per checkpoint. Exit status 1 when an index, an indexed shard or (with `--split-bytes`) an indexed tensor is missing.
+
+```bash
+python3 tools/ckpt_index_check.py --split-bytes /models/SOME-CHECKPOINT
 ```
 
 ## Windows / WSL execution
