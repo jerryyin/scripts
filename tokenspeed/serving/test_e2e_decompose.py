@@ -57,6 +57,22 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
             raise AssertionError("phases without times must be refused")
 
 
+def test_markdown_without_request_prompt_length() -> None:
+    # No finished request of >= 1000 prompt tokens: requests per rank is unknown (None), printed "-".
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = [batch(T + 0.1 * i, "Prefill", 0, new_seq=1, new_token=1000, running_req=2) for i in range(4)]
+    lines += [batch(T + 0.4 + 0.2 * i, "Decode", 0, running_req=2, gen=50.0, acc=3.0) for i in range(6)]
+    lines += [finish(T + 1.6, "a", 500, 0, out=11, acc=3.0), finish(T + 1.7, "b", 500, 0, out=11, acc=2.0)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        r = e2e.decompose(str(log))
+        assert r["request_prompt_tokens"] is None and r["ranks"]["0"]["requests_by_prefill_tokens"] is None
+        r["label"] = "p1"
+        row = e2e.markdown([r], log_interval=10).splitlines()[2]
+        assert row.startswith("| p1 | 1.40 | - | 0.40 = 4 x 100.0 "), row
+
 def test_predict_terms_and_whatifs() -> None:
     e2e = load("e2e_decompose.py")
     rank = lambda p, d, i, gap: {"prefill_time_s": p, "decode_time_s": d, "idle_s": i,

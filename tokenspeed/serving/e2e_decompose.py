@@ -289,7 +289,8 @@ def markdown(runs, log_interval=None):
         acc = [R[q]["avg_accept_len_line_mean"] for q in sorted(R)]
         rs = (r.get("requeststats") or {}).get("acc_len_mean")
         acc_text = ", ".join("-" if x is None else f"{x:.2f}" for x in acc) + ("" if rs is None else f"; {rs:.2f}")
-        split = "/".join(f"{R[q]['requests_by_prefill_tokens']:g}" for q in sorted(R))
+        nreq = [R[q]["requests_by_prefill_tokens"] for q in sorted(R)]
+        split = "/".join("-" if x is None else f"{x:g}" for x in nreq)
         lines.append(
             f"| {r['label']} | {span:.2f} | {split} | "
             f"{b['prefill_time_s']:.2f} = {b['prefill_chunks']} x {b['chunk_time_s']['median'] * 1e3:.1f} "
