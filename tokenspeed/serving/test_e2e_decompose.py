@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -55,6 +56,48 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
             assert "started_at" in str(exc)
         else:
             raise AssertionError("phases without times must be refused")
+
+
+def test_benchmark_json_repeated_phase_slices_per_concurrency() -> None:
+    """A matrix benchmark.json repeats a phase at each concurrency: one slice and one row per window."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = []
+    for w, (t0, n) in enumerate(((T, 1), (T + 10, 2))):  # window w: n requests of 2 chunks of 1000, 3 decode lines
+        for i in range(2 * n):
+            lines.append(batch(t0 + 0.1 * i, "Prefill", 0, new_seq=1, new_token=1000, running_req=n))
+        for i in range(3):
+            lines.append(batch(t0 + 0.5 + 0.2 * i, "Decode", 0, running_req=n, gen=50.0, acc=3.0))
+        lines += [finish(t0 + 0.9, f"r{w}{k}", 2000, 0, out=11, acc=3.0) for k in range(n)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        bj = Path(d) / "benchmark.json"
+        bj.write_text(json.dumps({"results": [
+            {"phase": "measured-1", "concurrency": c, "output_dir": f"{d}/o{c}",
+             "started_at": ts(t0 - 0.5), "finished_at": ts(t0 + 5)} for c, t0 in ((1, T), (2, T + 10))]}))
+        assert [w[0] for w in e2e.phase_windows(str(bj))] == ["measured-1", "measured-1"]
+        slices, out = Path(d) / "slices", Path(d) / "out.json"
+        proc = subprocess.run([sys.executable, str(HERE / "e2e_decompose.py"), "--benchmark-json", str(bj),
+                               "--server-log", str(log), "--slices-dir", str(slices), "--out-json", str(out),
+                               "--prompt-tokens", "2000", "--markdown"], capture_output=True, text=True, check=True)
+        assert sorted(p.name for p in slices.iterdir()) == ["measured-1_c1.log", "measured-1_c2.log"]
+        assert [len((slices / f).read_text().splitlines()) for f in ("measured-1_c1.log", "measured-1_c2.log")] == [6, 9]
+        assert [r["label"] for r in json.loads(out.read_text())] == ["measured-1/c1", "measured-1/c2"]
+        rows = [x for x in proc.stdout.splitlines() if x.startswith("| measured-1")]
+        assert [x.split(" | ")[0] for x in rows] == ["| measured-1/c1", "| measured-1/c2"]
+        assert [x.split(" | ")[2] for x in rows] == ["1", "2"]  # requests per rank: each row its own window
+        # a phase that does not repeat keeps its name next to repeated ones; a same-concurrency repeat is refused
+        res = json.loads(bj.read_text())["results"]
+        bj.write_text(json.dumps({"results": [dict(res[0], phase="warmup-1")] + res}))
+        assert [w[0] for w in e2e.phase_windows(str(bj), per_concurrency=True)] == ["warmup-1", "measured-1/c1", "measured-1/c2"]
+        bj.write_text(json.dumps({"results": [res[0], res[0]]}))
+        try:
+            e2e.phase_windows(str(bj), per_concurrency=True)
+        except SystemExit as exc:
+            assert "measured-1/c1" in str(exc)
+        else:
+            raise AssertionError("two windows of one phase and concurrency must be refused")
 
 
 def test_markdown_without_request_prompt_length() -> None:

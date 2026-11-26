@@ -33,7 +33,8 @@ consecutive Decode lines at the rank's full batch with no prefill between them (
 of decode rounds; --decode-log-interval converts it to a per-round time).
 
 With --benchmark-json (amd-tracking run_evalscope_matrix.py output) the whole server log is
-cut into one slice per phase first, from the phases' recorded start and finish times.
+cut into one slice per phase first, from the phases' recorded start and finish times; a phase
+the matrix repeats across concurrencies is named PHASE/cB (slice PHASE_cB.log), one per window.
 
 --predict models a closed-loop benchmark of R requests of L prompt and O output tokens at
 concurrency C (R/C waves) from the fixed-batch measurements, and swaps measured terms between
@@ -237,16 +238,27 @@ def evalscope(d):
     return None
 
 
-def phase_windows(benchmark_json):
+def phase_windows(benchmark_json, per_concurrency=False):
     """(phase, output_dir, start, end) epoch windows of an amd-tracking EvalScope matrix run, from
-    each result's started_at/finished_at."""
+    each result's started_at/finished_at. A matrix repeats a phase name across concurrencies
+    (measured-1 at c1, c2, ...); with per_concurrency, a phase name that repeats becomes PHASE/cB
+    (as batch_log.py prefill names it) so each window keeps its own slice, and a phase that does not
+    repeat keeps its name."""
     bj = json.load(open(benchmark_json))
     missing = [r.get("phase") for r in bj["results"] if "started_at" not in r or "finished_at" not in r]
     if missing:
         raise SystemExit(f"{benchmark_json}: phases {missing} have no started_at/finished_at "
                          "(recorded by amd-tracking's run_evalscope_matrix.py)")
-    return [(r["phase"], r["output_dir"], parse_iso(r["started_at"]), parse_iso(r["finished_at"]))
-            for r in bj["results"]]
+    names = [r["phase"] for r in bj["results"]]
+    if per_concurrency:
+        count = collections.Counter(names)
+        names = [f'{r["phase"]}/c{int(r["concurrency"])}' if count[r["phase"]] > 1 and "concurrency" in r
+                 else r["phase"] for r in bj["results"]]
+        dup = sorted(n for n, k in collections.Counter(names).items() if k > 1)
+        if dup:
+            raise SystemExit(f"{benchmark_json}: windows {dup} repeat with the same phase and concurrency")
+    return [(n, r["output_dir"], parse_iso(r["started_at"]), parse_iso(r["finished_at"]))
+            for n, r in zip(names, bj["results"])]
 
 
 def parse_iso(text):
@@ -257,7 +269,8 @@ def parse_iso(text):
 
 
 def write_slices(logs, windows, out_dir):
-    """Write the lines of the server logs that fall in each window to out_dir/PHASE.log."""
+    """Write the lines of the server logs that fall in each window to out_dir/PHASE.log (PHASE/cB to
+    PHASE_cB.log)."""
     os.makedirs(out_dir, exist_ok=True)
     lines = []
     for log in logs:
@@ -268,7 +281,7 @@ def write_slices(logs, windows, out_dir):
     lines.sort(key=lambda x: x[0])
     paths = []
     for phase, _, a, b in windows:
-        path = os.path.join(out_dir, f"{phase}.log")
+        path = os.path.join(out_dir, phase.replace("/", "_") + ".log")
         with open(path, "w") as fh:
             fh.writelines(text for t, text in lines if a <= t and (b is None or t < b))
         paths.append(path)
@@ -468,7 +481,7 @@ def main():
     if a.benchmark_json:
         if not a.server_log or not a.slices_dir:
             ap.error("--benchmark-json needs --server-log and --slices-dir")
-        windows = phase_windows(a.benchmark_json)
+        windows = phase_windows(a.benchmark_json, per_concurrency=True)
         a.log = write_slices(a.server_log, windows, a.slices_dir)
         a.label = [w[0] for w in windows]
         a.evalscope = [w[1] for w in windows]
