@@ -91,8 +91,9 @@ def key_of(row: dict, key: list[str]) -> tuple:
     return tuple(out)
 
 
-def parse_products(specs: list[str]) -> list[tuple[str, str, str]]:
-    """Parse --product NAME=A*B into (NAME, A, B)."""
+def parse_products(specs: list[str], taken=()) -> list[tuple[str, str, str]]:
+    """Parse --product NAME=A*B into (NAME, A, B); a NAME in taken (the --key and --metric names) or
+    given twice is refused."""
     out = []
     for spec in specs:
         name, sep, expr = spec.partition("=")
@@ -100,6 +101,11 @@ def parse_products(specs: list[str]) -> list[tuple[str, str, str]]:
         if not sep or not star or not name or not a or not b:
             raise ValueError(f"--product {spec!r}: expected NAME=A*B")
         out.append((name, a, b))
+    taken = set(taken)
+    for name, a, b in out:
+        if name in taken:
+            raise ValueError(f"--product {name}={a}*{b}: {name!r} is already a --key, --metric or --product name")
+        taken.add(name)
     return out
 
 
@@ -372,14 +378,9 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(str(exc))
     if a.cmd == "summarize":
         try:
-            products = parse_products(a.product)
+            products = parse_products(a.product, set(key) | set(a.metric))
         except ValueError as exc:
             ap.error(str(exc))
-        taken = set(key) | set(a.metric)
-        for name, x, y in products:
-            if name in taken:
-                ap.error(f"--product {name}={x}*{y}: {name!r} is already a --key, --metric or --product name")
-            taken.add(name)
         rows = [r for p in a.inputs for r in read_rows(p, a.rows_field) if keep(r, where)]
         try:
             rows = add_products(rows, products)

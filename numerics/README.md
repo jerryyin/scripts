@@ -37,8 +37,8 @@ several configurations and the question is which is faster.
   `--where NAME~REGEX` filters); `--product NAME=A*B` (repeatable) adds a derived metric `NAME`,
   the per-row product of fields `A` and `B` (for example TPOT x Avg Decoded Tok/Iter = time per
   decode step), summarized after the `--metric` columns, not counted in a row where a factor is
-  missing or not a number, and refused when `NAME` is already a key, metric or input field.
-  `compare` joins such summary tables on their keys and, for each
+  missing or not a number, and refused when `NAME` is already a key, metric, other `--product` or
+  input field. `compare` joins such summary tables on their keys and, for each
   `--ratio A/B`, prints the ratio of medians, its conservative bounds `[A_min/B_max, A_max/B_min]`
   (`--bounds`) and `higher`/`lower` only when the two [min,max] ranges are disjoint, else
   `overlap`. `LABEL=a.csv+b.csv` (or `--pool` for one table) pools several rows of a key; otherwise a table with
