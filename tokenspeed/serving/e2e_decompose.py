@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Decompose one serving run (e.g. evalscope perf 128 x 50000/500 at c64) from a
-TokenSpeed server log slice into per-DP-rank prefill / decode / idle time.
+"""Decompose one serving run (e.g. an evalscope perf run of R requests of L/O tokens at concurrency C)
+from a TokenSpeed server log slice into per-DP-rank prefill / decode / idle time.
 
 Works for DP>1 logs (#dp-rank) and TP single-rank logs (no #dp-rank -> rank 0),
 reads avg_accept_len when present (speculative configs).
