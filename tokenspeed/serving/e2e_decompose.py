@@ -242,8 +242,8 @@ def phase_windows(benchmark_json, per_concurrency=False):
     """(phase, output_dir, start, end) epoch windows of an amd-tracking EvalScope matrix run, from
     each result's started_at/finished_at. A matrix repeats a phase name across concurrencies
     (measured-1 at c1, c2, ...); with per_concurrency, a phase name that repeats becomes PHASE/cB
-    (as batch_log.py prefill names it) so each window keeps its own slice, and a phase that does not
-    repeat keeps its name."""
+    so each window keeps its own slice, and a phase that does not repeat keeps its name (batch_log.py
+    prefill, which reads the default, suffixes every phase once any repeats)."""
     bj = json.load(open(benchmark_json))
     missing = [r.get("phase") for r in bj["results"] if "started_at" not in r or "finished_at" not in r]
     if missing:

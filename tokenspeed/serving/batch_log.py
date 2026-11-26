@@ -23,7 +23,8 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
            read from the server log. Windows come from an amd-tracking run_evalscope_matrix.py
            benchmark.json (each result's started_at/finished_at; L = prompt_tokens, B = concurrency;
-           points are named PHASE/cB when the matrix repeats a phase name across concurrencies)
+           once any phase name repeats, as the matrix repeats them across concurrencies, every point
+           is named PHASE/cB, a phase that does not repeat included)
            or from --window. Per point and attention-DP rank: Prefill/Mix chunks, prefill tokens,
            requests (tokens / L), chunk time (median of same-rank Prefill->Prefill line gaps, i.e.
            round-dispatch to next round-dispatch), p10/p90, by chunk size, prefill span and tok/s.
@@ -361,7 +362,8 @@ def prefill_main(argv):
         from e2e_decompose import phase_windows
         bj = json.load(open(a.benchmark_json))
         # one point per result; the matrix reuses phase names across concurrencies (measured-1 at c1, c2, ...),
-        # so names get "/c<concurrency>" when a phase name repeats
+        # so once any phase name repeats every name gets "/c<concurrency>" (e2e_decompose.py suffixes only the
+        # repeated names; unifying the two would change one tool's output for a mix of repeated and single phases)
         names = [r["phase"] for r in bj["results"]]
         dup = len(set(names)) < len(names)
         specs = [(f'{ph}/c{int(r["concurrency"])}' if dup else ph, s, e, int(bj["prompt_tokens"]), int(r["concurrency"]))
