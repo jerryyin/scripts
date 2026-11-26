@@ -11,7 +11,9 @@ timeout. On a pick, logs which host PIDs still hold memory there (from KFD, so i
 container). Never signals any process.
 
 --idle-by process: free = no process in `amd-smi process` (useless on the MI350X host, which lists
-every process on every GPU). A --host-lock held by another process makes every GPU busy. --hip
+every process on every GPU). A --host-lock held by another process makes every GPU busy; per-GPU
+`gpu-lease` locks (gpu-<N>.lock beside amd-tracking's gpu-lease) are not read, so on a host that has
+them, wait for GPUs with `gpu-lease run` instead. --hip
 prints HIP ids, which differ from amd-smi indices (MI350X host: HIP 0 is amd-smi 3). --snapshot
 prints amd-smi's process list as JSON.
 """
