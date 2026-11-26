@@ -116,6 +116,7 @@ def test_markdown_without_request_prompt_length() -> None:
         row = e2e.markdown([r], log_interval=10).splitlines()[2]
         assert row.startswith("| p1 | 1.40 | - | 0.40 = 4 x 100.0 "), row
 
+
 def test_predict_terms_and_whatifs() -> None:
     e2e = load("e2e_decompose.py")
     rank = lambda p, d, i, gap: {"prefill_time_s": p, "decode_time_s": d, "idle_s": i,

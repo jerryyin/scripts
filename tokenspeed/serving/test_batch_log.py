@@ -108,8 +108,8 @@ def test_prefill_cli_with_matrix_benchmark_json() -> None:
 
 
 def test_prefill_validity_from_prefill_lines_without_requeststats() -> None:
-    """Ported from r0002-f2's prefill-steps test: a server without RequestStats lines (TokenSpeed e8fd096e)
-    is checked from the Prefill lines' #cached-token; batching = steps, present_max and the step sequence."""
+    """A server without RequestStats lines (TokenSpeed e8fd096e) is checked from the Prefill lines'
+    #cached-token; batching = steps, present_max and the step sequence."""
     import json
     lines = [batch(T + 1.0, "Prefill", 0, new_seq=2, new_token=8192, running_req=2, queue_req=6),
              batch(T + 1.5, "Prefill", 0, new_seq=2, new_token=7808, cached_token=0, running_req=2, queue_req=4),
