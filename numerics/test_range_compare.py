@@ -258,6 +258,52 @@ def test_without_consensus_output_is_byte_identical_to_40f9d01() -> None:
     assert "consensus" not in run_consensus(fmt="json") and run_consensus().count("|") == 7 * 6
 
 
+def run_summarize(args: list[str]) -> str:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert rc.main(["summarize", *args]) == 0
+    return buf.getvalue()
+
+
+def test_summarize_product_metric() -> None:
+    path = write("b.json", json.dumps({"results": [
+        {"c": 1, "phase": "measured-1", "summary": {"tpot": 3.0, "acc": 5.0}},
+        {"c": 1, "phase": "measured-2", "summary": {"tpot": 2.0, "acc": 4.0}},
+        {"c": 1, "phase": "measured-3", "summary": {"tpot": 4.0}},
+        {"c": 1, "phase": "measured-4", "summary": {"tpot": 4.0, "acc": "n/a"}},
+    ]}))
+    args = [str(path), "--rows-field", "results", "--key", "c", "--metric", "summary.tpot"]
+    (row,) = json.loads(run_summarize(args + ["--product", "step=summary.tpot*summary.acc", "--format", "json"]))
+    # missing and non-numeric factors give no product and are not counted
+    assert row["step_n"] == 2 and row["step_median"] == 11.5
+    assert row["step_min"] == 8.0 and row["step_max"] == 15.0
+    assert row["summary.tpot_n"] == 4
+    head, line = run_summarize(args + ["--product", "step=summary.tpot*summary.acc"]).splitlines()
+    assert head.split(",")[-4:] == ["step_n", "step_median", "step_min", "step_max"] and line.endswith(",2,11.5,8.0,15.0")
+    # without --product the output is that of the tool before the option
+    assert run_summarize(args) == "c,summary.tpot_n,summary.tpot_median,summary.tpot_min,summary.tpot_max\r\n1,4,3.5,2.0,4.0\r\n"
+    for bad in (["bad"], ["x=a"], ["=a*b"], ["x=a*"]):
+        try:
+            rc.parse_products(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"bad --product {bad} accepted")
+    for name in ("summary.tpot", "c", "phase"):  # a --metric, a --key, an input field
+        try:
+            run_summarize(args + ["--product", f"{name}=summary.tpot*summary.acc"])
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"--product name {name!r} collision accepted")
+    try:
+        run_summarize(args + ["--product", "s=summary.tpot*summary.acc", "--product", "s=summary.acc*summary.acc"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a --product name given twice must be refused")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
