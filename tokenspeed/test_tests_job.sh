@@ -183,4 +183,10 @@ rc=0; "$here/tests-job.sh" --torchrun 2 "$t/m" "$t/ts" test/nosuch.py 2>/dev/nul
 [ "$rc" -eq 2 ] && [ ! -e "$t/m" ] || fail "missing file under --torchrun exit $rc, expected 2"
 "$here/tests-job.sh" "$t/m2" "$t/ts" ../test/runtime/test_rt.py "$t/ts/tokenspeed-kernel/test/test_one.py" 'test/test_one.py::test_x' >/dev/null
 [ "$(wc -l < "$t/m2/results.txt")" -eq 3 ] || fail "existing files: $(cat "$t/m2/results.txt")"
+# pytest's -r characters: skip reasons by default, TESTS_JOB_REPORT_CHARS to keep passing tests' output
+grep -q -- ' -rs test/test_one.py$' "$t/a2/test_one.log" || fail "default -rs: $(cat "$t/a2/test_one.log")"
+TESTS_JOB_REPORT_CHARS=A "$here/tests-job.sh" "$t/rA" "$t/ts" test/test_one.py >/dev/null
+grep -q -- ' -rA test/test_one.py$' "$t/rA/test_one.log" || fail "TESTS_JOB_REPORT_CHARS=A: $(cat "$t/rA/test_one.log")"
+rc=0; TESTS_JOB_REPORT_CHARS='s -x' "$here/tests-job.sh" "$t/rX" "$t/ts" test/test_one.py >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$t/rX" ] || fail "a bad TESTS_JOB_REPORT_CHARS was not refused (exit $rc)"
 echo "test_tests_job.sh: all passed"

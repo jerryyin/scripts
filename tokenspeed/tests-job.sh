@@ -35,6 +35,9 @@
 # `imports: failed rc=N: <last output>`) as the file's log's first line and at the end of its results.txt line
 # after " | ", recording which TokenSpeed tree the tests imported (pytest's capture hides PYTHONVERBOSE).
 # --select EXPR: run (or collect) only the tests pytest's `-k EXPR` selects, in every mode.
+# pytest runs with `-r$TESTS_JOB_REPORT_CHARS` (default `s`: skip reasons). It comes after PYTEST_ADDOPTS, so
+# PYTEST_ADDOPTS=-rA is overridden; set TESTS_JOB_REPORT_CHARS=A to keep the output of passing tests (a
+# discriminator test that prints its numbers).
 # A SIGTERM or SIGINT (the lease stopping the job) is passed to the running pytest; its results.txt line
 # then ends with "stopped by SIG<name>" and the log's last line, and the script exits 143 (TERM) or 130.
 # Otherwise it exits 1 when any file's pytest (or collection) exited non-zero, else 0 (2 on a usage error).
@@ -62,6 +65,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -ge 3 ] || { echo "$usage" >&2; exit 2; }
+report=${TESTS_JOB_REPORT_CHARS:-s}
+[[ "$report" =~ ^[A-Za-z]+$ ]] || { echo "tests-job.sh: TESTS_JOB_REPORT_CHARS='$report' is not a set of pytest -r characters" >&2; exit 2; }
 # the first 1 (or N) of the leased GPUs; an unset HIP_VISIBLE_DEVICES is the default all-eight lease
 need=$(( np > 0 ? np : 1 )); leased_list=${HIP_VISIBLE_DEVICES-0,1,2,3,4,5,6,7}
 IFS=, read -r -a leased <<<"$leased_list"
@@ -126,7 +131,7 @@ for f in "$@"; do
     echo "rendezvous: c10d 127.0.0.1:$port local_addr=127.0.0.1 timeout=${rdzv_t}s" >> "$log"
   fi
   if [ -n "$stopped" ]; then true & else  # stopped during the import: run no pytest
-    timeout "$limit" "${argv[@]}" -q -p no:cacheprovider -rs "${sel[@]}" "$f" >> "$log" 2>&1 <&0 &
+    timeout "$limit" "${argv[@]}" -q -p no:cacheprovider "-r$report" "${sel[@]}" "$f" >> "$log" 2>&1 <&0 &
   fi
   child=$!
   refresher=""
