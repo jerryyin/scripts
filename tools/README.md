@@ -7,7 +7,7 @@ Each utility here serves one dedicated use case and works independently when cop
 | `windows_wsl.py` | Execute a noninteractive script on Windows or WSL without nested quoting | Calling-host Python 3.10+; destination Bash or PowerShell 7; WSL interop for cross-OS calls |
 | `github_attachments.py` | Download attachment links from one GitHub issue into a directory | Python, `requests`, `beautifulsoup4`; network access to the issue and files |
 | `gdb_print_lanes.py` | Print one variable across selected GPU lanes | GDB Python with a `lane` command and an active debugging session |
-| `ckpt_index_check.py` | Check a safetensors checkpoint for completeness against its `model.safetensors.index.json` and split its bytes by tensor kind, from `stat` and shard headers only | Python 3.8+ standard library; read access to the checkpoint directory |
+| `ckpt_index_check.py` | Check a safetensors checkpoint for completeness against its `model.safetensors.index.json` and split its bytes by tensor kind, from `stat` and shard headers only; optionally check its identity against a Hugging Face Hub repo revision without downloading it | Python 3.8+ standard library; read access to the checkpoint directory; for `--hub-repo`, HTTPS access to the Hub (and `HF_TOKEN` for a gated repo) |
 | `py_ast_equal.py` | Prove a Python file's code unchanged between two versions (comments, formatting and optionally docstrings ignored), listing the definitions that differ | Python 3.8+ standard library; `git` on PATH for `--git` |
 
 ## GitHub issue attachments
@@ -34,6 +34,14 @@ Load the script in the debugger, then pass a variable expression and an inclusiv
 
 ```bash
 python3 tools/ckpt_index_check.py --split-bytes /models/SOME-CHECKPOINT
+```
+
+`--hub-repo REPO [--hub-revision REV]` also compares the checkpoint with that Hub revision, without downloading it. It lists the revision with the Hub API (`?blobs=true`, which resolves REV to a commit) and, for every file on both sides, compares the size and the content identity the Hub records: the LFS sha256 for LFS files, the git blob SHA-1 of the bytes for the rest. The local side is hashed; `*.safetensors` only with `--hash-shards` (reads every shard; `--jobs N` in parallel, default 6). Each common shard's safetensors header is fetched with two HTTP Range requests and compared with the local one, and for each `--sample-shard NAME` (repeatable) `--sample N` tensors (default 10: the smallest `min(4, N)`, then a `--seed S` random choice of the rest; at most the first 64 MiB of each) are byte-compared over HTTP Range. A file in a Hugging Face cache snapshot also reports the blob it links to, the identity the download recorded (a stat-only claim, not a hash of the bytes). A server that answers a Range request with anything but 206 and the exact length is an error, so a multi-GB shard is never read whole. `HF_TOKEN` is sent when set; without it a gated, private or missing repo is reported as an `error`, not a crash. `--hub-endpoint` (default `HF_ENDPOINT` or `https://huggingface.co`) points it at a mirror. The facts go under `hub` in the `--json` object (`files`, `headers_equal`, `tensor_samples`, `only_hub`, `only_local`, `summary`, `all_checked_equal`); the text output prints one summary line plus the differing files and the samples. With `--hub-repo`, exit status 1 also when a checked fact differs or a file is on one side only.
+
+```bash
+python3 tools/ckpt_index_check.py --json --hub-repo deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --hub-revision 1bae0e1088993b9b82de08f59de5be5a34e42170 \
+  --sample 2 --sample-shard model-00048-of-00048.safetensors /models/DeepSeek-V4.1-Flash-1017
 ```
 
 ## Python AST equivalence
