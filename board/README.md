@@ -8,6 +8,10 @@ touching it?", or "is this board tuned?", it belongs here.
 board/
 ├── README.md              # this file
 ├── gpu-lock               # run a command under an exclusive flock on the shared lock file
+├── leased-job.sh          # run one GPU job under gpu-lease (and a lock), recording the wait
+├── gpu-job.sh             # its inner step: core dumps off, disk floor, snapshots before and after
+├── test_leased_job.sh     # their tests (no GPU needed)
+├── test_gpu_job.sh
 ├── gpu-contention.sh      # who else holds /dev/kfd right now, from the HOST namespaces
 ├── gpu-wait.py            # wait until N GPUs are idle; or snapshot who is on them
 ├── test_gpu_wait.py       # its tests (no GPU needed)
@@ -88,6 +92,20 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   and use `gpu-lock` only inside it, where it still keeps your own other containers waiting. Do not
   pass the per-GPU files to a tool that takes them itself inside a lease; a nested attempt
   contends with your own holder.
+- `leased-job.sh <record-dir> <command...>` — runs one GPU job the way the `gpu-lock` entry above
+  says to on a `gpu-lease` host: `gpu-lease run --gpus $HIP_VISIBLE_DEVICES --name
+  $GPU_LEASE_PREFIX<name> --wait $GPU_LEASE_WAIT -- [$GPU_LEASE_LOCK] gpu-job.sh <record-dir>
+  <command...>`, and records into `<record-dir>` when the lease was requested, granted and released,
+  the lease's job directory and its exit status (the command's, 75 not admitted, 124 stopped as
+  idle). The name prefix, the wait and the inner lock are the caller's policy: a project keeps a thin
+  wrapper that sets them (one user's lock only for a job on every GPU, a longer wait). `gpu-job.sh`
+  is the step it runs inside the lease: core dumps off (CPU and GPU), a free-disk floor, `amd-smi`,
+  `rocm-smi`, `df` and `gpu-lease status` snapshots before and after (the lease status is the only
+  one that names other users' GPU processes from inside a container), and a SIGTERM from the lease
+  passed to the command with the after-step still recorded. Variables, defaults and recorded files
+  are in their headers. Both are one `main` function run by their last line, so a checkout that
+  rewrites one while a job runs does not change that job. Tests: `test_leased_job.sh`,
+  `test_gpu_job.sh`.
 - `gpu-contention.sh` — reports how many processes hold `/dev/kfd`, split into *ours* and
   *foreign*. `--selftest` drives every branch against synthetic `/proc` fixtures and needs
   no GPU, no docker and no privileges.
