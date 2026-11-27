@@ -8,6 +8,7 @@ Each utility here serves one dedicated use case and works independently when cop
 | `github_attachments.py` | Download attachment links from one GitHub issue into a directory | Python, `requests`, `beautifulsoup4`; network access to the issue and files |
 | `gdb_print_lanes.py` | Print one variable across selected GPU lanes | GDB Python with a `lane` command and an active debugging session |
 | `ckpt_index_check.py` | Check a safetensors checkpoint for completeness against its `model.safetensors.index.json` and split its bytes by tensor kind, from `stat` and shard headers only | Python 3.8+ standard library; read access to the checkpoint directory |
+| `py_ast_equal.py` | Prove a Python file's code unchanged between two versions (comments, formatting and optionally docstrings ignored), listing the definitions that differ | Python 3.8+ standard library; `git` on PATH for `--git` |
 
 ## GitHub issue attachments
 
@@ -33,6 +34,14 @@ Load the script in the debugger, then pass a variable expression and an inclusiv
 
 ```bash
 python3 tools/ckpt_index_check.py --split-bytes /models/SOME-CHECKPOINT
+```
+
+## Python AST equivalence
+
+`py_ast_equal.py [--ignore-docstrings] OLD.py NEW.py` or `py_ast_equal.py [--ignore-docstrings] --git REPO REV_A REV_B PATH...` parses both versions of each file with `ast` (which drops comments and formatting) and compares them; `--ignore-docstrings` also drops the module's and every class's and function's docstring. Use it to prove a comment-, docstring- or move-only edit leaves what a module executes unchanged. With `--git`, each repository-relative PATH is read at both revisions with `git show`. It prints `equal PATH` or `differs PATH` per file, and under a differing file each definition whose own statements differ, by qualified name (`Class.method`, `outer.inner`, `<module>` for statements outside any definition; a repeated name gets `#2`), as `changed`, `added` or `removed`. A change inside a nested definition is listed under that definition only. Exit status 0 when every file is equal, 1 when any differs, 2 on a usage, read or syntax error.
+
+```bash
+python3 tools/py_ast_equal.py --ignore-docstrings --git /path/to/repo BASE_COMMIT HEAD_COMMIT path/to/module.py
 ```
 
 ## Windows / WSL execution
