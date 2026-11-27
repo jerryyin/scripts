@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import io
 from pathlib import Path
 import runpy
@@ -8,12 +9,16 @@ import tempfile
 import unittest
 from unittest import mock
 
-import requests
+MISSING = [name for name in ("requests", "bs4") if importlib.util.find_spec(name) is None]
+if not MISSING:
+    import requests
 
 
 TOOL = Path(__file__).resolve().parents[1] / "github_attachments.py"
 
 
+@unittest.skipUnless(not MISSING, f"github_attachments.py imports {' and '.join(MISSING)}, "
+                     "which this Python cannot import (pip install requests beautifulsoup4)")
 class AttachmentTests(unittest.TestCase):
     def test_standalone_cli_accepts_an_issue_in_any_repository(self):
         for issue in ("https://github.com/iree-org/iree/issues/123", "https://github.com/example/another/issues/456"):
