@@ -35,6 +35,21 @@ def test_summarize_groups_and_nested_fields() -> None:
     assert out[1]["s.x_median"] == 5.0 and out[1]["s.x_n"] == 1
 
 
+def test_dotted_keys_resolve() -> None:
+    row = {"c": 1, "summary": {"Spec. Accept Rate": 0.75, "rps": 2.0, "a": {"b": 1.0}, "a.b": 9.0,
+                               "Spec. Accept Length": {"p50": 3.5}}}
+    assert rc.field(row, "summary.Spec. Accept Rate") == 0.75
+    assert rc.field(row, "summary.Spec. Accept Length.p50") == 3.5
+    assert rc.field(row, "summary.rps") == 2.0
+    assert rc.field(row, "summary.a.b") == 1.0  # a path that resolved by splitting at every dot is unchanged
+    assert rc.field(row, "summary.Spec. Accept") is None and rc.field(row, "summary.Spec") is None
+    j = write("r.json", json.dumps({"results": [
+        {"c": 1, "summary": {"Spec. Accept Rate": r, "rps": 1.0}} for r in (0.7, 0.8, 0.75)]}))
+    out = run_summarize([str(j), "--rows-field", "results", "--key", "c", "--metric", "summary.Spec. Accept Rate"])
+    assert out == ("c,summary.Spec. Accept Rate_n,summary.Spec. Accept Rate_median,summary.Spec. Accept Rate_min,"
+                   "summary.Spec. Accept Rate_max\r\n1,3,0.75,0.7,0.8\r\n")
+
+
 def test_compare_csv_tables_with_scale_and_single_values() -> None:
     a = write("a.csv", "L,B,tok_median,tok_min,tok_max\n8192,1,100,99,101\n8192,4,400,390,410\n")
     b = write("b.json", json.dumps({"summary": [{"L": 8192, "B": 1, "tok": 50}]}))

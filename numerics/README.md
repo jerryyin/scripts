@@ -33,7 +33,9 @@ several configurations and the question is which is faster.
 ## Files
 
 - `range_compare.py` — standard library only. `summarize` groups rows of CSV or JSON tables by
-  key columns and writes `<metric>_median/_min/_max/_n` (dotted names reach into nested JSON,
+  key columns and writes `<metric>_median/_min/_max/_n` (dotted names reach into nested JSON; a key
+  holding dots, such as EvalScope's `Spec. Accept Rate` in `summary.Spec. Accept Rate`, is matched
+  when splitting at every dot finds nothing;
   `--where NAME~REGEX` filters); `--product NAME=A*B` (repeatable) adds a derived metric `NAME`,
   the per-row product of fields `A` and `B` (for example TPOT x Avg Decoded Tok/Iter = time per
   decode step), summarized after the `--metric` columns, not counted in a row where a factor is

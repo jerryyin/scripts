@@ -62,14 +62,33 @@ def read_rows(path: str | Path, rows_field: str | None = None) -> list[dict]:
 
 
 def field(row: dict, name: str):
+    """Field `name` of `row`: a key of the row, or a dotted path into nested objects.
+
+    A path is split at every dot first (`summary.rps`); when that does not resolve, a key that itself
+    holds dots is tried, the longest key the remaining path starts with at each level first, so
+    `summary.Spec. Accept Rate` reaches EvalScope's `Spec. Accept Rate` inside `summary`.
+    """
     if name in row:
         return row[name]
     value = row
     for part in name.split("."):
         if not isinstance(value, dict) or part not in value:
-            return None
+            return dotted_key_field(row, name)
         value = value[part]
     return value
+
+
+def dotted_key_field(value, path: str):
+    """`path` under `value`, matching keys that contain dots (longest first); None when absent."""
+    if not isinstance(value, dict):
+        return None
+    if path in value:
+        return value[path]
+    for key in sorted((k for k in value if isinstance(k, str) and path.startswith(k + ".")), key=len, reverse=True):
+        found = dotted_key_field(value[key], path[len(key) + 1:])
+        if found is not None:
+            return found
+    return None
 
 
 def number(value) -> float | None:
