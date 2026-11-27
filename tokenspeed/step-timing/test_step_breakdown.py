@@ -87,6 +87,25 @@ def test_share_on_self_test_dumps() -> None:
         assert len(csv_path.read_text().splitlines()) == 1 + 2 * len(rows)
 
 
+def test_table_graph_span_vs_serving_step() -> None:
+    """The table carries the analyzer's replay-span split; an older summary.csv without it gives no rows."""
+    import analyze_step_timing as ast
+    with tempfile.TemporaryDirectory() as d:
+        dump, out = Path(d) / "dump", Path(d) / "analysis"
+        ast.synth(str(dump))
+        ast.analyze(str(dump), str(out), skip=20)
+        t = sb.table(str(out), str(dump), "synth")
+        assert abs(t["outside_graph_ms"]["2"] - ast.SYNTH_OUTSIDE_MS) < 0.02 * ast.SYNTH_OUTSIDE_MS
+        assert abs(t["gpu_step_ms"]["2"] - t["graph"]["2"] - ast.SYNTH_OUTSIDE_MS) < 0.05 * ast.SYNTH_OUTSIDE_MS
+        assert "GPU outside the graph" in sb.table_markdown(t)
+        old = Path(d) / "old"
+        old.mkdir()
+        analysis, old_dump = fixture(old)
+        t = sb.table(str(analysis), str(old_dump), "old")
+        assert t["outside_graph_ms"] == {"0": None, "1": None}
+        assert "GPU outside the graph" not in sb.table_markdown(t)
+
+
 def test_draft_markers_counted_apart() -> None:
     assert sb.marker_name("0:moe.experts") == "moe.experts"
     assert sb.marker_name("1000:moe.experts") == "draft:moe.experts"

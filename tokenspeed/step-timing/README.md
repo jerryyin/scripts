@@ -10,7 +10,8 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | --- | --- |
 | `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`); the one against `0dd8d477` was this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682`, a commit no longer in this repository's history |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
-| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
+| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
+| `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting only completed records |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
 
@@ -34,6 +35,32 @@ git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email
 Run it from this directory (`$PWD/instrumentation.diff`). The `tokenspeed-kernel/python` tree of the clone
 holds no build products; the compiled scheduler, engine and kernel extensions still come from the
 installed TokenSpeed, which must be the same commit (`1be88db0`), so the patched Python matches them.
+
+### Graph-replay span against the serving step (host gap)
+
+From the 1be88db0 version on, each sampled decode-graph replay records, besides its markers:
+
+| field | what |
+| --- | --- |
+| `graph_ms` | GPU time of the replay: event before `graph.replay()` (DSpark: `drafter.replay_decode_graph`) to event after it, so it holds the target verify and, with DSpark, the draft round in the same graph |
+| `next_begin_ms`, `next_kind` | GPU time from this replay's start to the start of the next forward, and that forward's kind: `replay` (the next decode-graph replay), `eager` (a timed eager decode) or `other` (a prefill/mixed forward or another graph) |
+| `outside_graph_ms` | `next_begin_ms - graph_ms`: GPU time between the end of this replay and the start of the next forward, i.e. kernels launched outside the graph (input preparation, adaptive DSpark verify-budget graphs, sampling or output copies outside the graph) plus GPU idle while the host prepares the next step |
+| `host_step_ms`, `launch_ms` | host wall time between this replay call and the next forward's, and the host time of the replay call itself |
+
+Records are written only once their events have completed (`event.query()`), so harvesting never
+synchronizes the host with the GPU and does not remove the scheduler's run-ahead (the e8fd096e version
+synchronized on the previous sampled replay, which held the host once every `EVERY` replays). The
+analyzer's report gives, per rank, the median [p10, p90] of the GPU step, graph span, outside-graph time,
+host step and replay call over the steps whose next forward was a decode replay (`next_kind` `replay`),
+and `summary.csv` their medians (`gpu_step_ms`, `outside_graph_ms`, `host_step_ms`, `launch_ms`,
+`split_n`); `step_breakdown.py table` prints them as rows. Reading: `graph_ms` close to the serving step
+(Decode-line gap / rounds per line, `../serving/e2e_decompose.py --step-table`) with a small
+`outside_graph_ms` means the step is GPU time inside the graph (the component table says where);
+a large `outside_graph_ms` with `host_step_ms` close to `next_begin_ms` means the GPU waits for the host
+between replays. The markers' own cost inflates `graph_ms` (compare with an uninstrumented step,
+`overhead`), not `outside_graph_ms`. The older estimate stays in the report: `period_ms` (host wall time
+between sampled replays / replays between them, which also counts prefill forwards in between) and
+`host_gap_ms` = period - graph.
 
 Serve a layout recipe instrumented. The server flags come from amd-tracking's recipe
 (`$AT/apps/inference_engine_benchmark/recipes/<model>/`, e.g.

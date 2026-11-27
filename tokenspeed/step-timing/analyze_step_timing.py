@@ -10,6 +10,15 @@ Main-stream segments: marker k -> next main-stream marker, labelled by marker k.
 Aux-stream (overlapped) pairs: attn.kvidx.b->e (compressor/KV write/indexer) and
 shared.b->e (shared expert) are reported separately; they are hidden unless the
 main stream waits at the join (attn.q segment / moe.shared_join segment).
+Graph-replay span against the serving step (the host gap): every rank's report line gives the GPU graph
+span (graph_ms) and, from records of the 1be88db0 instrumentation on, the GPU step from this replay's
+start to the next forward's start (next_begin_ms; only steps whose next forward is a decode graph replay,
+next_kind "replay", enter the split), the GPU time outside the graph between them
+(outside_graph_ms = next_begin_ms - graph_ms: kernels launched outside the graph plus GPU idle), the host
+wall time between the two replay calls (host_step_ms) and the host time of the replay call (launch_ms);
+summary.csv holds their medians (gpu_step_ms, outside_graph_ms, host_step_ms, launch_ms; nan for older
+dumps). period_ms / host_gap_ms are the older estimate: host wall time between sampled replays divided by
+the replays between them, minus the graph span.
 Draft-model layers (DSpark stages) are dumped as layer id + DRAFT_LAYER_OFFSET (instrumentation.diff,
 step_timing.set_layer_offset); their segments get categories "draft:<category>" in bucket "draft".
 --stage-json takes the decode window of one amd-tracking retained-KV stage (stage.json:
@@ -181,6 +190,8 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             role = "busy" if rank in busy_ranks else "idle"
         C, B, A, L = (collections.defaultdict(list) for _ in range(4))
         graph, periods, harvest = [], [], []
+        split_keys = ("next_begin_ms", "outside_graph_ms", "host_step_ms", "launch_ms")
+        SP = {k: [] for k in split_keys}
         layers = set()
         for seq, s, period in recs:
             cats, buckets, aux, pl = step_components(seq, s["t"], s["graph_ms"])
@@ -190,14 +201,25 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             for (lay, c), v in pl.items(): L[(lay, c)].append(v); layers.add(lay)
             graph.append(s["graph_ms"]); harvest.append(s.get("harvest_ms", 0.0))
             if period is not None: periods.append(period)
+            for k in split_keys:
+                if s.get(k) is not None and (k == "launch_ms" or s.get("next_kind") == "replay"):
+                    SP[k].append(s[k])
         n_layers = len(layers)
         per_rank[rank] = dict(role=role, n=len(recs), C=C, B=B, A=A, graph=graph, periods=periods)
         gmed = statistics.median(graph)
         pmed = statistics.median(periods) if periods else float("nan")
         bsum = sum(statistics.median(v) for v in B.values())
+        spm = {k: (statistics.median(v) if v else float("nan")) for k, v in SP.items()}
+        def q(k):
+            v = SP[k]
+            return f"{spm[k]:.3f} [{pct(v,.1):.3f}, {pct(v,.9):.3f}]" if v else "n/a"
         report += [f"## rank {rank} ({role}; {len(recs)} sampled steps; instrumented layers={n_layers}"
                    + (f" of {expect_layers}" if expect_layers else "") + ")",
                    f"- GPU graph span median {gmed:.3f} ms; step period median {pmed:.3f} ms; host gap (period - graph) {pmed - gmed:.3f} ms; harvest cost median {statistics.median(harvest):.3f} ms",
+                   f"- graph-replay span vs serving step (median [p10, p90] over {len(SP['next_begin_ms'])} steps whose next "
+                   f"forward was a graph replay): GPU step (replay start to next replay start) {q('next_begin_ms')} ms; "
+                   f"graph span {gmed:.3f} ms; GPU outside the graph (non-graph kernels + idle) {q('outside_graph_ms')} ms; "
+                   f"host step (between replay calls) {q('host_step_ms')} ms; replay call on the host {q('launch_ms')} ms",
                    f"- sum of bucket medians {bsum:.3f} ms vs graph median {gmed:.3f} ms ({100*(bsum-gmed)/gmed:+.1f} %)", "",
                    "| bucket | median ms/step | p10 | p90 | % of graph |", "|---|---|---|---|---|"]
         for k, v in sorted(B.items(), key=lambda kv: -statistics.median(kv[1])):
@@ -221,7 +243,9 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
         main_markers = sum(1 for st in recs[0][0]["streams"] if st == "main")
         summary.append(dict(rank=rank, role=role, n=len(recs), graph_ms=gmed, period_ms=pmed, main_markers=main_markers,
                             host_gap_ms=pmed - gmed, bucket_sum_ms=bsum, layers=n_layers,
-                            harvest_ms=statistics.median(harvest)))
+                            harvest_ms=statistics.median(harvest), gpu_step_ms=spm["next_begin_ms"],
+                            outside_graph_ms=spm["outside_graph_ms"], host_step_ms=spm["host_step_ms"],
+                            launch_ms=spm["launch_ms"], split_n=len(SP["next_begin_ms"])))
     # busy vs idle comparison
     busy = [r for r, d in per_rank.items() if d["role"] == "busy"]
     idle = [r for r, d in per_rank.items() if d["role"] == "idle"]
@@ -235,7 +259,8 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
         report.append("")
     for name, data, cols in (("per_category.csv", rows, ["rank", "role", "category", "median_ms", "p10", "p90", "n"]),
                              ("per_bucket.csv", bucket_rows, ["rank", "role", "bucket", "median_ms", "p10", "p90", "n"]),
-                             ("summary.csv", summary, ["rank", "role", "n", "graph_ms", "period_ms", "host_gap_ms", "bucket_sum_ms", "layers", "harvest_ms", "main_markers"])):
+                             ("summary.csv", summary, ["rank", "role", "n", "graph_ms", "period_ms", "host_gap_ms", "bucket_sum_ms", "layers", "harvest_ms", "main_markers",
+                               "gpu_step_ms", "outside_graph_ms", "host_step_ms", "launch_ms", "split_n"])):
         with open(os.path.join(out, name), "w") as f:
             f.write(",".join(cols) + "\n")
             for r in data:
@@ -254,6 +279,9 @@ TRUTH = {  # per-layer main-stream segment durations (ms) for busy / idle ranks
 LAYER_ORDER = ["layer", "attn", "attn.fork", "attn.kvidx.b", "attn.kvidx.e", "attn.q", "attn.core", "attn.wo",
                "hc_ffn", "ffn", "moe.router", "moe.experts", "shared.b", "shared.e", "petit.s1", "petit.s2",
                "petit.comb", "petit.post", "moe.join", "ffn.end"]
+
+
+SYNTH_OUTSIDE_MS = 3.5  # GPU time outside the graph per step in the synthetic dumps
 
 
 def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21), draft_layers=1):
@@ -302,9 +330,15 @@ def synth(dirpath, nlayers=43, steps=200, engram_layers=(0, 21), draft_layers=1)
             graph_ms = x
             replay = 4 * (k + 1)
             wall += 4 * 15.3e-3
-            lines.append(json.dumps({"type": "step", "sid": 0, "replay": replay, "wall": wall, "bs": 1 if busy else 0,
-                                     "padded_bs": 1, "input_num_tokens": 1 if busy else 0,
-                                     "global_num_tokens": [0, 0, 1, 0], "t": t, "graph_ms": graph_ms, "harvest_ms": 1.0}))
+            rec = {"type": "step", "sid": 0, "replay": replay, "wall": wall, "bs": 1 if busy else 0,
+                   "padded_bs": 1, "input_num_tokens": 1 if busy else 0,
+                   "global_num_tokens": [0, 0, 1, 0], "t": t, "graph_ms": graph_ms, "harvest_ms": 1.0,
+                   "launch_ms": 0.2, "next_kind": "replay"}
+            if k % 10 == 9:  # the next forward was a prefill: left out of the split
+                rec["next_kind"] = "other"
+            gap = SYNTH_OUTSIDE_MS * (1 + rnd.uniform(-0.02, 0.02))
+            rec.update(next_begin_ms=graph_ms + gap, outside_graph_ms=gap, host_step_ms=graph_ms + gap + 0.01)
+            lines.append(json.dumps(rec))
         open(os.path.join(dirpath, f"step-timing-r{rank}-p{1000+rank}.jsonl"), "w").write("\n".join(lines) + "\n")
     return nlayers
 
@@ -338,6 +372,13 @@ def self_test(out):
     for s in summary:
         good = abs(s["bucket_sum_ms"] - s["graph_ms"]) <= 0.02 * s["graph_ms"] and s["role"] == ("busy" if s["rank"] == 2 else "idle")
         ok &= good
+        good2 = (abs(s["outside_graph_ms"] - SYNTH_OUTSIDE_MS) <= 0.02 * SYNTH_OUTSIDE_MS
+                 and abs(s["gpu_step_ms"] - s["graph_ms"] - SYNTH_OUTSIDE_MS) <= 0.05 * SYNTH_OUTSIDE_MS
+                 and abs(s["launch_ms"] - 0.2) < 1e-9
+                 and s["split_n"] == 162)  # 180 records after --skip 20, 18 of them before a non-replay forward
+        ok &= good2
+        lines.append(f"{'PASS' if good2 else 'FAIL'} rank{s['rank']} graph {s['graph_ms']:.3f} ms, GPU step {s['gpu_step_ms']:.3f} ms, "
+                     f"outside graph {s['outside_graph_ms']:.3f} ms (want {SYNTH_OUTSIDE_MS}), host step {s['host_step_ms']:.3f} ms")
         lines.append(f"{'PASS' if good else 'FAIL'} rank{s['rank']} role={s['role']} bucket_sum {s['bucket_sum_ms']:.3f} vs graph {s['graph_ms']:.3f}; period {s['period_ms']:.3f}")
     lines.append("SELF-TEST " + ("PASS" if ok else "FAIL"))
     open(os.path.join(out, "self-test.txt"), "w").write("\n".join(lines) + "\n")

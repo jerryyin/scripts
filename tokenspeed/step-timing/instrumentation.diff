@@ -1,5 +1,5 @@
 diff --git a/python/tokenspeed/runtime/execution/forward_step.py b/python/tokenspeed/runtime/execution/forward_step.py
-index 3e3ec57e7..4cfcd9cec 100644
+index 3e3ec57e7..13900f76d 100644
 --- a/python/tokenspeed/runtime/execution/forward_step.py
 +++ b/python/tokenspeed/runtime/execution/forward_step.py
 @@ -66,6 +66,7 @@ from tokenspeed.runtime.utils import (
@@ -44,7 +44,7 @@ index 3e3ec57e7..4cfcd9cec 100644
 +            _st_tok = (
 +                _st.eager_begin(ctx, bs)
 +                if _st.ENABLED and ctx.forward_mode.is_decode()
-+                else None
++                else _st.other_forward()
 +            )
              result = self._forward_func(bs=bs, ctx=ctx, sampling_info=sampling_info)
 +            _st.eager_end(_st_tok)
@@ -322,18 +322,29 @@ index ad2797c06..daf90cba6 100644
                  hidden_states.new_zeros(hidden_states.shape)
 diff --git a/python/tokenspeed/runtime/utils/step_timing.py b/python/tokenspeed/runtime/utils/step_timing.py
 new file mode 100644
-index 000000000..c3723209c
+index 000000000..bb2110e31
 --- /dev/null
 +++ b/python/tokenspeed/runtime/utils/step_timing.py
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,321 @@
 +"""TEST-ONLY decode-step component timing (campaign instrumentation, not upstream).
 +
 +Off unless TS_STEP_TIMING=1. Records torch.cuda.Event(enable_timing=True,
 +external=True) at component boundaries while a decode graph is captured, so the
 +graph contains event-record nodes (hipEventRecordWithFlags(..., External)).
-+After a sampled replay the next replay first reads all elapsed times relative
-+to an ordinary event recorded just before graph.replay() and appends one JSON
-+line per sampled step to $TS_STEP_TIMING_DIR/step-timing-r<rank>-p<pid>.jsonl.
++Each sampled replay's elapsed times are read relative to an ordinary event
++recorded just before graph.replay(), and one JSON line per sampled step is appended
++to $TS_STEP_TIMING_DIR/step-timing-r<rank>-p<pid>.jsonl.
++
++Graph-replay span against the serving step: the forward after a sampled replay
++records one more ordinary event first ("next begin") and its kind in next_kind
++("replay": a decode graph replay, "eager": a timed eager decode, "other": any other
++forward, e.g. a prefill chunk, or another graph), so a step record also holds next_begin_ms (GPU time from this replay's start to the next one's start:
++the serving step on the GPU timeline), outside_graph_ms = next_begin_ms - graph_ms
++(GPU time between this replay's end and the next replay's start: kernels launched
++outside the graph plus GPU idle, i.e. the host gap seen by the GPU), host_step_ms
++(host wall time between the two replay calls) and launch_ms (host time of the replay
++call itself). Records are harvested only once their events have completed
++(event.query()), so harvesting never blocks the host or removes its run-ahead.
 +
 +Env:
 +  TS_STEP_TIMING=1                 enable
@@ -384,7 +395,8 @@ index 000000000..c3723209c
 +    pool_hint = 1024
 +    replays = 0
 +    records = 0
-+    pending = None
++    pending: list = []  # sampled steps not yet harvested, oldest first
++    open_step = None    # the last sampled step, waiting for the next replay's begin event
 +    buf: list = []
 +    path = None
 +    next_sid = 0
@@ -496,37 +508,58 @@ index 000000000..c3723209c
 +    seq.written = True
 +
 +
-+def _harvest():
-+    p = _S.pending
-+    _S.pending = None
++def _close_open_step(now, kind):
++    """Record the next-begin event of the last sampled step (call before this forward's work)."""
++    p = _S.open_step
 +    if p is None:
 +        return
-+    seq, begin, end, meta = p
-+    h0 = time.perf_counter()
-+    end.synchronize()
-+    n = len(seq.names)
-+    t = [round(begin.elapsed_time(seq.pool[i]), 5) for i in range(n)]
-+    meta["graph_ms"] = round(begin.elapsed_time(end), 5)
-+    meta["t"] = t
-+    meta["harvest_ms"] = round((time.perf_counter() - h0) * 1e3, 4)
-+    _write(meta)
-+    _S.records += 1
++    _S.open_step = None
++    nb = torch.cuda.Event(enable_timing=True)
++    nb.record()
++    p[4]["next_begin"] = nb
++    p[3]["next_kind"] = kind
++    p[3]["host_step_ms"] = round((now - p[3]["wall"]) * 1e3, 4)
++
++
++def _harvest(block=False):
++    """Write every pending record whose events completed (all of them when block=True)."""
++    while _S.pending:
++        seq, begin, end, meta, extra = _S.pending[0]
++        last = extra.get("next_begin") or end
++        if not block and (_S.open_step is _S.pending[0] or not last.query()):
++            return
++        _S.pending.pop(0)
++        h0 = time.perf_counter()
++        last.synchronize()
++        n = len(seq.names)
++        t = [round(begin.elapsed_time(seq.pool[i]), 5) for i in range(n)]
++        meta["graph_ms"] = round(begin.elapsed_time(end), 5)
++        nb = extra.get("next_begin")
++        if nb is not None:
++            meta["next_begin_ms"] = round(begin.elapsed_time(nb), 5)
++            meta["outside_graph_ms"] = round(meta["next_begin_ms"] - meta["graph_ms"], 5)
++        meta["t"] = t
++        meta["harvest_ms"] = round((time.perf_counter() - h0) * 1e3, 4)
++        _write(meta)
++        _S.records += 1
 +
 +
 +def before_replay(graph, ctx=None, bs=None, padded_bs=None):
 +    """Call right before graph.replay(); returns a token for after_replay."""
 +    if not ENABLED:
 +        return None
++    now = time.time()
++    seq = _S.seqs.get(id(graph))
++    _close_open_step(now, "replay" if seq is not None else "other")
 +    _harvest()
 +    _S.replays += 1
-+    seq = _S.seqs.get(id(graph))
-+    if seq is None or _S.records >= _MAX or _S.replays % _EVERY:
++    if seq is None or _S.records + len(_S.pending) >= _MAX or _S.replays % _EVERY:
 +        return None
 +    begin = torch.cuda.Event(enable_timing=True)
 +    begin.record()
 +    gnt = getattr(ctx, "global_num_tokens", None) if ctx is not None else None
 +    meta = {"type": "step", "sid": seq.sid, "replay": _S.replays,
-+            "wall": time.time(), "bs": bs, "padded_bs": padded_bs,
++            "wall": now, "bs": bs, "padded_bs": padded_bs,
 +            "global_num_tokens": list(gnt) if gnt is not None else None,
 +            "input_num_tokens": getattr(ctx, "input_num_tokens", None)}
 +    return (seq, begin, meta)
@@ -538,13 +571,17 @@ index 000000000..c3723209c
 +    seq, begin, meta = token
 +    end = torch.cuda.Event(enable_timing=True)
 +    end.record()
-+    _S.pending = (seq, begin, end, meta)
++    meta["launch_ms"] = round((time.time() - meta["wall"]) * 1e3, 4)
++    _S.open_step = (seq, begin, end, meta, {})
++    _S.pending.append(_S.open_step)
 +
 +
 +def eager_begin(ctx=None, bs=None):
 +    """Fallback (TS_STEP_TIMING_EAGER=1): wrap an eager decode forward."""
 +    if not (ENABLED and _EAGER):
 +        return None
++    now = time.time()
++    _close_open_step(now, "eager")
 +    _harvest()
 +    if _S.eager is None:
 +        _S.eager = _new_seq(_S.pool_hint)
@@ -555,7 +592,7 @@ index 000000000..c3723209c
 +    begin.record()
 +    gnt = getattr(ctx, "global_num_tokens", None) if ctx is not None else None
 +    meta = {"type": "step", "sid": _S.eager.sid, "replay": _S.replays, "eager": True,
-+            "wall": time.time(), "bs": bs, "padded_bs": bs,
++            "wall": now, "bs": bs, "padded_bs": bs,
 +            "global_num_tokens": list(gnt) if gnt is not None else None,
 +            "input_num_tokens": getattr(ctx, "input_num_tokens", None)}
 +    return (_S.eager, begin, meta)
@@ -573,14 +610,31 @@ index 000000000..c3723209c
 +        seq.written = True
 +    elif _S.eager_cursor != len(seq.names):
 +        meta["marker_mismatch"] = _S.eager_cursor
-+    if _S.records >= _MAX:
++    if _S.records + len(_S.pending) >= _MAX:
 +        return
 +    end = torch.cuda.Event(enable_timing=True)
 +    end.record()
-+    _S.pending = (seq, begin, end, meta)
++    meta["launch_ms"] = round((time.time() - meta["wall"]) * 1e3, 4)
++    _S.open_step = (seq, begin, end, meta, {})
++    _S.pending.append(_S.open_step)
++
++
++def other_forward() -> None:
++    """Call before a forward that is neither a timed replay nor a timed eager decode (e.g. prefill)."""
++    if not ENABLED:
++        return None
++    _close_open_step(time.time(), "other")
++    _harvest()
++    return None
 +
 +
 +def flush() -> None:
++    if ENABLED and _S.pending:
++        _S.open_step = None
++        try:
++            _harvest(block=True)
++        except Exception:  # the device may already be torn down at exit
++            _S.pending = []
 +    if ENABLED and _S.buf and _S.path:
 +        with open(_S.path, "a") as f:
 +            f.write("\n".join(_S.buf) + "\n")
