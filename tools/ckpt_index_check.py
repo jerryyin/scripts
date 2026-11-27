@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checkpoint completeness against model.safetensors.index.json, from stat and safetensors headers only.
 
-ckpt_index_check.py [--split-bytes] [--json] [--hub-repo REPO [--hub-revision REV] [--hash-shards] [--jobs N]
+ckpt_index_check.py [--split-bytes] [--by-pattern] [--json] [--hub-repo REPO [--hub-revision REV] [--hash-shards] [--jobs N]
                     [--sample N] [--sample-shard NAME]... [--seed S]] CHECKPOINT...
 
 For each checkpoint directory (a Hugging Face snapshot's symlinks are followed): the index's shard count and
@@ -15,7 +15,10 @@ tensor data bytes by kind:
   shared_expert  a name with a shared_expert(s) component;
   routed_expert  a name with an `experts` component;
   other          everything else (attention, dense MLP, embeddings, norms, routers),
-and checks that their sum equals total_size.
+and checks that their sum equals total_size. With --by-pattern (implies --split-bytes) it also sums bytes and
+tensor counts per name pattern, the tensor name with every all-digit component replaced by `N` (so
+`layers.3.ffn.experts.17.w1.weight` -> `layers.N.ffn.experts.N.w1.weight`), each with its dtypes and the shape
+of its first tensor: the input a per-rank memory budget needs (which family is sharded, replicated or offloaded).
 
 With --hub-repo it also checks the checkpoint's identity against a Hugging Face Hub repo revision without
 downloading the repo: it lists the revision with the Hub API (?blobs=true) and, for every file present on
@@ -56,6 +59,11 @@ SAMPLE_CAP = 64 * 1024 * 1024  # bytes of one sampled tensor compared over HTTP 
 HEADER_CAP = 256 * 1024 * 1024  # a larger safetensors header length is treated as corrupt
 
 
+def pattern_of(name: str) -> str:
+    """The tensor name with every all-digit component replaced by N."""
+    return ".".join("N" if part.isdigit() else part for part in name.split("."))
+
+
 def num_hidden_layers(checkpoint: Path) -> int | None:
     path = checkpoint / "config.json"
     if not path.is_file():
@@ -93,7 +101,8 @@ def read_header(path: Path) -> dict:
     return header
 
 
-def check(checkpoint: Path, split: bool) -> dict:
+def check(checkpoint: Path, split: bool, by_pattern: bool = False) -> dict:
+    split = split or by_pattern
     result: dict = {"checkpoint": str(checkpoint)}
     index_path = checkpoint / "model.safetensors.index.json"
     if not index_path.is_file():
@@ -136,6 +145,7 @@ def check(checkpoint: Path, split: bool) -> dict:
         by_kind = dict.fromkeys(KINDS, 0)
         tensors = dict.fromkeys(KINDS, 0)
         seen: set[str] = set()
+        patterns: dict[str, dict] = {}
         for shard in shards:
             if shard in missing or shard in empty:
                 continue
@@ -145,6 +155,15 @@ def check(checkpoint: Path, split: bool) -> dict:
                 by_kind[kind] += end - begin
                 tensors[kind] += 1
                 seen.add(name)
+                if by_pattern:
+                    entry = patterns.setdefault(
+                        pattern_of(name),
+                        {"bytes": 0, "tensors": 0, "dtypes": [], "shape": spec["shape"], "kind": kind},
+                    )
+                    entry["bytes"] += end - begin
+                    entry["tensors"] += 1
+                    if spec["dtype"] not in entry["dtypes"]:
+                        entry["dtypes"].append(spec["dtype"])
         unheadered = sorted(set(weight_map) - seen)
         data_bytes = sum(by_kind.values())
         result.update(
@@ -155,6 +174,8 @@ def check(checkpoint: Path, split: bool) -> dict:
             header_data_bytes_equal_total_size=data_bytes == total_size,
             indexed_tensors_not_in_headers=len(unheadered),
         )
+        if by_pattern:
+            result["bytes_by_pattern"] = dict(sorted(patterns.items()))
         complete = complete and not unheadered
     result["complete"] = complete
     return result
@@ -182,6 +203,11 @@ def render(result: dict) -> str:
             f"  headers (num_hidden_layers {result['num_hidden_layers']}): {split}; data bytes "
             f"{result['header_data_bytes']:,} {'==' if result['header_data_bytes_equal_total_size'] else '!='} "
             f"total_size; indexed tensors not in any header: {result['indexed_tensors_not_in_headers']}"
+        )
+    for pattern, entry in result.get("bytes_by_pattern", {}).items():
+        lines.append(
+            f"  {pattern}: {entry['bytes']:,} bytes ({gb(entry['bytes'])}), {entry['tensors']:,} tensors, "
+            f"{'/'.join(entry['dtypes'])} {entry['shape']}, {entry['kind']}"
         )
     return "\n".join(lines)
 
@@ -424,6 +450,11 @@ def main(argv: list[str] | None = None) -> int:
         help="read each shard's header and sum bytes by kind",
     )
     parser.add_argument(
+        "--by-pattern",
+        action="store_true",
+        help="also sum bytes per tensor-name pattern (digits -> N), with dtype and shape (implies --split-bytes)",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="print one JSON object per checkpoint"
     )
     hub = parser.add_argument_group("Hub identity (no download)")
@@ -445,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
     ok = True
     for checkpoint in args.checkpoints:
-        result = check(checkpoint, args.split_bytes)
+        result = check(checkpoint, args.split_bytes, args.by_pattern)
         ok = ok and result["complete"]
         if args.hub_repo:
             result["hub"] = hub_identity(

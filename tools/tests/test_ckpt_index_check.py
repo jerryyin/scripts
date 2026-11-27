@@ -111,6 +111,20 @@ class CkptIndexCheckTests(unittest.TestCase):
         self.assertTrue(result["header_data_bytes_equal_total_size"])
         self.assertEqual(result["indexed_tensors_not_in_headers"], 0)
 
+    def test_by_pattern_groups_numeric_components(self):
+        result = cic.check(make_checkpoint(self.root / "p"), split=False, by_pattern=True)
+        self.assertIn("bytes_by_kind", result)  # --by-pattern implies the split
+        patterns = result["bytes_by_pattern"]
+        experts = patterns["model.layers.N.mlp.experts.N.gate_proj.weight"]
+        self.assertEqual((experts["bytes"], experts["tensors"]), (200, 2))
+        self.assertEqual((experts["dtypes"], experts["shape"], experts["kind"]), (["U8"], [100], "routed_expert"))
+        self.assertEqual(patterns["mtp.N.norm.weight"]["kind"], "mtp")
+        self.assertEqual(sum(e["bytes"] for e in patterns.values()), TOTAL)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cic.main(["--by-pattern", str(self.root / "p")]), 0)
+        self.assertIn("model.embed_tokens.weight: 64 bytes", out.getvalue())
+
     def test_nested_text_config_layers(self):
         result = cic.check(
             make_checkpoint(self.root / "n", nested_config=True), split=True
