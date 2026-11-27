@@ -217,6 +217,31 @@ def test_window_finish_line_splits_decode_from_idle() -> None:
         assert abs(y["idle_between_waves_s"] - 4.9) < 1e-4  # Finish at t+0.1 to the next Prefill at t+5.0
 
 
+def test_step_table_bins_long_gaps_and_post_prefill() -> None:
+    """--step-table: clean Decode gaps give the step by batch/context, the gap right after a Prefill
+    line is kept out of the bins, and a stalled clean gap is listed with its excess."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0).replace(
+        "\n", f", avg_seq_len: {seq}\n")
+    lines = [batch(T, "Prefill", 0, new_seq=1, new_token=300, cached_token=300000, running_req=1)]
+    t = T + 0.01
+    lines.append(dec(t, 300300))  # dispatched right after the prefill: the next gap holds the prefill
+    t += 0.6; lines.append(dec(t, 300400))
+    for i in range(10):  # 40 rounds of 10 ms per line
+        t += 0.4; lines.append(dec(t, 300500 + i))
+    t += 2.0; lines.append(dec(t, 300600))  # stalled interval
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        x = e2e.step_table(str(log), 40, (T - 1, T + 30))["ranks"]["0"]
+        row = x["clean_steps"]["bs1/256k-512k"]
+        assert abs(row["step_ms_median"] - 10.0) < 1e-3 and row["accept_len_mean"] == 4.0
+        assert abs(row["ms_per_token_per_request"] - 2.5) < 1e-3
+        assert x["post_prefill_gaps"] == 1
+        assert x["long_clean_gaps"]["n"] == 1 and abs(x["long_clean_gaps"]["excess_s"] - 1.6) < 1e-4
+
+
 def test_window_finish_split_needs_every_running_request_finished() -> None:
     """Two requests running, one Finish line between two Decode lines: the other request keeps
     decoding, so the gap stays decode (no idle); after the second Finish the wait is idle."""

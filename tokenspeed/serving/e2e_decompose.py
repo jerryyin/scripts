@@ -254,6 +254,16 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
     return res
 
 
+CTX_EDGES = (0, 32768, 65536, 131072, 262144, 524288, 1048576 + 64)
+
+
+def ctx_bucket(n):
+    for lo, hi in zip(CTX_EDGES, CTX_EDGES[1:]):
+        if lo <= n < hi:
+            return f"{lo // 1024}k-{hi // 1024}k"
+    return "other"
+
+
 def aiperf_window(path, phase="profiling"):
     """(t0, t1) epoch seconds of an AIPerf profile_export.jsonl phase: first request_start_ns to last request_end_ns.
 
@@ -273,6 +283,99 @@ def aiperf_window(path, phase="profiling"):
     if not st:
         raise SystemExit(f"{path}: no {phase} records with request_start_ns/request_end_ns")
     return min(st) / 1e9, max(en) / 1e9
+
+
+def step_table(log, interval, window=None, long_factor=1.5):
+    """Decode round time from consecutive Decode lines of one rank (one line per `interval` rounds).
+
+    A gap is "clean" when no Prefill/Mix line of ANY rank lies between the two lines (with attention DP and
+    expert-parallel MoE, another rank's prefill round holds every rank's decode round) and the running batch is
+    the same at both lines; clean gaps are binned by (running batch, context bucket of avg_seq_len) and give
+    step_ms = gap / interval. A gap that holds other ranks' Prefill/Mix lines is "prefill-held": its excess over
+    interval x the clean median step of its bin is decode stall caused by prefill. Also per rank: Prefill/Mix
+    rounds dispatched while decode requests were resident (#running-req > #new-seq) and their chunk time
+    (gap to the rank's next line when that is a Prefill/Mix line, else the median chunk gap)."""
+    ev = [e for e in parse_lines(open(log, errors="replace")) if e["kind"] in ("Prefill", "Mix", "Decode") and e["ts"]]
+    if window:
+        ev = [e for e in ev if window[0] <= e["ts"] <= window[1]]
+    pts = sorted(e["ts"] for e in ev if e["kind"] in ("Prefill", "Mix"))
+    def n_prefill_between(a, b):
+        return bisect.bisect_left(pts, b) - bisect.bisect_right(pts, a)
+    out = {"log": log, "decode_log_interval": interval, "window": window, "ranks": {}}
+    clean_all = collections.defaultdict(list); held = []
+    for r in sorted({e["dp_rank"] for e in ev}):
+        L = [e for e in ev if e["dp_rank"] == r]
+        bins = collections.defaultdict(list); acc = collections.defaultdict(list)
+        clean_at = collections.defaultdict(list); held_r = []
+        pp = [g for a, b, g in ((a, b, b["ts"] - a["ts"]) for a, b in zip(L, L[1:]))
+              if a["kind"] in ("Prefill", "Mix") and b["kind"] in ("Prefill", "Mix")]
+        cmed = statistics.median(pp) if pp else 0.0
+        pf_res_n = 0; pf_res_s = 0.0; pf_res_tok = 0
+        post_prefill = 0
+        for i, (a, b) in enumerate(zip(L, L[1:])):
+            g = b["ts"] - a["ts"]
+            if a["kind"] in ("Prefill", "Mix") and a.get("running", 0) > a.get("new_seq", 0):
+                pf_res_n += 1; pf_res_tok += a.get("new_token", 0)
+                pf_res_s += g if b["kind"] in ("Prefill", "Mix") else min(g, cmed)
+            if a["kind"] != "Decode" or b["kind"] != "Decode":
+                continue
+            k = (b.get("running", 0), ctx_bucket(b.get("avg_seq_len", 0)))
+            # lines are logged at dispatch and the overlap schedule dispatches a round before the previous
+            # one finishes, so the first Decode gap after a Prefill/Mix line (of any rank) can hold that
+            # prefill's execution: kept out of the clean bins
+            prev_t = L[i - 1]["ts"] if i > 0 else a["ts"] - 1e9
+            if i > 0 and L[i - 1]["kind"] in ("Prefill", "Mix"):
+                post_prefill += 1; continue
+            if n_prefill_between(prev_t, a["ts"]) > 0 and n_prefill_between(a["ts"], b["ts"]) == 0:
+                post_prefill += 1; continue
+            if n_prefill_between(a["ts"], b["ts"]) == 0 and a.get("running") == b.get("running"):
+                bins[k].append(g / interval * 1e3); clean_at[k].append((b["ts"], g))
+                if b.get("avg_accept_len") is not None:
+                    acc[k].append(b["avg_accept_len"])
+                clean_all[k].append(g / interval * 1e3)
+            elif n_prefill_between(a["ts"], b["ts"]) > 0:
+                held_r.append((k, g, n_prefill_between(a["ts"], b["ts"])))
+        rows = {}
+        for k in sorted(bins):
+            v = bins[k]; am = statistics.mean(acc[k]) if acc[k] else None
+            rows[f"bs{k[0]}/{k[1]}"] = {"n": len(v), "step_ms_median": statistics.median(v), "p10": pct(v, .1),
+                                         "p90": pct(v, .9), "accept_len_mean": am,
+                                         "ms_per_token_per_request": statistics.median(v) / am if am else None}
+        # clean gaps (no prefill line anywhere) far above their bin's median: decode stalls with no
+        # logged prefill cause (host stalls, compiles, collectives waiting on another rank)
+        long_gaps = []
+        for k, v in clean_at.items():
+            m = statistics.median(bins[k])
+            for t, g in v:
+                if g / interval * 1e3 > long_factor * m:
+                    long_gaps.append({"end_utc": dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%H:%M:%S.%f")[:-3],
+                                      "gap_s": g, "excess_s": g - interval * m / 1e3, "bin": f"bs{k[0]}/{k[1]}"})
+        long_gaps.sort(key=lambda x: x["end_utc"])
+        out["ranks"][str(r)] = {"clean_steps": rows, "prefill_held_gaps": len(held_r), "post_prefill_gaps": post_prefill,
+                                "long_clean_gaps": {"factor": long_factor, "n": len(long_gaps),
+                                                    "excess_s": sum(x["excess_s"] for x in long_gaps), "gaps": long_gaps},
+                                "prefill_rounds_with_decode_resident": {"n": pf_res_n, "tokens": pf_res_tok,
+                                                                        "time_s": pf_res_s}}
+        held += [(r,) + h for h in held_r]
+    med = {k: statistics.median(v) for k, v in clean_all.items()}
+    allmed = statistics.median([x for v in clean_all.values() for x in v]) if clean_all else None
+    ex = 0.0
+    for r, k, g, n in held:
+        ex += max(g - interval * med.get(k, allmed or 0) / 1e3, 0.0)
+    out["prefill_held"] = {"gaps": len(held), "excess_decode_time_s_summed_over_ranks": ex,
+                           "time_s_summed_over_ranks": sum(g for _, _, g, _ in held)}
+    return out
+
+
+def step_markdown(st):
+    lines = ["| rank | bin (running batch / context) | n gaps | step ms median [p10, p90] | accept/step | ms per token per request |",
+             "|---|---|---|---|---|---|"]
+    for r, x in st["ranks"].items():
+        for k, v in x["clean_steps"].items():
+            a = v["accept_len_mean"]; t = v["ms_per_token_per_request"]
+            lines.append(f"| {r} | {k} | {v['n']} | {v['step_ms_median']:.2f} [{v['p10']:.2f}, {v['p90']:.2f}] | "
+                         f"{a:.2f} | {t:.2f} |" if a else f"| {r} | {k} | {v['n']} | {v['step_ms_median']:.2f} | - | - |")
+    return "\n".join(lines) + "\n"
 
 
 def evalscope(d):
@@ -507,6 +610,8 @@ def main():
     ap.add_argument("--window-from-aiperf", action="append", default=[],
                     help="AIPerf profile_export.jsonl per --log: decompose only its profiling phase (first request start "
                          "to last request end) instead of the start/end rules (variable-length agentic runs)")
+    ap.add_argument("--step-table", action="store_true",
+                    help="also give decode round time by running batch and context (needs --decode-log-interval)")
     ap.add_argument("--out-json")
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
@@ -537,6 +642,8 @@ def main():
     if not a.log:
         ap.error("give --log or --benchmark-json")
     runs = []
+    if a.step_table and not a.decode_log_interval:
+        ap.error("--step-table needs --decode-log-interval")
     for i, lg in enumerate(a.log):
         win = aiperf_window(a.window_from_aiperf[i]) if i < len(a.window_from_aiperf) else None
         r = decompose(lg, a.prompt_tokens, window=win)
@@ -547,6 +654,8 @@ def main():
                     and e["stats"]["acc_len"] > 0]
             r["window_finish_lines"] = {"n": len(fin), "acc_len_mean_nonzero": statistics.mean(accs) if accs else None,
                                         "n_acc_len_zero": sum(1 for e in fin if e["stats"].get("acc_len") == 0)}
+        if a.step_table:
+            r["step_table"] = step_table(lg, a.decode_log_interval, win)
         r["label"] = a.label[i] if i < len(a.label) else os.path.basename(lg)
         if i < len(a.evalscope):
             es = evalscope(a.evalscope[i]); r["evalscope"] = es
@@ -577,6 +686,15 @@ def main():
                   f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
+    for r in runs:
+        if "step_table" in r:
+            print("== step table", r["label"], json.dumps(r["step_table"]["prefill_held"]))
+            for k, x in r["step_table"]["ranks"].items():
+                print(f" rank{k}: long clean gaps={x['long_clean_gaps']['n']} excess={x['long_clean_gaps']['excess_s']:.2f}s "
+                      + " ".join(f"{g['end_utc']}/{g['gap_s']:.2f}s" for g in x['long_clean_gaps']['gaps']))
+                print(f" rank{k}: prefill-held gaps={x['prefill_held_gaps']} "
+                      f"prefill rounds with decode resident={x['prefill_rounds_with_decode_resident']}")
+            print(step_markdown(r["step_table"]), end="")
 
 
 if __name__ == "__main__":
