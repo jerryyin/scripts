@@ -8,7 +8,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `e8fd096ed80112d6108725bad1fbdc3accb0a559` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the earlier version against `0dd8d477` is this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`); the one against `0dd8d477` was this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682`, a commit no longer in this repository's history |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
@@ -18,11 +18,22 @@ Make the patched copy in a clone (never a worktree or an edit of the checkout yo
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach e8fd096ed80112d6108725bad1fbdc3accb0a559
+set -euo pipefail
+TS_SRC=https://github.com/lightseekorg/tokenspeed.git   # or a local TokenSpeed checkout holding the commit
+INSTR=$PWD/tokenspeed-step-timing                       # a new clone, outside the checkout you serve from
+git clone --quiet "$TS_SRC" "$INSTR"
+# 1be88db0 is on branch users/jerryyin/ep8-vs-tp8-mi355-dev, not the default branch: fetch it by hash
+git -C "$INSTR" fetch --quiet origin 1be88db0a7b020d1cc45241eb02935c03d692335
+git -C "$INSTR" checkout --quiet --detach 1be88db0a7b020d1cc45241eb02935c03d692335
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
+(cd "$INSTR" && git diff --name-only HEAD~1 | PYTHONPYCACHEPREFIX="$(mktemp -d)" xargs -n1 python3 -m py_compile)
 ```
+
+Run it from this directory (`$PWD/instrumentation.diff`). The `tokenspeed-kernel/python` tree of the clone
+holds no build products; the compiled scheduler, engine and kernel extensions still come from the
+installed TokenSpeed, which must be the same commit (`1be88db0`), so the patched Python matches them.
 
 Serve a layout recipe instrumented. The server flags come from amd-tracking's recipe
 (`$AT/apps/inference_engine_benchmark/recipes/<model>/`, e.g.
@@ -67,7 +78,7 @@ python-level markers fired). `tokenspeed-kernel/python` holds no build products 
 from a clone. `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
 the harness only the `TS_STEP_TIMING_*` variables pass through (the engine inherits the environment).
 
-Markers (main stream unless noted), each at the same logical boundary as in the 0dd8d477 version:
+Markers (main stream unless noted), each at the same logical boundary as in the 0dd8d477 and e8fd096e versions:
 `model.begin` (before the encoder), `engram` / `layer` (per decoder layer, before Engram / mHC
 pre-attention), `attn` (attention call), `attn.fork`, `attn.kvidx.b` .. `attn.kvidx.e` (compressor /
 KV write / indexer branch, aux stream when overlapped), `attn.q` (q projection after the branch),
@@ -83,6 +94,23 @@ drafter replays the decode graph (DSpark), and the DSpark draft model marks `dra
 (`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as `draft:<category>`. The Petit MoE of
 one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
 shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
+
+At 1be88db0 the same markers cover every DeepSeek V4.1 decode path of the layouts the recipes serve:
+attention (TP, attention DP) in `DeepseekV41Attention`, where `attn.fork` .. `attn.kvidx.e` bracket the
+compressor / KV write / indexer branch and `attn.wo` includes the output projection and, without the
+deferred mHC all-reduce fusion, the attention all-reduce (with it, the all-reduce falls in `hc_ffn`); the
+MoE `forward_normal` path used by MoE TP (`tokenspeed-dspark5-tp4ep1.sh`, `canonical-tp4-fp8.json`) and
+EP/Petit: `ffn` (pre-MoE communication, none under TP) -> `moe.router` -> `moe.experts` (the routed-expert
+call, whatever the backend) with `shared.b` .. `shared.e` around the shared expert (aux stream when
+captured) -> `moe.join` (routed + shared add and the post-MoE all-reduce under TP) -> `ffn.end`; the
+MegaMoE path (`forward_mega_moe`) and the Gluon Petit TP-attention path (`_forward_petit_tp_attention`, new
+since e8fd096e) with the same five markers; the Petit fused-post path (`TOKENSPEED_PETIT_FUSE_POST`) has
+`shared.b`/`shared.e` but no `moe.join` (the add is in Petit's combine, which ends at `petit.post`). The
+idle-rank (no local rows) branch of attention DP marks `model.begin` / `model.end` only. DSpark: `draft.begin`
+/ `draft.end` around `DeepseekV41DSparkModel.forward_backbone` with its stages' attention and MoE markers
+recorded as layer id + 1000. New at 1be88db0 and not marked: the decode index-geometry builds the model
+issues on the auxiliary stream at `model.begin` (joined before `model.end`) and the adaptive-verify-budget
+graphs a DSpark drafter captures beside the decode graph (`capture_round_graphs`) and replays outside it.
 
 `STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
 0..39, none dense or hash-routed) and 3 DSpark stages (ids 0..2), so `STRIDE=40` times target layer 0

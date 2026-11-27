@@ -1,8 +1,8 @@
 diff --git a/python/tokenspeed/runtime/execution/forward_step.py b/python/tokenspeed/runtime/execution/forward_step.py
-index 9d90ac2cb..e45a17f4f 100644
+index 3e3ec57e7..4cfcd9cec 100644
 --- a/python/tokenspeed/runtime/execution/forward_step.py
 +++ b/python/tokenspeed/runtime/execution/forward_step.py
-@@ -64,6 +64,7 @@ from tokenspeed.runtime.utils import (
+@@ -66,6 +66,7 @@ from tokenspeed.runtime.utils import (
      get_colorful_logger,
  )
  from tokenspeed.runtime.utils.nvtx import nvtx_range
@@ -10,32 +10,34 @@ index 9d90ac2cb..e45a17f4f 100644
  from tokenspeed.runtime.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
  
  if TYPE_CHECKING:
-@@ -792,8 +793,10 @@ class ForwardStepRunner:
+@@ -1025,8 +1026,10 @@ class ForwardStepRunner:
+                 if self.draft_overlap is not None
+                 else nullcontext()
              )
-         with observer:
-             # The kernel state captured launches need lives as long as the graph.
 +            _st.capture_begin(graph)
-             with capture_session(graph), graph_capture:
+             with overlap_capture, capture_session(graph), graph_capture:
                  out = run_once()
 +            _st.capture_end(graph, bs)
              # The drafter's own graphs at this batch share the pool and the measure.
              if self.drafter is not None and variant == CUDA_GRAPH_VARIANT_DEFAULT:
                  self.drafter.capture_round_graphs(
-@@ -1299,10 +1302,13 @@ class ForwardStepRunner:
-             with (
-                 torch.inference_mode() if self.device == "npu" else nullcontext()
-             ), nvtx_range("graph_replay", color="red"):
-+                # Timed around both branches: DSpark's drafter replays the same graph.
-+                _st_tok = _st.before_replay(graph, ctx, bs, padded_bs)
-                 if self.drafter is not None:
-                     self.drafter.replay_decode_graph(graph, bs=bs, graph_bs=padded_bs)
-                 else:
-                     graph.replay()
-+                _st.after_replay(_st_tok)
-             if self._expert_load_rows is not None:
-                 self._expert_load_rows.clear()
- 
-@@ -1310,7 +1316,13 @@ class ForwardStepRunner:
+@@ -1631,12 +1634,15 @@ class ForwardStepRunner:
+                     torch.inference_mode() if self.device == "npu" else nullcontext(),
+                     nvtx_range("graph_replay", color="red"),
+                 ):
++                    # Timed around both branches: DSpark's drafter replays the same graph.
++                    _st_tok = _st.before_replay(graph, ctx, bs, padded_bs)
+                     if self.drafter is not None:
+                         self.drafter.replay_decode_graph(
+                             graph, bs=bs, graph_bs=padded_bs
+                         )
+                     else:
+                         graph.replay()
++                    _st.after_replay(_st_tok)
+             finally:
+                 # Even after a failed replay: later eager forwards must not
+                 # skip live rows, in MegaMoE or in the expert load counters.
+@@ -1649,7 +1655,13 @@ class ForwardStepRunner:
                  self.output_buffers[graph_key], bs, self.max_tokens_per_req
              )
          else:
@@ -50,10 +52,10 @@ index 9d90ac2cb..e45a17f4f 100644
          if use_graph and padded_bs != bs:
              ctx.bs = bs
 diff --git a/python/tokenspeed/runtime/models/deepseek_v41.py b/python/tokenspeed/runtime/models/deepseek_v41.py
-index 49778cee0..54e44eac2 100644
+index 5ef3c1600..5fa5c4b82 100644
 --- a/python/tokenspeed/runtime/models/deepseek_v41.py
 +++ b/python/tokenspeed/runtime/models/deepseek_v41.py
-@@ -195,6 +195,7 @@ from tokenspeed.runtime.multimodal.inputs import (
+@@ -204,6 +204,7 @@ from tokenspeed.runtime.multimodal.inputs import (
  )
  from tokenspeed.runtime.utils import add_prefix
  from tokenspeed.runtime.utils.cuda_stream import StreamFork
@@ -61,7 +63,7 @@ index 49778cee0..54e44eac2 100644
  from tokenspeed.runtime.utils.env import global_server_args_dict
  
  logger = logging.getLogger(__name__)
-@@ -1514,7 +1515,9 @@ class DeepseekV41Attention(nn.Module):
+@@ -1523,7 +1524,9 @@ class DeepseekV41Attention(nn.Module):
          with self.stream_fork.scope(enable=overlap, overlap=True) as fork:
              # Submit the longer compressor/index branch first. Serial eager and
              # captured decode execute these identical operations and dependency joins.
@@ -71,7 +73,7 @@ index 49778cee0..54e44eac2 100644
                  self._write_global_kv(
                      hidden_states,
                      source_positions,
-@@ -1626,6 +1629,8 @@ class DeepseekV41Attention(nn.Module):
+@@ -1635,6 +1638,8 @@ class DeepseekV41Attention(nn.Module):
                              projected_partition=partition,
                          )
                          index_q = index_weights = None
@@ -80,7 +82,7 @@ index 49778cee0..54e44eac2 100644
              if q_input.shape[0]:
                  if (
                      fused_decode
-@@ -1704,6 +1709,7 @@ class DeepseekV41Attention(nn.Module):
+@@ -1733,6 +1738,7 @@ class DeepseekV41Attention(nn.Module):
              and (current_platform().is_cdna4 or current_platform().is_cdna5)
              else None
          )
@@ -88,7 +90,7 @@ index 49778cee0..54e44eac2 100644
          out = backend.forward_v41(
              q,
              swa,
-@@ -1725,6 +1731,7 @@ class DeepseekV41Attention(nn.Module):
+@@ -1754,6 +1760,7 @@ class DeepseekV41Attention(nn.Module):
              fused_decode_groups=self.n_local_groups if fused_decode else None,
              key_rows=query_gather,
          )
@@ -96,7 +98,7 @@ index 49778cee0..54e44eac2 100644
          if fused_decode:
              codes, scales = out
              weight, weight_scales = self.fused_wo_a_weight, self.fused_wo_a_scales
-@@ -2095,9 +2102,11 @@ class DeepseekV41DecoderLayer(nn.Module):
+@@ -2126,9 +2133,11 @@ class DeepseekV41DecoderLayer(nn.Module):
                  if rows.query_shard.total_rows == 0:
                      captured = hidden_states[:, 0, :] if capture_input else None
                      return hidden_states, pre_mix, None, captured
@@ -108,7 +110,7 @@ index 49778cee0..54e44eac2 100644
              captured = hidden_states[:, 0, :] if capture_input else None
              return hidden_states, pre_mix, None, captured
          rows = _row_plan(self.layer_id, self.ced_decoder_start, ctx)
-@@ -2193,6 +2202,7 @@ class DeepseekV41DecoderLayer(nn.Module):
+@@ -2227,6 +2236,7 @@ class DeepseekV41DecoderLayer(nn.Module):
                      self.attn.mapping.attn.head_tp_group,
                  )
              )
@@ -116,7 +118,7 @@ index 49778cee0..54e44eac2 100644
              x = self.attn(
                  positions,
                  x,
-@@ -2201,6 +2211,7 @@ class DeepseekV41DecoderLayer(nn.Module):
+@@ -2235,6 +2245,7 @@ class DeepseekV41DecoderLayer(nn.Module):
                  hidden_codes=codes,
                  hidden_scales=scales,
              )
@@ -124,7 +126,7 @@ index 49778cee0..54e44eac2 100644
              attn_pre, post, comb = attn_mixes
              if overlap:
                  for tensor in (attn_pre, post, comb):
-@@ -2266,7 +2277,9 @@ class DeepseekV41DecoderLayer(nn.Module):
+@@ -2300,7 +2311,9 @@ class DeepseekV41DecoderLayer(nn.Module):
                          self.hc_eps,
                          self.hc_sinkhorn_iters,
                      )
@@ -134,18 +136,18 @@ index 49778cee0..54e44eac2 100644
              ffn_pre, post, comb = ffn_mixes
              if ffn_overlap:
                  for tensor in (ffn_pre, post, comb):
-@@ -2583,6 +2596,7 @@ class DeepseekV41Model(nn.Module):
-                 pre_mix = torch.empty(
+@@ -2663,6 +2676,7 @@ class DeepseekV41Model(nn.Module):
                      (0, self.config.hc_mult), dtype=torch.float32, device=hidden.device
                  )
+                 counts = None
 +                _st.mark("model.begin", -1)
-                 for layer in self.layers:
-                     hidden, pre_mix, _, _ = layer(
-                         hidden,
-@@ -2594,12 +2608,14 @@ class DeepseekV41Model(nn.Module):
-                         allow_ffn_reduce_fusion=False,
-                         capture_input=False,
-                     )
+                 for index, layer in enumerate(self.layers):
+                     # Match both eager CED stages on active peers. Idle ranks
+                     # still participate in their expert collectives with zero rows.
+@@ -2679,12 +2693,14 @@ class DeepseekV41Model(nn.Module):
+                             allow_ffn_reduce_fusion=False,
+                             capture_input=False,
+                         )
 +                _st.mark("model.end", -1)
              return (
                  self.embed_tokens.weight.new_empty((0, self.config.hidden_size)),
@@ -154,21 +156,25 @@ index 49778cee0..54e44eac2 100644
          backend = ctx.attn_backend
          backend.begin_indexer_forward()
 +        _st.mark("model.begin", -1)
-         state = self.encoder_forward(
-             input_ids,
-             positions,
-@@ -2612,8 +2628,10 @@ class DeepseekV41Model(nn.Module):
-         )
-         state = self.narrowing_forward(state, ctx)
+         # Decode builds the index sources' geometry on the auxiliary stream,
+         # off the index layers' chains, and joins the builds at the end.
+         geometry_builds = [] if ctx.forward_mode.is_decode() else None
+@@ -2718,12 +2734,14 @@ class DeepseekV41Model(nn.Module):
+                 )
+             )
          hidden, captured = self.decoder_forward(state, ctx)
 +        _st.mark("final", -1)
          output = self.finish_forward(hidden, captured, ctx)
+         if geometry_builds is not None:
+             for done in geometry_builds:
+                 if done is not None:
+                     torch.cuda.current_stream().wait_event(done)
          backend.end_indexer_forward()
 +        _st.mark("model.end", -1)
          return output
  
-     def _run_layer(
-@@ -2629,6 +2647,7 @@ class DeepseekV41Model(nn.Module):
+     def _index_geometry_branch(self, build) -> torch.cuda.Event | None:
+@@ -2764,6 +2782,7 @@ class DeepseekV41Model(nn.Module):
          stage_end: int,
      ) -> tuple[torch.Tensor, torch.Tensor, V41HCPost | None]:
          """Finish an incoming post before Engram; capture the input after it."""
@@ -176,7 +182,7 @@ index 49778cee0..54e44eac2 100644
          if layer.engram is not None:
              if pending_post is not None:
                  hidden = pending_post.finish(hidden)
-@@ -2643,6 +2662,8 @@ class DeepseekV41Model(nn.Module):
+@@ -2778,6 +2797,8 @@ class DeepseekV41Model(nn.Module):
                      else None
                  ),
              )
@@ -186,7 +192,7 @@ index 49778cee0..54e44eac2 100644
              hidden,
              pre_mix,
 diff --git a/python/tokenspeed/runtime/models/deepseek_v41_dspark.py b/python/tokenspeed/runtime/models/deepseek_v41_dspark.py
-index 7c0273298..130fbba31 100644
+index f99473a60..c8e1dc6df 100644
 --- a/python/tokenspeed/runtime/models/deepseek_v41_dspark.py
 +++ b/python/tokenspeed/runtime/models/deepseek_v41_dspark.py
 @@ -65,6 +65,7 @@ from tokenspeed.runtime.models.deepseek_v41 import (
@@ -197,15 +203,15 @@ index 7c0273298..130fbba31 100644
  
  
  def _quantized_kv(x: torch.Tensor) -> torch.Tensor:
-@@ -449,6 +450,7 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
-         verify row before this call.
+@@ -460,6 +461,7 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
+         confidence head; the returned drafting features remain normalized.
          """
          batch = bonus_token_ids.numel()
 +        _st.mark("draft.begin", -1)
          # Every stage's window field shares the SWA page geometry, so the
          # history addressing and the workspace selection are built once.
          ids, positions, pre_mix, request_indices, page, row, indices = (
-@@ -466,6 +468,7 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
+@@ -477,6 +479,7 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
          h = self.embed_tokens(ids)
          h = h[:, None, :].repeat(1, self.config.hc_mult, 1)
          pending_post = None
@@ -213,7 +219,7 @@ index 7c0273298..130fbba31 100644
          for stage, layer in enumerate(self.layers):
              backend = _WindowAttention(
                  positions,
-@@ -485,6 +488,8 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
+@@ -496,6 +499,8 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
                  allow_ffn_reduce_fusion=stage + 1 < len(self.layers),
                  capture_input=False,
              )
@@ -221,20 +227,20 @@ index 7c0273298..130fbba31 100644
 +        _st.mark("draft.end", -1)
          if pending_post is not None:
              h = pending_post.finish(h)
-         return _norm(v41_hc_pre(h, pre_mix), self.norm).reshape(
+         combined = v41_hc_pre(h, pre_mix)
 diff --git a/python/tokenspeed/runtime/models/deepseek_v41_moe.py b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
-index 62abc5892..d5f5690b7 100644
+index ad2797c06..daf90cba6 100644
 --- a/python/tokenspeed/runtime/models/deepseek_v41_moe.py
 +++ b/python/tokenspeed/runtime/models/deepseek_v41_moe.py
-@@ -50,6 +50,7 @@ from tokenspeed.runtime.utils import add_prefix
+@@ -56,6 +56,7 @@ from tokenspeed.runtime.utils import add_prefix
  from tokenspeed.runtime.utils.cuda_stream import StreamFork
  from tokenspeed.runtime.utils.env import global_server_args_dict
  from tokenspeed.runtime.utils.nvtx import nvtx_range
 +from tokenspeed.runtime.utils import step_timing as _st  # TS_STEP_TIMING test-only
- 
- logger = logging.getLogger(__name__)
- 
-@@ -484,8 +485,10 @@ class DeepseekV4MoE(nn.Module):
+ from tokenspeed.runtime.utils.server_args import (
+     gluon_petit_tp_attention_mapping,
+     gluon_petit_tp_attention_rows,
+@@ -546,8 +547,10 @@ class DeepseekV4MoE(nn.Module):
          ctx: ForwardContext,
          comm_manager: CommManager,
      ) -> torch.Tensor:
@@ -245,7 +251,7 @@ index 62abc5892..d5f5690b7 100644
          if self.shared_expert_fused:
              # The routed output already includes the shared expert.
              with nvtx_range("moe_mega_experts"):
-@@ -507,11 +510,14 @@ class DeepseekV4MoE(nn.Module):
+@@ -569,11 +572,14 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=True,
                  )
              with fork.branch():
@@ -260,8 +266,8 @@ index 62abc5892..d5f5690b7 100644
          return routed + shared if shared is not None else routed
  
      def forward_normal(
-@@ -528,8 +534,10 @@ class DeepseekV4MoE(nn.Module):
-         """
+@@ -592,8 +598,10 @@ class DeepseekV4MoE(nn.Module):
+             return self._forward_petit_tp_attention(hidden_states, input_ids, out)
          if hidden_states.shape[0] == 0 and not self.use_gluon_petit:
              return hidden_states if out is None else out.copy_(hidden_states)
 +        _st.mark("moe.router", self.layer_index)
@@ -271,7 +277,7 @@ index 62abc5892..d5f5690b7 100644
          deferred_finalize = (
              hidden_states.dtype == torch.bfloat16
              and self.experts.supports_deferred_cuda_finalize
-@@ -545,7 +553,10 @@ class DeepseekV4MoE(nn.Module):
+@@ -623,7 +631,10 @@ class DeepseekV4MoE(nn.Module):
                      do_finalize=not deferred_finalize,
                  )
              with fork.branch():
@@ -282,6 +288,38 @@ index 62abc5892..d5f5690b7 100644
          if deferred_finalize:
              # Reduce routed rows and add the shared expert in one finalize.
              gemm2_out, expert_weights, expanded_idx = routed
+@@ -659,7 +670,9 @@ class DeepseekV4MoE(nn.Module):
+ 
+         with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
+             with fork.branch():
++                _st.mark("shared.b", self.layer_index)
+                 shared = self._forward_shared_experts(hidden_states)
++                _st.mark("shared.e", self.layer_index)
+             ready = fork.join_event if getattr(fork, "_active", False) else None
+             with petit_combine_post(shared, out=out, ready=ready):
+                 with nvtx_range("moe_experts"):
+@@ -692,8 +705,10 @@ class DeepseekV4MoE(nn.Module):
+         )
+         local = hidden_states[start:end]
+         local_ids = None if input_ids is None else input_ids[start:end]
++        _st.mark("moe.router", self.layer_index)
+         with nvtx_range("moe_select_experts"):
+             topk_output = self._compute_topk_output(local, local_ids)
++        _st.mark("moe.experts", self.layer_index)
+         shared = None
+         with self.stream_fork.scope(enable=get_is_capture_mode()) as fork:
+             with nvtx_range("moe_experts"):
+@@ -706,7 +721,10 @@ class DeepseekV4MoE(nn.Module):
+                     do_finalize=True,
+                 )
+             with fork.branch():
++                _st.mark("shared.b", self.layer_index)
+                 shared = self._forward_shared_experts(hidden_states)
++                _st.mark("shared.e", self.layer_index)
++        _st.mark("moe.join", self.layer_index)
+         if shared is None:
+             result = (
+                 hidden_states.new_zeros(hidden_states.shape)
 diff --git a/python/tokenspeed/runtime/utils/step_timing.py b/python/tokenspeed/runtime/utils/step_timing.py
 new file mode 100644
 index 000000000..c3723209c
@@ -556,12 +594,12 @@ index 000000000..c3723209c
 +        raise RuntimeError("TS_STEP_TIMING=1 requires TS_STEP_TIMING_DIR")
 +    atexit.register(flush)
 diff --git a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-index 8316fec12..d70b46ef3 100644
+index 75c9978cf..40a1c0362 100644
 --- a/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
 +++ b/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/gluon_petit/lib/moe/rocm/mega_moe.py
-@@ -200,7 +200,12 @@ class MegaMoESolutionAdapter:
-         import torch
-         from lib.streams import native_stream
+@@ -444,7 +444,12 @@ class MegaMoESolutionAdapter:
+             # warmup() takes the grid as a keyword; a launch takes it above.
+             return {"grid": blocks} if compile_only else {}
  
 +        import sys as _sys  # TS_STEP_TIMING test-only
 +
@@ -569,29 +607,29 @@ index 8316fec12..d70b46ef3 100644
 +        _mk = _st.mark if _st is not None and _st.ENABLED else (lambda _n: None)
          with torch.cuda.stream(native_stream(p.stream, p.workspace.device)):
 +            _mk("petit.s1")
-             MegaMoEStage1[(C.kNumSMs,)](
+             Launch(MegaMoEStage1, (C.kNumSMs,))(
                  p.w13,
                  p.scales_w13,
-@@ -215,6 +220,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=stage1.kNumWarps,
+@@ -460,6 +465,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
+                 **Grid((C.kNumSMs,)),
              )
 +            _mk("petit.s2")
-             MegaMoEStage2[(stage2.kStage2GridBlocks,)](
+             Launch(MegaMoEStage2, (stage2.kStage2GridBlocks,))(
                  p.w2,
                  p.scales_w2,
-@@ -225,6 +231,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=stage2.kNumWarps,
+@@ -471,6 +477,7 @@ class MegaMoESolutionAdapter:
                  enable_fp_fusion=False,
+                 **Grid((stage2.kStage2GridBlocks,)),
              )
 +            _mk("petit.comb")
-             MegaMoECombine[(combine.kNumSMs,)](
-                 p.out,
-                 p.num_tokens,
-@@ -235,6 +242,7 @@ class MegaMoESolutionAdapter:
-                 num_warps=combine.kNumWarps,
-                 enable_fp_fusion=False,
-             )
+             if p.residual is None:
+                 Launch(MegaMoECombine, (combine.kNumSMs,))(
+                     p.out,
+@@ -502,6 +509,7 @@ class MegaMoESolutionAdapter:
+                     enable_fp_fusion=False,
+                     **Grid((combine.kNumSMs,)),
+                 )
 +            _mk("petit.post")
          return 0
  
