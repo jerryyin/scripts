@@ -27,6 +27,11 @@ Attribution rule (per rank, consecutive lines a -> b of that rank, gap = b.ts - 
     = last line + remaining decode tokens / last gen throughput, capped at run end;
     remaining tokens = rank decode tokens - tokens accounted by Decode lines.
   * idle = run span - prefill - decode (start lag + end lag).
+  * with a given window (--window-from-aiperf) on a single-rank log (Finish lines carry no DP rank),
+    a gap a -> b holding at least as many Finish lines as line a's running requests ends them all at
+    the last of them (lf): prefill gets min(lf - a, c_med) when a is Prefill/Mix, decode the rest of
+    [a, lf], and (lf, b] is 'idle_between_waves'; c_med then comes only from Prefill->Prefill gaps
+    without a Finish line (chunks of one request).
 Per rank it also reports residency (max running requests, max queued requests on Decode lines,
 i.e. waiting while the rank decodes) and the gap between
 consecutive Decode lines at the rank's full batch with no prefill between them (one log interval
@@ -59,7 +64,7 @@ Error: per prefill->decode boundary at most |actual chunk - c_med| (chunk times
 are tight, see chunk_time stats); the tail estimate is bounded by
 decode_log_interval rounds. Mixed batches (if any) are counted as prefill time.
 """
-import argparse, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
+import argparse, bisect, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from batch_log import parse_lines, parse_ts  # noqa: E402
@@ -80,7 +85,8 @@ def pct(xs, q):
     return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
 
 
-def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
+def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, window=None):
+    """window=(t0, t1) epoch seconds overrides the run start/end rules (e.g. an AIPerf profile window)."""
     ev = parse_lines(open(log, errors="replace"))
     fin = [e for e in ev if e["kind"] == "Finish"]
     if req_prompt is None:  # most common prompt length among finished requests >= 1000 tokens
@@ -90,8 +96,11 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
     run_fin = [e for e in fin if req_prompt and int(e["stats"].get("prompt_tokens", 0)) == req_prompt]
     batch = [e for e in ev if e["kind"] in ("Prefill", "Mix", "Decode") and e["ts"] is not None]
     starts = [e["ts"] for e in batch if e["kind"] in ("Prefill", "Mix") and e.get("new_token", 0) >= start_min_tokens]
-    t0 = min(starts)
-    t1 = max(e["ts"] for e in run_fin) if run_fin else max(e["ts"] for e in batch)
+    if window:
+        t0, t1 = window
+    else:
+        t0 = min(starts)
+        t1 = max(e["ts"] for e in run_fin) if run_fin else max(e["ts"] for e in batch)
     if out_tokens is None:
         out_tokens = statistics.median([int(e["stats"]["output_tokens"]) for e in run_fin]) if run_fin else 0
     allbatch = batch
@@ -100,8 +109,8 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
     res = {"log": log, "log_sha256": sha256(log), "request_prompt_tokens": req_prompt,
            "requests_finished_in_log": len(run_fin), "output_tokens_per_request": out_tokens,
            "run_start_utc_epoch": t0, "run_end_utc_epoch": t1, "server_span_s": t1 - t0,
-           "run_start_rule": f"first Prefill/Mix line with #new-token >= {start_min_tokens}",
-           "run_end_rule": f"last 'Finish! RequestStats' line with prompt_tokens == {req_prompt}",
+           "run_start_rule": "given window" if window else f"first Prefill/Mix line with #new-token >= {start_min_tokens}",
+           "run_end_rule": "given window" if window else f"last 'Finish! RequestStats' line with prompt_tokens == {req_prompt}",
            "ranks": {}}
     if run_fin:
         st = [e["stats"] for e in run_fin]
@@ -127,9 +136,18 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
         nreq = round(ptok / req_prompt, 2) if req_prompt else None
         # chunk time by chunk size from Prefill->Prefill gaps
         bysize = collections.defaultdict(list); gaps = []
+        # window mode (agentic runs of variable-length requests): a Finish line between two lines of a
+        # single-rank log ends a request there, so the gap is not one chunk (or one log interval of decode)
+        fts = sorted(e["ts"] for e in fin if e["ts"] is not None) if (window and len(ranks) == 1) else []
+        def last_finish(x, y):
+            i = bisect.bisect_left(fts, y) - 1
+            return fts[i] if i >= 0 and fts[i] > x else None
+        def all_finished(a, b):  # last Finish in (a, b) when every request running at a finished there
+            n = bisect.bisect_left(fts, b["ts"]) - bisect.bisect_right(fts, a["ts"])
+            return last_finish(a["ts"], b["ts"]) if n and n >= max(a.get("running", 1), 1) else None
         for a, b in zip(L, L[1:]):
             g = b["ts"] - a["ts"]; gaps.append((a, b, g))
-            if a["kind"] in ("Prefill", "Mix") and b["kind"] in ("Prefill", "Mix"):
+            if a["kind"] in ("Prefill", "Mix") and b["kind"] in ("Prefill", "Mix") and last_finish(a["ts"], b["ts"]) is None:
                 bysize[a.get("new_token", 0)].append(g)
         allc = [g for v in bysize.values() for g in v]
         cmed_all = statistics.median(allc) if allc else 0.0
@@ -140,6 +158,13 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
         dmed = statistics.median(dd) if dd else None
         tp = td = gap_idle = 0.0; nb = 0; stall_n = 0; stall_s = 0.0
         for a, b, g in gaps:
+            lf = all_finished(a, b) if fts else None
+            if lf is not None:  # requests ended at lf: [a, lf] is its chunk and/or decode, (lf, b] waits for arrivals
+                c = min(lf - a["ts"], cmed(a.get("new_token", 0))) if a["kind"] in ("Prefill", "Mix") else 0.0
+                tp += c; td += lf - a["ts"] - c; gap_idle += b["ts"] - lf
+                if a["kind"] in ("Prefill", "Mix") and b["kind"] not in ("Prefill", "Mix"):
+                    nb += 1
+                continue
             if a["kind"] in ("Prefill", "Mix"):
                 if b["kind"] in ("Prefill", "Mix"):
                     tp += g
@@ -227,6 +252,27 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None):
     res["sum"]["max_rank_prefill_plus_decode_plus_between_wave_idle_s"] = max(
         x["prefill_time_s"] + x["decode_time_s"] + x["idle_between_waves_s"] for x in R)
     return res
+
+
+def aiperf_window(path, phase="profiling"):
+    """(t0, t1) epoch seconds of an AIPerf profile_export.jsonl phase: first request_start_ns to last request_end_ns.
+
+    Records are counted as InferenceX's agentic aggregate counts them (infx/results/agentic/artifacts.py
+    load_records_with_accounting, request_metrics.py compute_throughput_stats): a record without
+    metadata.benchmark_phase is profiling, a record with an error is dropped, so the window is the one its
+    throughput is divided by."""
+    st, en = [], []
+    for line in open(path):
+        if not line.strip():
+            continue
+        rec = json.loads(line); md = rec.get("metadata", {})
+        if rec.get("error") or md.get("benchmark_phase", "profiling") != phase:
+            continue
+        if md.get("request_start_ns") and md.get("request_end_ns"):
+            st.append(md["request_start_ns"]); en.append(md["request_end_ns"])
+    if not st:
+        raise SystemExit(f"{path}: no {phase} records with request_start_ns/request_end_ns")
+    return min(st) / 1e9, max(en) / 1e9
 
 
 def evalscope(d):
@@ -458,6 +504,9 @@ def main():
                     help="request prompt length (default: the most common one >= 1000); with --predict, L")
     ap.add_argument("--decode-log-interval", type=int, help="rounds per Decode line, for per-round times")
     ap.add_argument("--markdown", action="store_true", help="also print one table row per run")
+    ap.add_argument("--window-from-aiperf", action="append", default=[],
+                    help="AIPerf profile_export.jsonl per --log: decompose only its profiling phase (first request start "
+                         "to last request end) instead of the start/end rules (variable-length agentic runs)")
     ap.add_argument("--out-json")
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
@@ -489,7 +538,15 @@ def main():
         ap.error("give --log or --benchmark-json")
     runs = []
     for i, lg in enumerate(a.log):
-        r = decompose(lg, a.prompt_tokens)
+        win = aiperf_window(a.window_from_aiperf[i]) if i < len(a.window_from_aiperf) else None
+        r = decompose(lg, a.prompt_tokens, window=win)
+        if win:
+            fin = [e for e in parse_lines(open(lg, errors="replace")) if e["kind"] == "Finish" and e["ts"]
+                   and win[0] <= e["ts"] <= win[1] + 1.0]
+            accs = [float(e["stats"]["acc_len"]) for e in fin if isinstance(e["stats"].get("acc_len"), float)
+                    and e["stats"]["acc_len"] > 0]
+            r["window_finish_lines"] = {"n": len(fin), "acc_len_mean_nonzero": statistics.mean(accs) if accs else None,
+                                        "n_acc_len_zero": sum(1 for e in fin if e["stats"].get("acc_len") == 0)}
         r["label"] = a.label[i] if i < len(a.label) else os.path.basename(lg)
         if i < len(a.evalscope):
             es = evalscope(a.evalscope[i]); r["evalscope"] = es
@@ -515,8 +572,8 @@ def main():
         print("==", r["label"], "span %.2f s" % r["server_span_s"], json.dumps(r.get("reconciliation"), default=str))
         for k, x in r["ranks"].items():
             print(f" rank{k}: req={x['requests_by_prefill_tokens']} chunks={x['prefill_chunks']} "
-                  f"prefill={x['prefill_time_s']:.2f}s ({x['prefill_tok_per_s_while_prefilling']:.0f} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms) "
-                  f"decode={x['decode_time_s']:.2f}s ({x['decode_tok_per_s_while_decoding']:.1f} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
+                  f"prefill={x['prefill_time_s']:.2f}s ({x['prefill_tok_per_s_while_prefilling'] or 0:.0f} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms over {x['chunk_time_s']['n']} gaps) "
+                  f"decode={x['decode_time_s']:.2f}s ({x['decode_tok_per_s_while_decoding'] or 0:.1f} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
                   f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")

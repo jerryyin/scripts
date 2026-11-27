@@ -194,6 +194,64 @@ def test_tpot_from_number_or_retained_kv_repetition_table() -> None:
                 raise AssertionError(point)
 
 
+def test_window_finish_line_splits_decode_from_idle() -> None:
+    """Agentic window mode on a single-rank log: a Finish line splits decode from idle."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0).replace(
+        "\n", f", avg_seq_len: {seq}\n")
+    lines = [batch(T, "Prefill", 0, new_seq=1, new_token=300, cached_token=300000, running_req=1)]
+    t = T + 0.01
+    lines.append(dec(t, 300300))  # dispatched right after the prefill: the next gap holds the prefill
+    t += 0.6; lines.append(dec(t, 300400))
+    for i in range(10):  # 40 rounds of 10 ms per line
+        t += 0.4; lines.append(dec(t, 300500 + i))
+    t += 2.0; lines.append(dec(t, 300600))  # stalled interval
+    lines.append(f"[ts] {ts(t + 0.1)}  INFO ts_control::output: Req: r Finish! Accept_num_tokens_avg: 4.0\n")
+    lines.append(batch(t + 5.0, "Prefill", 0, new_seq=1, new_token=200, cached_token=300600, running_req=1))
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        r = e2e.decompose(str(log), window=(T - 1, T + 30))
+        y = r["ranks"]["0"]
+        assert abs(y["idle_between_waves_s"] - 4.9) < 1e-4  # Finish at t+0.1 to the next Prefill at t+5.0
+
+
+def test_window_finish_split_needs_every_running_request_finished() -> None:
+    """Two requests running, one Finish line between two Decode lines: the other request keeps
+    decoding, so the gap stays decode (no idle); after the second Finish the wait is idle."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = [batch(T, "Prefill", 0, new_seq=2, new_token=2000, running_req=2),
+             batch(T + 1.0, "Decode", 0, running_req=2, gen=400.0),
+             f"[ts] {ts(T + 1.5)}  INFO ts_control::output: Req: a Finish! Accept_num_tokens_avg: 3.0\n",
+             batch(T + 2.0, "Decode", 0, running_req=1, gen=200.0),
+             f"[ts] {ts(T + 2.5)}  INFO ts_control::output: Req: b Finish! Accept_num_tokens_avg: 3.0\n",
+             batch(T + 6.0, "Prefill", 0, new_seq=1, new_token=1000, running_req=1)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        y = e2e.decompose(str(log), window=(T, T + 6.0))["ranks"]["0"]
+        assert abs(y["idle_between_waves_s"] - 3.5) < 1e-4  # only (T+2.5, T+6.0]
+
+
+def test_aiperf_window_is_the_profiling_phase() -> None:
+    e2e = load("e2e_decompose.py")
+    recs = [{"metadata": {"benchmark_phase": "warmup", "request_start_ns": 1_000_000_000, "request_end_ns": 2_000_000_000}},
+            {"metadata": {"benchmark_phase": "profiling", "request_start_ns": 5_000_000_000, "request_end_ns": 7_500_000_000}},
+            {"metadata": {"benchmark_phase": "profiling", "request_start_ns": 6_000_000_000, "request_end_ns": 9_250_000_000}}]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "profile_export.jsonl"
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        assert e2e.aiperf_window(str(p)) == (5.0, 9.25)
+        # as InferenceX counts records: no benchmark_phase is profiling, an errored record is dropped
+        recs += [{"metadata": {"request_start_ns": 4_000_000_000, "request_end_ns": 9_000_000_000}},
+                 {"error": {"code": 500}, "metadata": {"benchmark_phase": "profiling", "request_start_ns": 6_000_000_000,
+                                                       "request_end_ns": 12_000_000_000}}]
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs) + "\n")
+        assert e2e.aiperf_window(str(p)) == (4.0, 9.25)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
