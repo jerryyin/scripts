@@ -93,12 +93,30 @@ def kind_of(name: str, layers: int | None) -> str:
     return "other"
 
 
-def read_header(path: Path) -> dict:
-    with path.open("rb") as handle:
-        (length,) = struct.unpack("<Q", handle.read(8))
-        header = json.loads(handle.read(length))
-    header.pop("__metadata__", None)
-    return header
+def nbytes(spec: dict) -> int:
+    """The tensor data bytes of one safetensors header entry."""
+    begin, end = spec["data_offsets"]
+    return end - begin
+
+
+def local_reader(path: Path):
+    """read(offset, count) -> bytes of a local file."""
+
+    def read(offset: int, count: int) -> bytes:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            return handle.read(count)
+
+    return read
+
+
+def safetensors_header(read, cap: int | None = None, where: str = "") -> tuple[int, dict]:
+    """A shard's header length and header, __metadata__ included, through read(offset, count) (a local file or
+    HTTP Range); with cap, a length outside 1..cap is a HubError naming `where` (so no huge Range request)."""
+    (length,) = struct.unpack("<Q", read(0, 8))
+    if cap is not None and not 0 < length <= cap:
+        raise HubError(f"implausible safetensors header length {length} in {where}")
+    return length, json.loads(read(8, length))
 
 
 def check(checkpoint: Path, split: bool, by_pattern: bool = False) -> dict:
@@ -149,10 +167,12 @@ def check(checkpoint: Path, split: bool, by_pattern: bool = False) -> dict:
         for shard in shards:
             if shard in missing or shard in empty:
                 continue
-            for name, spec in read_header(checkpoint / shard).items():
-                begin, end = spec["data_offsets"]
+            _, header = safetensors_header(local_reader(checkpoint / shard))
+            header.pop("__metadata__", None)
+            for name, spec in header.items():
+                size = nbytes(spec)
                 kind = kind_of(name, layers)
-                by_kind[kind] += end - begin
+                by_kind[kind] += size
                 tensors[kind] += 1
                 seen.add(name)
                 if by_pattern:
@@ -160,7 +180,7 @@ def check(checkpoint: Path, split: bool, by_pattern: bool = False) -> dict:
                         pattern_of(name),
                         {"bytes": 0, "tensors": 0, "dtypes": [], "shape": spec["shape"], "kind": kind},
                     )
-                    entry["bytes"] += end - begin
+                    entry["bytes"] += size
                     entry["tensors"] += 1
                     if spec["dtype"] not in entry["dtypes"]:
                         entry["dtypes"].append(spec["dtype"])
@@ -257,18 +277,9 @@ def git_blob_sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
-def full_header(path: Path) -> tuple[int, dict]:
-    """A shard's header length and header, __metadata__ included."""
-    with path.open("rb") as handle:
-        (length,) = struct.unpack("<Q", handle.read(8))
-        return length, json.loads(handle.read(length))
-
-
-def remote_header(url: str, token: str | None) -> tuple[int, dict]:
-    (length,) = struct.unpack("<Q", hub_get(url, token, 0, 7))
-    if not 0 < length <= HEADER_CAP:
-        raise HubError(f"implausible safetensors header length {length} in {url}")
-    return length, json.loads(hub_get(url, token, 8, 8 + length - 1))
+def hub_reader(url: str, token: str | None):
+    """read(offset, count) -> bytes of a Hub file, over HTTP Range."""
+    return lambda offset, count: hub_get(url, token, offset, offset + count - 1)
 
 
 def cache_blob(path: Path) -> str | None:
@@ -291,9 +302,8 @@ def local_files(checkpoint: Path) -> dict[str, Path]:
 
 def pick_tensors(header: dict, count: int, rng: random.Random) -> list[str]:
     """The smallest min(4, count) nonempty tensors, then a seeded random choice of the rest, count in all."""
-    size = lambda k: header[k]["data_offsets"][1] - header[k]["data_offsets"][0]  # noqa: E731
-    names = sorted(k for k in header if k != "__metadata__" and size(k) > 0)
-    smallest = sorted(names, key=lambda k: (size(k), k))[: min(4, count)]
+    names = sorted(k for k in header if k != "__metadata__" and nbytes(header[k]) > 0)
+    smallest = sorted(names, key=lambda k: (nbytes(header[k]), k))[: min(4, count)]
     chosen = set(smallest)
     rest = [k for k in names if k not in chosen]
     return smallest + rng.sample(rest, min(len(rest), max(0, count - len(smallest))))
@@ -348,30 +358,30 @@ def hub_identity(
             files[name]["size_equal"] = files[name]["local_size"] == files[name]["hub_size"]
         url = lambda name: f"{endpoint}/{quote(repo)}/resolve/{resolved}/{quote(name)}"  # noqa: E731
         with ThreadPoolExecutor(max(1, jobs)) as pool:
-            remote = dict(zip(shards, pool.map(lambda n: remote_header(url(n), token), shards)))
+            remote = dict(
+                zip(shards, pool.map(lambda n: safetensors_header(hub_reader(url(n), token), HEADER_CAP, url(n)), shards))
+            )
         headers, samples = {}, []
         rng = random.Random(seed)
         for name in shards:
-            local_length, local_header = full_header(local[name])
+            local_length, local_header = safetensors_header(local_reader(local[name]))
             headers[name] = remote[name][1] == local_header
             if name not in sample_shards:
                 continue
             for tensor in pick_tensors(local_header, sample, rng):
-                begin, end = local_header[tensor]["data_offsets"]
-                end = min(end, begin + SAMPLE_CAP)
-                start = 8 + local_length + begin
-                theirs = hub_get(url(name), token, start, start + end - begin - 1)
-                with local[name].open("rb") as handle:
-                    handle.seek(start)
-                    ours = handle.read(end - begin)
+                spec = local_header[tensor]
+                start = 8 + local_length + spec["data_offsets"][0]
+                count = min(nbytes(spec), SAMPLE_CAP)
+                theirs = hub_reader(url(name), token)(start, count)
+                ours = local_reader(local[name])(start, count)
                 samples.append(
                     {
                         "shard": name,
                         "tensor": tensor,
-                        "dtype": local_header[tensor]["dtype"],
-                        "shape": local_header[tensor]["shape"],
+                        "dtype": spec["dtype"],
+                        "shape": spec["shape"],
                         "offset": start,
-                        "bytes": end - begin,
+                        "bytes": count,
                         "equal": ours == theirs,
                     }
                 )

@@ -354,6 +354,13 @@ class HubIdentityTests(unittest.TestCase):
         self.assertIn("instead of 206", doc["error"])
         self.assertFalse(doc["all_checked_equal"])
 
+    def test_implausible_remote_header_length_is_an_error_not_a_huge_range(self):
+        (self.remote / self.SHARD).write_bytes(struct.pack("<Q", 1 << 40))
+        doc = self.identity()
+        self.assertIn("implausible safetensors header length 1099511627776", doc["error"])
+        ranges = [r[1] for r in self.hub.requests if r[0].endswith(self.SHARD)]
+        self.assertEqual(ranges, ["bytes=0-7"])  # only the length was fetched
+
     def test_gated_repo_without_credentials_is_reported(self):
         self.hub.status = 401
         doc = self.identity()
