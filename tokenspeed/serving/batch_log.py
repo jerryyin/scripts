@@ -8,7 +8,8 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
   "Prefill" | "Mix" | "Decode"  from `ts_control::batch_log` lines, with the fields of FIELD_RES
                                 that are present ("dp_rank" defaults to 0 for single-rank logs);
   "Finish"                      from `Req: RID Finish! RequestStats(...)`, with "rid" and "stats"
-                                (numbers as int/float, quoted strings unquoted, None as None).
+                                (numbers as int/float, quoted strings unquoted, None as None), or from
+                                `Req: RID Finish! Accept_num_tokens_avg: X` with stats {"acc_len": X}.
 LogTail follows a growing log from its current end.
 dp_spread(events, windows) counts new sequences per attention-DP rank ("#new-seq" of "Prefill batch."
 lines) inside each named time window [start, end).
@@ -66,6 +67,10 @@ FIELD_RES = {
 }
 KIND_RE = re.compile(r"\b(Prefill|Mix|Decode) batch\.")
 FINISH_RE = re.compile(r"Req: (\S+) Finish! RequestStats\((.*)\)")
+# TokenSpeed builds whose Finish! line carries only the request's mean accepted tokens per verify step
+# (e.g. 1be88db0: "Req: RID Finish! Accept_num_tokens_avg: 3.4"); parsed as a Finish event whose stats
+# hold only "acc_len" (0 for a request that never ran a verify step, e.g. one output token).
+FINISH_ACC_RE = re.compile(r"Req: (\S+) Finish! Accept_num_tokens_avg: ([-+]?\d+(?:\.\d+)?)")
 STAT_RE = re.compile(r"(\w+)=('[^']*'|[^,()]+)")
 
 
@@ -110,7 +115,8 @@ def parse_line(raw):
     line = ANSI.sub("", raw.rstrip("\n"))
     m = KIND_RE.search(line)
     fm = FINISH_RE.search(line)
-    if not m and not fm:
+    fa = None if (m or fm) else FINISH_ACC_RE.search(line)
+    if not m and not fm and not fa:
         return None
     ts, sub, tzx = parse_ts(line)
     ev = {"ts": ts, "subsec": sub, "tz_explicit": tzx, "line": line}
@@ -122,10 +128,14 @@ def parse_line(raw):
                 v = mm.group(1)
                 ev[k] = float(v) if "." in v else int(v)
         ev.setdefault("dp_rank", 0)
-    else:
+    elif fm:
         ev["kind"] = "Finish"
         ev["rid"] = fm.group(1)
         ev["stats"] = {k: stat_value(v) for k, v in STAT_RE.findall(fm.group(2))}
+    else:
+        ev["kind"] = "Finish"
+        ev["rid"] = fa.group(1)
+        ev["stats"] = {"acc_len": float(fa.group(2))}
     return ev
 
 

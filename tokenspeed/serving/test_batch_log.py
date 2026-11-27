@@ -160,6 +160,15 @@ def test_prefill_cli_matrix_phases_repeated_across_concurrencies() -> None:
         assert {k: (v["requests"], v["valid"]) for k, v in res.items()} == {"measured-1/c2": (2, True), "measured-1/c1": (1, False)}
 
 
+def test_finish_line_with_accept_num_tokens_avg() -> None:
+    import batch_log
+    ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: abc-01 Finish! "
+                              "Accept_num_tokens_avg: 3.48\n")
+    assert ev["kind"] == "Finish" and ev["rid"] == "abc-01" and ev["stats"] == {"acc_len": 3.48}
+    ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: x Finish! "
+                              "Accept_num_tokens_avg: 0\n")
+    assert ev["stats"] == {"acc_len": 0}
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
