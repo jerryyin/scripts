@@ -17,10 +17,13 @@ GPU_JOB_MIN_FREE_GB=0 "$here/gpu-job.sh" "$t/rec1" bash -c 'echo "c=$(ulimit -c)
 [ "$rc" -eq 7 ] || fail "exit status $rc, expected 7"
 grep -q "^c=0 d=1 p=$t/rec1/gpucore.%p$" "$t/out" || fail "core settings: $(cat "$t/out")"
 for k in lock_acquired_utc start_utc end_utc "exit_status 7"; do grep -q "^$k" "$t/rec1/times.txt" || fail "times.txt lacks $k"; done
-for f in amd-smi-before amd-smi-after rocm-smi-before rocm-smi-after df-before df-after; do
+for f in amd-smi-before amd-smi-after rocm-smi-before rocm-smi-after df-before df-after meminfo-before meminfo-after; do
     [ -s "$t/rec1/$f.txt" ] || fail "missing $f.txt"
 done
 grep -q 'fake-smi process' "$t/rec1/amd-smi-before.txt" || fail "amd-smi not recorded"
+grep -q '^MemAvailable:' "$t/rec1/meminfo-after.txt" || fail "host meminfo not recorded"
+GPU_JOB_MEMINFO=$t/none GPU_JOB_MIN_FREE_GB=0 "$here/gpu-job.sh" "$t/rec7" true
+grep -q "^no $t/none$" "$t/rec7/meminfo-before.txt" || fail "missing meminfo not said"
 grep -q 'fake-smi --showmemuse --showpids' "$t/rec1/rocm-smi-after.txt" || fail "rocm-smi not recorded"
 for w in before after; do grep -q '^fake-smi status$' "$t/rec1/lease-status-$w.txt" || fail "lease status $w not recorded"; done
 GPU_LEASE_BIN=$t/none GPU_JOB_MIN_FREE_GB=0 "$here/gpu-job.sh" "$t/rec6" true

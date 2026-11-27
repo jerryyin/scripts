@@ -100,7 +100,7 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   idle). The name prefix, the wait and the inner lock are the caller's policy: a project keeps a thin
   wrapper that sets them (one user's lock only for a job on every GPU, a longer wait). `gpu-job.sh`
   is the step it runs inside the lease: core dumps off (CPU and GPU), a free-disk floor, `amd-smi`,
-  `rocm-smi`, `df` and `gpu-lease status` snapshots before and after (the lease status is the only
+  `rocm-smi`, `df`, `/proc/meminfo` and `gpu-lease status` snapshots before and after (the lease status is the only
   one that names other users' GPU processes from inside a container), and a SIGTERM from the lease
   passed to the command with the after-step still recorded. Variables, defaults and recorded files
   are in their headers. Both are one `main` function run by their last line, so a checkout that

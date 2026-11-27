@@ -13,6 +13,8 @@
 #   times.txt            UTC lock-acquired (wrapper start), command start, command end, exit status
 #   amd-smi-{before,after}.txt, rocm-smi-{before,after}.txt   GPU processes and memory
 #   df-{before,after}.txt                                    `df -B1 /` and `df -h /`
+#   meminfo-{before,after}.txt   the host's /proc/meminfo (GPU_JOB_MEMINFO): MemAvailable and Shmem show
+#                        when another tenant's memory leaves a large load too little host RAM
 #   lease-status-{before,after}.txt   `gpu-lease status` (GPU_LEASE_BIN, default /data/lock/gpu-lease):
 #                        every GPU's lease holder, note and processes, which amd-smi and rocm-smi cannot
 #                        name from inside this container's PID namespace
@@ -38,6 +40,7 @@ df_path=${GPU_JOB_DF_PATH:-/}
 amd_smi=${GPU_JOB_AMD_SMI:-amd-smi}
 rocm_smi=${GPU_JOB_ROCM_SMI:-rocm-smi}
 lease_bin=${GPU_LEASE_BIN:-/data/lock/gpu-lease}
+meminfo=${GPU_JOB_MEMINFO:-/proc/meminfo}
 
 stamp() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 echo "lock_acquired_utc $(stamp)" > "$rec/times.txt"
@@ -46,6 +49,7 @@ snapshot() {  # $1 = before|after
     { "$amd_smi" process 2>&1 || echo "amd-smi exit $?"; } > "$rec/amd-smi-$1.txt"
     { "$rocm_smi" --showmemuse --showpids 2>&1 || echo "rocm-smi exit $?"; } > "$rec/rocm-smi-$1.txt"
     { df -B1 "$df_path"; df -h "$df_path"; } > "$rec/df-$1.txt" 2>&1
+    cat "$meminfo" > "$rec/meminfo-$1.txt" 2>&1 || echo "no $meminfo" > "$rec/meminfo-$1.txt"
     if [ -x "$lease_bin" ]; then
         { "$lease_bin" status 2>&1 || echo "gpu-lease status exit $?"; } > "$rec/lease-status-$1.txt"
     else
