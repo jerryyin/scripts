@@ -10,7 +10,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | --- | --- |
 | `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`); the one against `0dd8d477` was this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682`, a commit no longer in this repository's history |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
-| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
+| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage, `--benchmark-json BJ --window PHASE/cB` to one phase x concurrency of an amd-tracking matrix run (windows of `../serving/e2e_decompose.py` `phase_windows`, e.g. `measured-1/c1`); `--self-test` runs without a GPU |
 | `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting only completed records |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
@@ -61,6 +61,51 @@ between replays. The markers' own cost inflates `graph_ms` (compare with an unin
 `overhead`), not `outside_graph_ms`. The older estimate stays in the report: `period_ms` (host wall time
 between sampled replays / replays between them, which also counts prefill forwards in between) and
 `host_gap_ms` = period - graph.
+
+### TP4 batch-1 decode at TokenSpeed 1be88db0 (canonical-tp4-fp8.json)
+
+The clone above, then amd-tracking's canonical TP4 server (`tokenspeed-dspark5-tp4ep1.sh`, KV cache fp8)
+and its matrix client, instrumented, on 4 GPUs. The configuration's matrix runs C = 1 2 4 8 16 (two
+warmup ladders, idle, three measured ladders); C=1 is taken from it by window. Emit the job (no GPU), then
+run it inside the host's GPU lease (`../../board/leased-job.sh` or the campaign's wrapper of it, which set
+`HIP_VISIBLE_DEVICES` to 4 GPUs) under `timed.sh`; the job's server and clients inherit the environment:
+
+```bash
+set -euo pipefail
+AT=/path/to/amd-tracking          # lightseekorg/amd-tracking at a6d1c527bcb624913d3e17d8705798d3c7e683c4
+TS=/path/to/tokenspeed            # the installed TokenSpeed checkout, clean at 1be88db0 (recorded by the job)
+MODEL_PATH=/path/to/DeepSeek-V4.1-Flash-1017
+OUT=$PWD/tp4-c1-step-timing; mkdir -p "$OUT"
+python3 "$AT/skills/inference_engine/benchmark/scripts/manage_server.py" run \
+  --config "$AT/apps/inference_engine_benchmark/config/serving/deepseek-v4.1-flash/canonical-tp4-fp8.json" \
+  --client canonical-L50000-O500 --emit-job "$OUT/job.sh" --run-dir "$OUT/run" \
+  --model-path "$MODEL_PATH" --tokenspeed-source "$TS" --client-venv "$OUT/evalscope-venv"
+# inside the GPU lease (HIP_VISIBLE_DEVICES = 4 GPUs):
+TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=200000 \
+  ./timed.sh "$OUT/step-timing" -- bash "$OUT/job.sh"
+```
+
+`STRIDE=40` times target layer 0 and DSpark stage 0 (about 44 markers per step), the least perturbing
+setting; `MAX_RECORDS` is per process (each TP rank) and must cover every sampled replay up to the last
+measured C=1 point, which comes after both warmup ladders (the default 4000 can stop recording before it;
+a C=1 request of 500 output tokens at 3.5 accepted tokens per step is about 140 replays). Then per
+measured repetition r:
+
+```bash
+for r in 1 2 3; do
+  python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown/measured-$r-c1" --skip 0 \
+    --benchmark-json "$OUT/run/canonical-L50000-O500/tokenspeed/benchmark.json" --window "measured-$r/c1"
+  python3 step_breakdown.py table "$OUT/breakdown/measured-$r-c1" "$OUT/step-timing" --label "TP4 C=1 measured-$r" \
+    --json "$OUT/breakdown/measured-$r-c1/table.json" > "$OUT/breakdown/measured-$r-c1/table.md"
+done
+python3 ../serving/e2e_decompose.py --log "$OUT/run/server.stderr.log" \
+  --benchmark-json "$OUT/run/canonical-L50000-O500/tokenspeed/benchmark.json" --decode-log-interval 40
+```
+
+The last command gives the serving step at C=1 from the same server log (round time = Decode-line gap / 40)
+to set beside `graph_ms` and `next_begin_ms`. An uninstrumented run of the same job (without `timed.sh`)
+gives the clean step for `--clean-ms` and `overhead`. All TP ranks replay the same graph; every rank's
+row is reported (the ranks are all `busy` at C=1).
 
 Serve a layout recipe instrumented. The server flags come from amd-tracking's recipe
 (`$AT/apps/inference_engine_benchmark/recipes/<model>/`, e.g.

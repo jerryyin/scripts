@@ -119,6 +119,17 @@ def load(dirpath):
     return ranks
 
 
+def matrix_window(benchmark_json, name):
+    """(start, end) epoch seconds of one phase x concurrency window of an amd-tracking matrix run, by the
+    serving owner's phase_windows (tokenspeed/serving/e2e_decompose.py)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "serving"))
+    from e2e_decompose import phase_windows
+    windows = {n: (t0, t1) for n, _, t0, t1 in phase_windows(benchmark_json, per_concurrency=True)}
+    if name not in windows:
+        raise SystemExit(f"{benchmark_json}: no window {name!r}; windows: {sorted(windows)}")
+    return windows[name]
+
+
 def stage_window(path, selected=False):
     """Decode window (epoch s) of one retained-KV stage: after its prefill request, to its finish.
 
@@ -399,12 +410,17 @@ if __name__ == "__main__":
     ap.add_argument("--stage-selected", action="store_true",
                     help="with --stage-json: keep only the harness's selected decode forwards (the steps of its "
                     "decode_gpu_mean_ms), not the whole request window with the stage's smaller-batch tail")
+    ap.add_argument("--benchmark-json", help="amd-tracking EvalScope matrix benchmark.json: keep records in the window "
+                    "--window names (tokenspeed/serving/e2e_decompose.py phase_windows, e.g. measured-1/c1)")
+    ap.add_argument("--window", help="with --benchmark-json: PHASE or PHASE/cB window name")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         sys.exit(self_test(a.out))
     if a.stage_json:
         a.wall_from, a.wall_to = stage_window(a.stage_json, a.stage_selected)
+    elif a.benchmark_json:
+        a.wall_from, a.wall_to = matrix_window(a.benchmark_json, a.window)
     analyze(a.dir, a.out, a.skip, a.bs, a.layers, a.wall_from, a.wall_to,
             None if a.busy_ranks is None else {int(x) for x in a.busy_ranks.split(',') if x})
     print(open(os.path.join(a.out, "report.md")).read())

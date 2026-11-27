@@ -106,6 +106,18 @@ def test_table_graph_span_vs_serving_step() -> None:
         assert "GPU outside the graph" not in sb.table_markdown(t)
 
 
+def test_matrix_window_from_benchmark_json() -> None:
+    import analyze_step_timing as ast
+    bj = {"results": [{"phase": p, "concurrency": c, "output_dir": f"{p}/c{c}",
+                       "started_at": f"2026-11-28T01:00:{10 * i:02d}.5Z", "finished_at": f"2026-11-28T01:00:{10 * i + 9:02d}Z"}
+                      for i, (p, c) in enumerate((("warmup-1", 1), ("measured-1", 1), ("measured-1", 2)))]}
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "benchmark.json"
+        path.write_text(json.dumps(bj))
+        t0, t1 = ast.matrix_window(str(path), "measured-1/c1")
+        assert t1 - t0 == 8.5 and int(t0) % 60 == 10
+
+
 def test_draft_markers_counted_apart() -> None:
     assert sb.marker_name("0:moe.experts") == "moe.experts"
     assert sb.marker_name("1000:moe.experts") == "draft:moe.experts"
