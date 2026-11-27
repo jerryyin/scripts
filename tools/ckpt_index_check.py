@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Checkpoint completeness against model.safetensors.index.json, from stat and safetensors headers only.
+"""Check a safetensors checkpoint: completeness against its index (stat and headers), optionally identity with a Hub revision.
 
-ckpt_index_check.py [--split-bytes] [--by-pattern] [--json] [--hub-repo REPO [--hub-revision REV] [--hash-shards] [--jobs N]
-                    [--sample N] [--sample-shard NAME]... [--seed S]] CHECKPOINT...
+ckpt_index_check.py [--split-bytes] [--by-pattern] [--json] [--hub-repo REPO [--hub-revision REV] [--hub-endpoint URL]
+                    [--hash-shards] [--jobs N] [--sample N] [--sample-shard NAME]... [--seed S]] CHECKPOINT...
 
 For each checkpoint directory (a Hugging Face snapshot's symlinks are followed): the index's shard count and
 tensor count, shards named by the index that are missing or empty, *.safetensors files the index does not
@@ -10,7 +10,8 @@ name (extra), the bytes of the shard files against the index's metadata.total_si
 hold their JSON headers, so they exceed total_size by the header bytes). With --split-bytes it reads only
 each shard's header (an 8-byte little-endian length, then that much JSON; never tensor data) and sums the
 tensor data bytes by kind:
-  mtp            a layer at or beyond config.json num_hidden_layers (text_config's when nested), or a tensor
+  mtp            a layer at or beyond config.json num_hidden_layers (text_config's or language_config's when
+                 nested), or a tensor
                  name with an `mtp` or `nextn` component: the multi-token-prediction draft layer, whole;
   shared_expert  a name with a shared_expert(s) component;
   routed_expert  a name with an `experts` component;
@@ -22,13 +23,13 @@ of its first tensor: the input a per-rank memory budget needs (which family is s
 
 With --hub-repo it also checks the checkpoint's identity against a Hugging Face Hub repo revision without
 downloading the repo: it lists the revision with the Hub API (?blobs=true) and, for every file present on
-both sides, compares the size and the content identity the Hub records (the LFS sha256 for LFS files, the git
+both sides (local files are walked recursively, skipping __pycache__ and a top-level .cache), compares the size and the content identity the Hub records (the LFS sha256 for LFS files, the git
 blob SHA-1 of the bytes for the rest; the local side is hashed, *.safetensors only with --hash-shards, which
 reads every shard). It fetches each common shard's safetensors header with HTTP Range requests and compares it
 with the local header, and for each --sample-shard byte-compares --sample tensors (the smallest min(4, N),
 then a --seed'ed random choice of the rest; at most the first 64 MiB of each) over HTTP Range. A file inside
 a Hugging Face cache snapshot also reports the cache blob it links to, the identity the download recorded
-(not a hash of the bytes). HF_TOKEN, when set, is sent for gated repos; without it a gated or missing repo
+(not a hash of the bytes). HF_TOKEN (or HUGGING_FACE_HUB_TOKEN), when set, is sent for gated repos; without it a gated or missing repo
 is reported as an error, not a crash. The endpoint is HF_ENDPOINT or https://huggingface.co.
 
 Exit status 0 when every checkpoint has its index and every indexed shard exists and is nonempty (and, with
