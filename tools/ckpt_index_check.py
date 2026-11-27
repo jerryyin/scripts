@@ -143,9 +143,8 @@ def check(checkpoint: Path, split: bool, by_pattern: bool = False) -> dict:
         sizes[shard] = size
         if size == 0:
             empty.append(shard)
-    extra = sorted(
-        p.name for p in checkpoint.glob("*.safetensors") if p.name not in set(shards)
-    )
+    indexed = set(shards)
+    extra = sorted(p.name for p in checkpoint.glob("*.safetensors") if p.name not in indexed)
     shard_bytes = sum(sizes.values())
     result.update(
         shards=len(shards),
@@ -331,6 +330,7 @@ def hub_identity(
         hub = {s["rfilename"]: s for s in meta["siblings"]}
         local = local_files(checkpoint)
         common = sorted(set(hub) & set(local))
+        only_hub, only_local = sorted(set(hub) - set(local)), sorted(set(local) - set(hub))
         shards = [n for n in common if n.endswith(".safetensors")]
         to_hash = [n for n in common if not n.endswith(".safetensors") or hash_shards]
 
@@ -345,9 +345,11 @@ def hub_identity(
             lfs = entry.get("lfs") or {}
             want = lfs.get("sha256") or entry.get("blobId")
             blob = cache_blob(local[name])
+            local_size, hub_size = local[name].stat().st_size, entry.get("size", lfs.get("size"))
             files[name] = {
-                "local_size": local[name].stat().st_size,
-                "hub_size": entry.get("size", lfs.get("size")),
+                "local_size": local_size,
+                "hub_size": hub_size,
+                "size_equal": local_size == hub_size,
                 "id_kind": "lfs-sha256" if lfs else "git-blob-sha1",
                 "hub_id": want,
                 "local_id": ids.get(name),
@@ -355,7 +357,6 @@ def hub_identity(
                 "cache_blob": blob,
                 "cache_blob_equal": None if blob is None else blob == want,
             }
-            files[name]["size_equal"] = files[name]["local_size"] == files[name]["hub_size"]
         url = lambda name: f"{endpoint}/{quote(repo)}/resolve/{resolved}/{quote(name)}"  # noqa: E731
         with ThreadPoolExecutor(max(1, jobs)) as pool:
             remote = dict(
@@ -391,8 +392,8 @@ def hub_identity(
         return doc
     summary = {
         "common": len(common),
-        "only_hub": len(set(hub) - set(local)),
-        "only_local": len(set(local) - set(hub)),
+        "only_hub": len(only_hub),
+        "only_local": len(only_local),
         "size_equal": sum(v["size_equal"] for v in files.values()),
         "id_checked": sum(v["id_equal"] is not None for v in files.values()),
         "id_equal": sum(bool(v["id_equal"]) for v in files.values()),
@@ -406,8 +407,8 @@ def hub_identity(
     doc.update(
         revision=resolved,
         last_modified=meta.get("lastModified"),
-        only_hub=sorted(set(hub) - set(local)),
-        only_local=sorted(set(local) - set(hub)),
+        only_hub=only_hub,
+        only_local=only_local,
         sample_shards_not_found=sorted(set(sample_shards) - set(shards)),
         files=files,
         headers_equal=headers,
