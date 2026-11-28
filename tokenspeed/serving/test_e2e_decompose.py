@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from log_fixtures import batch, evalscope_db, finish, ts  # noqa: E402,F401
+from log_fixtures import agentic_c1, batch, evalscope_db, finish, ts  # noqa: E402,F401
 
 
 def load(rel: str):
@@ -275,6 +275,30 @@ def test_aiperf_window_is_the_profiling_phase() -> None:
                                                        "request_end_ns": 12_000_000_000}}]
         p.write_text("".join(json.dumps(r) + "\n" for r in recs) + "\n")
         assert e2e.aiperf_window(str(p)) == (4.0, 9.25)
+
+
+def test_agentic_c1_window_places_short_turns_and_client_gaps() -> None:
+    """AgentX at C=1 on one rank (Finish lines with Accept_num_tokens_avg only): with the AIPerf window, a
+    short turn's Prefill -> next Prefill gap and a long turn's last Decode -> next Prefill gap end decode at
+    the turn's Finish line, so prefill is the chunks, decode the rounds and the client gaps idle; the only
+    loss is the last turn's rounds after its last Decode line (no RequestStats token counts for a tail)."""
+    e2e = load("e2e_decompose.py")
+    lines, recs, truth = agentic_c1(1_800_000_000.0)
+    with tempfile.TemporaryDirectory() as d:
+        log, pe = Path(d) / "server.log", Path(d) / "profile_export.jsonl"
+        log.write_text("".join(lines))
+        pe.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        win = e2e.aiperf_window(str(pe))
+        assert win == truth["window"]
+        y = e2e.decompose(str(log), window=win)["ranks"]["0"]
+        tail = 10 * truth["decode_step_s"]  # last turn: 250 rounds, Decode lines every 40
+        assert abs(y["prefill_time_s"] - truth["prefill_s"]) < 1e-4
+        assert abs(y["decode_time_s"] - (truth["decode_s"] - tail)) < 1e-4
+        assert abs(y["idle_between_waves_s"] - 33.5) < 1e-4  # the client gaps after every Finish
+        assert y["prefill_stalls"]["n_gaps_gt_2x_median"] == 0 and y["chunk_time_s"]["n"] == 4
+        st = e2e.step_table(str(log), 40, win)["ranks"]["0"]
+        assert {k: (v["n"], round(v["step_ms_median"], 3)) for k, v in st["clean_steps"].items()} == {
+            "bs1/256k-512k": (9, 10.66), "bs1/512k-1024k": (22, 10.66)}
 
 
 if __name__ == "__main__":
