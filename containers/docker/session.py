@@ -44,7 +44,8 @@ def models_directory(environment: dict[str, str], vault: Path, root: Path) -> Pa
 
 
 def gpu_lock_directory(environment: dict[str, str], root: Path) -> Path:
-    """Return the host directory to mount at /data/lock, where board/gpu-lock and gpu-wait.py look.
+    """Return the host directory to mount at /data/lock: the host's shared GPU locks (gpu-lease and its
+    per-GPU gpu-<N>.lock files where the host has them, and the amd-gpu.lock board/gpu-lock reads).
 
     A host without a shared lock directory gets a private one in the role directory.
     """

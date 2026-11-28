@@ -8,9 +8,10 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 
 | File | Role |
 | --- | --- |
-| `instrumentation.diff` | The patch, against TokenSpeed `e8fd096ed80112d6108725bad1fbdc3accb0a559` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the earlier version against `0dd8d477` is this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682` |
+| `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`) |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
-| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown; `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage; `--self-test` runs without a GPU |
+| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage, `--benchmark-json BJ --window PHASE/cB` to one phase x concurrency of an amd-tracking matrix run (windows of `../serving/e2e_decompose.py` `phase_windows`, e.g. `measured-1/c1`); `--self-test` runs without a GPU |
+| `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting (`SYNC=1`: a sampled replay or eager step is read before the next one re-records its markers; `SYNC=0`: only completed records, markers not completed written as `null`), and the analyzer on such dumps |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
 
@@ -18,11 +19,112 @@ Make the patched copy in a clone (never a worktree or an edit of the checkout yo
 the clone commits the patch so harnesses that refuse dirty trees record the instrumented commit):
 
 ```bash
-git clone --quiet "$TS_SRC" "$INSTR" && git -C "$INSTR" checkout --quiet --detach e8fd096ed80112d6108725bad1fbdc3accb0a559
+set -euo pipefail
+TS_SRC=https://github.com/lightseekorg/tokenspeed.git   # or a local TokenSpeed checkout holding the commit
+INSTR=$PWD/tokenspeed-step-timing                       # a new clone, outside the checkout you serve from
+git clone --quiet "$TS_SRC" "$INSTR"
+# 1be88db0 is on branch users/jerryyin/ep8-vs-tp8-mi355-dev, not the default branch: fetch it by hash
+git -C "$INSTR" fetch --quiet origin 1be88db0a7b020d1cc45241eb02935c03d692335
+git -C "$INSTR" checkout --quiet --detach 1be88db0a7b020d1cc45241eb02935c03d692335
 git -C "$INSTR" apply --check "$PWD/instrumentation.diff" && git -C "$INSTR" apply "$PWD/instrumentation.diff"
 git -C "$INSTR" add -A && git -C "$INSTR" -c user.name=step-timing -c user.email=step-timing@localhost \
   commit --quiet -m "step-timing instrumentation"
+(cd "$INSTR" && git diff --name-only HEAD~1 | PYTHONPYCACHEPREFIX="$(mktemp -d)" xargs -n1 python3 -m py_compile)
 ```
+
+Run it from this directory (`$PWD/instrumentation.diff`). The `tokenspeed-kernel/python` tree of the clone
+holds no build products; the compiled scheduler, engine and kernel extensions still come from the
+installed TokenSpeed, which must be the same commit (`1be88db0`), so the patched Python matches them.
+
+### Settings (`timed.sh` environment)
+
+| `timed.sh` | patched module reads | default | what it does |
+| --- | --- | --- | --- |
+| `STRIDE` | `TS_STEP_TIMING_LAYER_STRIDE` | 1 | **Which layers carry markers**, not which replays are sampled: `mark()` records the per-layer markers only in layers whose id % `STRIDE` == 0 (target layers and DSpark draft stages, each by its own id, a draft stage recorded as id + 1000), plus the five step-level markers (`model.begin`, `final`, `model.end`, `draft.begin`, `draft.end`). The choice is made when the decode graph is captured, so every replay of the graph, sampled or not, runs those markers and pays their cost |
+| `EVERY` | `TS_STEP_TIMING_EVERY` | 4 | **Which replays are sampled**: the hook counts every graph replay that passes through it (`before_replay`, instrumented or not) and every timed eager decode of the process, and samples the call whose count is a multiple of `EVERY` when it replays an instrumented decode graph: it records begin/end events around it, the next forward's begin, and writes one record. `EVERY=4` samples 1 replay in 4 |
+| `MAX_RECORDS` | `TS_STEP_TIMING_MAX_RECORDS` | 4000 | records per process (each TP rank); no replay is sampled after it |
+| `SYNC` | `TS_STEP_TIMING_SYNC` | 1 | 1: the forward after a sampled replay waits for it, so its marker times are its own (below); 0: never waits, only the graph-replay split is exact |
+| `EAGER` | `TS_STEP_TIMING_EAGER` | 0 | 1: also time eager decode forwards (each one sampled; pass `--enforce-eager` to `ts serve` yourself) |
+
+So `STRIDE=40 EVERY=4` times target layer 0 and draft stage 0 in every replay and writes every fourth
+replay; it is not "1 replay in 40".
+
+### Graph-replay span against the serving step (host gap)
+
+Each sampled decode-graph replay records, besides its markers:
+
+| field | what |
+| --- | --- |
+| `graph_ms` | GPU time of the replay: event before `graph.replay()` (DSpark: `drafter.replay_decode_graph`) to event after it, so it holds the target verify and, with DSpark, the draft round in the same graph |
+| `next_begin_ms`, `next_kind` | GPU time from this replay's start to the start of the next forward, and that forward's kind: `replay` (the next decode-graph replay), `eager` (a timed eager decode) or `other` (a prefill/mixed forward or another graph) |
+| `outside_graph_ms` | `next_begin_ms - graph_ms`: GPU time between the end of this replay and the start of the next forward, i.e. kernels launched outside the graph (input preparation, adaptive DSpark verify-budget graphs, sampling or output copies outside the graph) plus GPU idle while the host prepares the next step |
+| `host_step_ms`, `launch_ms` | host wall time between this replay call and the next forward's, and the host time of the replay call itself |
+
+The marker events are nodes of the captured graph, so **every** replay of that graph re-records them,
+not only the sampled ones (an eager step likewise records the same pool events again): a sampled
+replay's markers must be read before the next replay of its graph (or the next timed eager decode) is
+launched. `SYNC=1` (`TS_STEP_TIMING_SYNC`, the default) does that: the forward after a sampled one
+first waits for it (the host loses its run-ahead once every `EVERY` replays, which moves the serving
+step only where the host runs ahead of the GPU; the analyzer's `harvest cost` is that wait). `SYNC=0`
+never waits: records are written once `next_begin` completed (`event.query()`), so `graph_ms`, `next_begin_ms`, `outside_graph_ms`,
+`host_step_ms` and `launch_ms` (fresh events per sample) stay exact, but the marker times are those of
+a later replay, and the markers it has not reached yet are written as `null` and listed in the
+record's `incomplete` (reading them with `elapsed_time` would raise "Both events must be completed
+before calculating elapsed time"). Each `seq` record carries `sync` (1 or 0). The analyzer fills an
+incomplete marker with the previous marker's time and, per rank, counts the analysed records with incomplete markers and warns
+about records dumped with `SYNC=0`, whose bucket and category tables do not describe the sampled step;
+use `SYNC=0` only for the graph-replay split below. The analyzer's report gives, per rank, the median
+[p10, p90] of the GPU step, graph span, outside-graph time,
+host step and replay call over the steps whose next forward was a decode replay (`next_kind` `replay`),
+and `summary.csv` their medians (`gpu_step_ms`, `outside_graph_ms`, `host_step_ms`, `launch_ms`,
+`split_n`); `step_breakdown.py table` prints them as rows. Reading: `graph_ms` close to the serving step
+(Decode-line gap / rounds per line, `../serving/e2e_decompose.py --step-table`) with a small
+`outside_graph_ms` means the step is GPU time inside the graph (the component table says where);
+a large `outside_graph_ms` with `host_step_ms` close to `next_begin_ms` means the GPU waits for the host
+between replays. The markers' own cost inflates `graph_ms` (compare with an uninstrumented step,
+`overhead`), not `outside_graph_ms`. The older estimate stays in the report: `period_ms` (host wall time
+between sampled replays / replays between them, which also counts prefill forwards in between) and
+`host_gap_ms` = period - graph.
+
+### An amd-tracking serving job, analysed per matrix window
+
+Emit the job of an amd-tracking serving configuration (`$AT/apps/inference_engine_benchmark/config/serving/<model>/`,
+no GPU), then run it under `timed.sh` inside the host's GPU lease (`../../board/leased-job.sh` or the
+campaign's wrapper of it, which set `HIP_VISIBLE_DEVICES`); the job's server and clients inherit the
+environment. `TS` is the installed TokenSpeed checkout, clean at the patch's commit (the job records it):
+
+```bash
+set -euo pipefail
+OUT=$PWD/step-timing-run; mkdir -p "$OUT"
+python3 "$AT/skills/inference_engine/benchmark/scripts/manage_server.py" run \
+  --config "$AT/apps/inference_engine_benchmark/config/serving/$MODEL/$CONFIG.json" \
+  --client "$CLIENT" --emit-job "$OUT/job.sh" --run-dir "$OUT/run" \
+  --model-path "$MODEL_PATH" --tokenspeed-source "$TS" --client-venv "$OUT/evalscope-venv"
+# inside the GPU lease:
+TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=$MAX_RECORDS SYNC=1 \
+  ./timed.sh "$OUT/step-timing" -- bash "$OUT/job.sh"
+```
+
+`MAX_RECORDS` is per process (each TP rank) and must cover every sampled replay up to the end of the
+last window you analyse, warmup phases included: about the decode steps run until then / `EVERY`, where
+a request's decode steps are its output tokens / accepted tokens per step. The default 4000 can stop
+recording before a late window. Then per phase x concurrency window of the matrix's `benchmark.json`
+(`PHASE/cB`, e.g. `measured-1/c1`):
+
+```bash
+BJ=$OUT/run/$CLIENT/tokenspeed/benchmark.json
+python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown/$WINDOW" --skip 0 \
+  --benchmark-json "$BJ" --window "$WINDOW"
+python3 step_breakdown.py table "$OUT/breakdown/$WINDOW" "$OUT/step-timing" --label "$WINDOW" \
+  --json "$OUT/breakdown/$WINDOW/table.json" > "$OUT/breakdown/$WINDOW/table.md"
+python3 ../serving/e2e_decompose.py --server-log "$OUT/run/server.stderr.log" --benchmark-json "$BJ" \
+  --slices-dir "$OUT/slices" --decode-log-interval "$DECODE_LOG_INTERVAL" --out-json "$OUT/e2e.json"
+```
+
+The last command gives the serving step of each window from the same server log (round time =
+Decode-line gap / rounds per Decode line) to set beside `graph_ms` and `next_begin_ms`. An uninstrumented
+run of the same job (without `timed.sh`) gives the clean step for `--clean-ms` and `overhead`. Every TP
+rank replays the same graph; every rank's row is reported.
 
 Serve a layout recipe instrumented. The server flags come from amd-tracking's recipe
 (`$AT/apps/inference_engine_benchmark/recipes/<model>/`, e.g.
@@ -59,15 +161,14 @@ INSTR=$INSTR STRIDE=40 ./timed.sh "$OUT/step-timing" -- \
   --token-corpus-metadata "$BANK/input.json" --execute
 ```
 
-The harness's job sets the engine's `PYTHONPATH` itself (`tiered_benchmark.py`, `source_pythonpath`):
-from amd-tracking `a7c0557` on it is `$INSTR/python:$INSTR/tokenspeed-kernel/python`, so the Gluon
-Petit `mega_moe.py` stage markers in `tokenspeed-kernel/` are timed there too (before that commit only
-`$INSTR/python` was on the path and the kernel package came from the editable install, so only the
-python-level markers fired). `tokenspeed-kernel/python` holds no build products at e8fd096e; it imports
-from a clone. `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
+The harness's job sets the engine's `PYTHONPATH` itself (`tiered_benchmark.py`, `source_pythonpath`) to
+`$INSTR/python:$INSTR/tokenspeed-kernel/python`, so the Gluon Petit `mega_moe.py` stage markers in
+`tokenspeed-kernel/` are timed there too (amd-tracking `a7c0557` or later; an older harness puts only
+`$INSTR/python` on the path, the kernel package then comes from the editable install and only the
+python-level markers fire). `timed.sh`'s own `PYTHONPATH` reaches `ts serve` on the `manage_server.py` route; under
 the harness only the `TS_STEP_TIMING_*` variables pass through (the engine inherits the environment).
 
-Markers (main stream unless noted), each at the same logical boundary as in the 0dd8d477 version:
+Markers (main stream unless noted):
 `model.begin` (before the encoder), `engram` / `layer` (per decoder layer, before Engram / mHC
 pre-attention), `attn` (attention call), `attn.fork`, `attn.kvidx.b` .. `attn.kvidx.e` (compressor /
 KV write / indexer branch, aux stream when overlapped), `attn.q` (q projection after the branch),
@@ -77,29 +178,48 @@ Petit the whole `kernel_moe_apply`: activation MXFP4 quantize, route copies, the
 (stage 1: dispatch wait + gate/up), `petit.s2` (down), `petit.comb` (combine), `petit.post` (return)),
 `shared.b` .. `shared.e` (shared expert; on the main stream under Petit, which runs it serially after
 the routed call), `moe.join`, `ffn.end`, `final` (final norm), `model.end` (head, sampling, outputs,
-and with DSpark the draft round inside the same graph). New at e8fd096e: the replay is timed when a
-drafter replays the decode graph (DSpark), and the DSpark draft model marks `draft.begin` /
+and with DSpark the draft round inside the same graph). The replay is also timed when a DSpark
+drafter replays the decode graph, and the DSpark draft model marks `draft.begin` /
 `draft.end` around its block forward with its stages recorded as layer id + 1000
 (`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as `draft:<category>`. The Petit MoE of
 one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
 shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
 
+The markers cover every DeepSeek V4.1 decode path of the layouts the recipes serve:
+attention (TP, attention DP) in `DeepseekV41Attention`, where `attn.fork` .. `attn.kvidx.e` bracket the
+compressor / KV write / indexer branch and `attn.wo` includes the output projection and, without the
+deferred mHC all-reduce fusion, the attention all-reduce (with it, the all-reduce falls in `hc_ffn`); the
+MoE `forward_normal` path used by MoE TP (`tokenspeed-dspark5-tp4ep1.sh`, `canonical-tp4-fp8.json`) and
+EP/Petit: `ffn` (pre-MoE communication, none under TP) -> `moe.router` -> `moe.experts` (the routed-expert
+call, whatever the backend) with `shared.b` .. `shared.e` around the shared expert (aux stream when
+captured) -> `moe.join` (routed + shared add and the post-MoE all-reduce under TP) -> `ffn.end`; the
+MegaMoE path (`forward_mega_moe`) and the Gluon Petit TP-attention path (`_forward_petit_tp_attention`) with the same five markers; the Petit fused-post path (`TOKENSPEED_PETIT_FUSE_POST`) has
+`shared.b`/`shared.e` but no `moe.join` (the add is in Petit's combine, which ends at `petit.post`). The
+idle-rank (no local rows) branch of attention DP marks `model.begin` / `model.end` only. DSpark: `draft.begin`
+/ `draft.end` around `DeepseekV41DSparkModel.forward_backbone` with its stages' attention and MoE markers
+recorded as layer id + 1000. Not marked: the decode index-geometry builds the model
+issues on the auxiliary stream at `model.begin` (joined before `model.end`) and the adaptive-verify-budget
+graphs a DSpark drafter captures beside the decode graph (`capture_round_graphs`) and replays outside it.
+
 `STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
 0..39, none dense or hash-routed) and 3 DSpark stages (ids 0..2), so `STRIDE=40` times target layer 0
-and draft stage 0 (2 of 43 MoE layers; about 44 markers per step: 20 per target layer, up to 19 per draft stage, 5 step-level), `STRIDE=20` times 2 + 1,
-`STRIDE=1` all 43. `share` projects the instrumented layers' Petit time to 40 + 3 layers. Then:
+and draft stage 0 (2 of 43 MoE layers; up to 44 markers per step: 20 per target layer, up to 19 per
+draft stage, 5 step-level; under MoE TP the four `petit.*` markers of each timed layer and stage do not
+fire, and `attn.kvidx.b` .. `attn.kvidx.e` and `shared.b` .. `shared.e` are on the aux stream when
+overlapped; `step_breakdown.py table` prints a dump's markers per step and main-stream markers),
+`STRIDE=20` times 2 + 1, `STRIDE=1` all 43. `share` projects the instrumented layers' Petit time to 40 + 3 layers. Then:
 
 ```bash
 python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown"
-python3 step_breakdown.py table "$OUT/breakdown" "$OUT/step-timing" --label "EP4 B=1" --clean-ms 15.55 --json ep4.json
+python3 step_breakdown.py table "$OUT/breakdown" "$OUT/step-timing" --label "$LABEL" --clean-ms "$CLEAN_GPU_MS" --json table.json
 ```
 
 Per retained-KV stage (one batch x repetition), `--stage-json` restricts the analysis to the stage's
 decode window, and `share` appends the Petit share rows; `range_compare.py summarize` gives the share's
 median and range over repetitions. Add `--stage-selected`: without it the window is the stage's whole
 request window (end of its prefill request to its finish), which also holds the stage's tail, where
-the last requests finish at a smaller batch; at global batch 32 those 1-request steps outnumbered the
-full-batch ones on one rank and the medians described another point. `--stage-selected` keeps the
+the last requests finish at a smaller batch; those steps can outnumber the full-batch ones on a rank,
+and the medians then describe another point. `--stage-selected` keeps the
 harness's selected decode forwards only (stage.json `selected_decode_indices_by_rank`, their
 `wall_unix` in the attempt's `forwards-rank<r>.jsonl`, plus one step period), the same steps the
 harness's `decode_gpu_mean_ms` is taken over:

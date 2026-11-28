@@ -8,22 +8,46 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
   "Prefill" | "Mix" | "Decode"  from `ts_control::batch_log` lines, with the fields of FIELD_RES
                                 that are present ("dp_rank" defaults to 0 for single-rank logs);
   "Finish"                      from `Req: RID Finish! RequestStats(...)`, with "rid" and "stats"
-                                (numbers as int/float, quoted strings unquoted, None as None).
+                                (numbers as int/float, quoted strings unquoted, None as None), or from
+                                `Req: RID Finish! Accept_num_tokens_avg: X` with stats {"acc_len": X}.
 LogTail follows a growing log from its current end.
-dp_spread(events, windows) counts new sequences per attention-DP rank ("#new-seq" of "Prefill batch."
-lines) inside each named time window [start, end).
+dp_spread(events, windows) sums "#new-seq" of "Prefill batch." lines per attention-DP rank inside each
+named time window [start, end) (in_windows); dp_tokens(events, windows) sums the Prefill and Mix lines'
+tokens and line counts the same way (--tokens below).
+
+What the batch-line fields count (TokenSpeed tokenspeed-engine/crates/ts-control/src/batch_log.rs, the same
+from 1be88db0 to 377b44e4): a line is written per dispatched round that holds extend (prefill) rows,
+"Prefill" when every row extends, "Mix" when decode rows ride along. "#new-seq" is the round's extend rows,
+so a prompt chunked over k rounds counts k times; "#new-token" is the tokens every row feeds the round
+(extend chunks plus, on a Mix line, the decode rows' tokens); "#cached-token" is the prefix-cache tokens
+ahead of the extend rows the rank logs for the first time (a request's first chunk), 0 for later chunks.
+The lines carry no request id, so requests per rank cannot be counted exactly from them.
 
 usage: batch_log.py LOG   prints the count of each kind (a quick check that a log parses)
        batch_log.py dp-spread LOG --window NAME=START[,END] [--window ...] [--json]
-           new sequences per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
+                    [--tokens [--requests NAME=N ...]]
+           new-sequence rows per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
            is given, e.g. 2026-11-12T23:05:00Z); a window without START counts nothing, one without END
-           runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window.
+           runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window. K is the sum of
+           "#new-seq" over Prefill lines, i.e. prefill rows, not requests: a chunked prompt counts once
+           per chunk (over-counting), and a request whose chunks all ran in Mix rounds is not counted
+           (under-counting). It shows how evenly placement spread prefill work, not request counts.
+           --tokens adds dp_tokens per window and rank (and "all") over its Prefill and Mix lines: new_seq
+           (as above) and mix_new_seq (#new-seq of Mix lines), prefilled (#new-token: prompt tokens
+           computed, plus the decode rows' tokens on Mix lines) and cached (#cached-token: prompt tokens
+           served from the prefix cache), cached_share = cached / (cached + prefilled) (a lower bound of
+           the prompt tokens' cache share, as prefilled includes those decode tokens), and the line counts
+           prefill_lines, mix_lines and hit_lines (lines with #cached-token > 0), i.e. whether later turns
+           of a session reach the rank that holds their prefix. --requests NAME=N (a window's request
+           count from the client, e.g. AIPerf's profiled requests) adds prefilled and cached tokens per
+           request on that window's "all" row. With --json the output is {"spread": ..., "tokens": ...}.
        batch_log.py prefill LOG [LOG ...] (--benchmark-json BJ | --window NAME=START,END ...
                     --prompt-tokens L --requests B) [--chunk-cost] [--tail] [--out-json PATH]
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
            read from the server log. Windows come from an amd-tracking run_evalscope_matrix.py
            benchmark.json (each result's started_at/finished_at; L = prompt_tokens, B = concurrency;
-           points are named PHASE/cB when the matrix repeats a phase name across concurrencies)
+           once any phase name repeats, as the matrix repeats them across concurrencies, every point
+           is named PHASE/cB, a phase that does not repeat included)
            or from --window. Per point and attention-DP rank: Prefill/Mix chunks, prefill tokens,
            requests (tokens / L), chunk time (median of same-rank Prefill->Prefill line gaps, i.e.
            round-dispatch to next round-dispatch), p10/p90, by chunk size, prefill span and tok/s.
@@ -65,6 +89,10 @@ FIELD_RES = {
 }
 KIND_RE = re.compile(r"\b(Prefill|Mix|Decode) batch\.")
 FINISH_RE = re.compile(r"Req: (\S+) Finish! RequestStats\((.*)\)")
+# TokenSpeed builds whose Finish! line carries only the request's mean accepted tokens per verify step
+# (e.g. 1be88db0: "Req: RID Finish! Accept_num_tokens_avg: 3.4"); parsed as a Finish event whose stats
+# hold only "acc_len" (0 for a request that never ran a verify step, e.g. one output token).
+FINISH_ACC_RE = re.compile(r"Req: (\S+) Finish! Accept_num_tokens_avg: ([-+]?\d+(?:\.\d+)?)")
 STAT_RE = re.compile(r"(\w+)=('[^']*'|[^,()]+)")
 
 
@@ -109,7 +137,8 @@ def parse_line(raw):
     line = ANSI.sub("", raw.rstrip("\n"))
     m = KIND_RE.search(line)
     fm = FINISH_RE.search(line)
-    if not m and not fm:
+    fa = None if (m or fm) else FINISH_ACC_RE.search(line)
+    if not m and not fm and not fa:
         return None
     ts, sub, tzx = parse_ts(line)
     ev = {"ts": ts, "subsec": sub, "tz_explicit": tzx, "line": line}
@@ -121,10 +150,14 @@ def parse_line(raw):
                 v = mm.group(1)
                 ev[k] = float(v) if "." in v else int(v)
         ev.setdefault("dp_rank", 0)
-    else:
+    elif fm:
         ev["kind"] = "Finish"
         ev["rid"] = fm.group(1)
         ev["stats"] = {k: stat_value(v) for k, v in STAT_RE.findall(fm.group(2))}
+    else:
+        ev["kind"] = "Finish"
+        ev["rid"] = fa.group(1)
+        ev["stats"] = {"acc_len": float(fa.group(2))}
     return ev
 
 
@@ -148,17 +181,66 @@ class LogTail:
         return self.lines
 
 
-def dp_spread(events, windows):
-    """{window name: {dp_rank: new sequences}} over Prefill events with a timestamp; windows are
-    (name, start_epoch_or_None, end_epoch_or_None), a line counts when start <= ts < end."""
-    counts = {name: {} for name, _, _ in windows}
+def in_windows(events, windows, kinds):
+    """(window name, event) for each timestamped event of `kinds` in each window (name, start_epoch_or_None,
+    end_epoch_or_None) with start <= ts < end, in log order; a window without start holds nothing, one without
+    end runs to the end of the log. The window rule of dp_spread and dp_tokens."""
     for e in events:
-        if e["kind"] != "Prefill" or e["ts"] is None or "new_seq" not in e:
+        if e["kind"] not in kinds or e["ts"] is None:
             continue
         for name, start, end in windows:
             if start is not None and e["ts"] >= start and (end is None or e["ts"] < end):
-                counts[name][e["dp_rank"]] = counts[name].get(e["dp_rank"], 0) + e["new_seq"]
+                yield name, e
+
+
+def dp_spread(events, windows):
+    """{window name: {dp_rank: sum of #new-seq}} over the Prefill events in each window (in_windows). #new-seq is the
+    round's extend rows: a chunked prompt counts once per chunk, Mix rounds are not read (module docstring)."""
+    counts = {name: {} for name, _, _ in windows}
+    for name, e in in_windows(events, windows, ("Prefill",)):
+        if "new_seq" in e:
+            counts[name][e["dp_rank"]] = counts[name].get(e["dp_rank"], 0) + e["new_seq"]
     return counts
+
+
+TOKEN_KEYS = ("new_seq", "mix_new_seq", "new_token", "cached_token", "prefill_lines", "mix_lines", "hit_lines")
+
+
+def dp_tokens(events, windows):
+    """{window name: {dp_rank: {key: sum}}} over the Prefill and Mix events in each window (in_windows), keys
+    TOKEN_KEYS: new_seq / mix_new_seq the #new-seq of Prefill / Mix lines (extend rows: a chunked prompt
+    counts once per chunk), new_token and cached_token the sums of #new-token and #cached-token over both
+    (a chunked prompt continues on later lines; #cached-token is nonzero only on a request's first chunk;
+    #new-token of a Mix line includes its decode rows' tokens), and the Prefill, Mix and cache-hit line
+    counts. See the module docstring for what each field counts."""
+    out = {name: {} for name, _, _ in windows}
+    for name, e in in_windows(events, windows, ("Prefill", "Mix")):
+        r = out[name].setdefault(e["dp_rank"], dict.fromkeys(TOKEN_KEYS, 0))
+        mix = e["kind"] == "Mix"
+        r["mix_new_seq" if mix else "new_seq"] += e.get("new_seq") or 0
+        r["mix_lines" if mix else "prefill_lines"] += 1
+        r["new_token"] += e.get("new_token") or 0
+        r["cached_token"] += e.get("cached_token") or 0
+        r["hit_lines"] += 1 if (e.get("cached_token") or 0) > 0 else 0
+    return out
+
+
+def render_dp_tokens(tokens, requests=None):
+    """One row per window and rank plus an "all" row; requests {window: N} adds per-request figures to "all"."""
+    rows = []
+    for name, ranks in tokens.items():
+        tot = {k: sum(r[k] for r in ranks.values()) for k in TOKEN_KEYS}
+        for label, r in [(f"rank{k}", ranks[k]) for k in sorted(ranks)] + [("all", tot)]:
+            seen = r["new_token"] + r["cached_token"]
+            row = (f"{name} {label} new_seq={r['new_seq']} mix_new_seq={r['mix_new_seq']} prefilled={r['new_token']} "
+                   f"cached={r['cached_token']} cached_share={r['cached_token'] / seen if seen else 0:.3f} "
+                   f"prefill_lines={r['prefill_lines']} mix_lines={r['mix_lines']} hit_lines={r['hit_lines']}")
+            n = (requests or {}).get(name)
+            if label == "all" and n:
+                row += (f" requests={n} prefilled_per_request={r['new_token'] / n:.0f}"
+                        f" cached_per_request={r['cached_token'] / n:.0f}")
+            rows.append(row)
+    return "\n".join(rows)
 
 
 def parse_window(text):
@@ -186,16 +268,40 @@ def render_dp_spread(counts):
 def dp_spread_main(argv):
     import argparse, json
     ap = argparse.ArgumentParser(prog="batch_log.py dp-spread",
-                                 description="new sequences per attention-DP rank per time window, from Prefill lines")
+                                 description="#new-seq (prefill rows: a chunked prompt counts once per chunk) per attention-DP rank "
+                                             "per time window, from Prefill lines")
     ap.add_argument("log")
     ap.add_argument("--window", action="append", required=True, metavar="NAME=START[,END]")
     ap.add_argument("--json", action="store_true", help="print {window: {rank: count}} as JSON instead")
+    ap.add_argument("--tokens", action="store_true",
+                    help="also prefilled and prefix-cached prompt tokens and line counts per rank over Prefill and "
+                         "Mix lines (dp_tokens); with --json the output is {\"spread\": ..., \"tokens\": ...}")
+    ap.add_argument("--requests", action="append", default=[], metavar="NAME=N",
+                    help="with --tokens: window NAME served N requests (from the client); adds per-request tokens")
     a = ap.parse_args(argv)
     windows = [parse_window(w) for w in a.window]
+    requests = {}
+    for text in a.requests:
+        name, _, n = text.partition("=")
+        if not _ or name not in {w[0] for w in windows} or not n.isdigit():
+            ap.error(f"--requests expects NAME=N for a --window NAME, got {text!r}")
+        requests[name] = int(n)
+    if requests and not a.tokens:
+        ap.error("--requests needs --tokens")
     with open(a.log, errors="replace") as fh:
-        counts = dp_spread(parse_lines(fh), windows)
-    print(json.dumps({n: {str(r): k for r, k in sorted(c.items())} for n, c in counts.items()}) if a.json
-          else render_dp_spread(counts))
+        events = parse_lines(fh)
+    counts = dp_spread(events, windows)
+    spread = {n: {str(r): k for r, k in sorted(c.items())} for n, c in counts.items()}
+    if not a.tokens:
+        print(json.dumps(spread) if a.json else render_dp_spread(counts))
+        return 0
+    tokens = dp_tokens(events, windows)
+    if a.json:
+        print(json.dumps({"spread": spread, "tokens": {n: {str(r): v for r, v in sorted(t.items())}
+                                                       for n, t in tokens.items()}, "requests": requests}))
+    else:
+        print(render_dp_spread(counts))
+        print(render_dp_tokens(tokens, requests))
     return 0
 
 
@@ -361,7 +467,8 @@ def prefill_main(argv):
         from e2e_decompose import phase_windows
         bj = json.load(open(a.benchmark_json))
         # one point per result; the matrix reuses phase names across concurrencies (measured-1 at c1, c2, ...),
-        # so names get "/c<concurrency>" when a phase name repeats
+        # so once any phase name repeats every name gets "/c<concurrency>" (e2e_decompose.py suffixes only the
+        # repeated names; unifying the two would change one tool's output for a mix of repeated and single phases)
         names = [r["phase"] for r in bj["results"]]
         dup = len(set(names)) < len(names)
         specs = [(f'{ph}/c{int(r["concurrency"])}' if dup else ph, s, e, int(bj["prompt_tokens"]), int(r["concurrency"]))

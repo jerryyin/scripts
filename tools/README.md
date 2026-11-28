@@ -7,6 +7,8 @@ Each utility here serves one dedicated use case and works independently when cop
 | `windows_wsl.py` | Execute a noninteractive script on Windows or WSL without nested quoting | Calling-host Python 3.10+; destination Bash or PowerShell 7; WSL interop for cross-OS calls |
 | `github_attachments.py` | Download attachment links from one GitHub issue into a directory | Python, `requests`, `beautifulsoup4`; network access to the issue and files |
 | `gdb_print_lanes.py` | Print one variable across selected GPU lanes | GDB Python with a `lane` command and an active debugging session |
+| `ckpt_index_check.py` | Check a safetensors checkpoint for completeness against its `model.safetensors.index.json` and split its bytes by tensor kind, from `stat` and shard headers only; optionally check its identity against a Hugging Face Hub repo revision without downloading it | Python 3.8+ standard library; read access to the checkpoint directory; for `--hub-repo`, HTTPS access to the Hub (and `HF_TOKEN` for a gated repo) |
+| `py_ast_equal.py` | Prove a Python file's code unchanged between two versions (comments, formatting and optionally docstrings ignored), listing the definitions that differ | Python 3.8+ standard library; `git` on PATH for `--git` |
 
 ## GitHub issue attachments
 
@@ -24,6 +26,31 @@ Load the script in the debugger, then pass a variable expression and an inclusiv
 ```text
 (gdb) source /path/to/scripts/tools/gdb_print_lanes.py
 (gdb) python print_variable_for_lanes("first.data", 0, 3)
+```
+
+## Checkpoint completeness
+
+`ckpt_index_check.py [--split-bytes] [--by-pattern] [--json] CHECKPOINT...` checks each checkpoint directory (a Hugging Face snapshot's symlinks are followed) against its `model.safetensors.index.json` from `stat` alone: shard and tensor counts, indexed shards missing or empty, `*.safetensors` files the index does not name, and shard bytes against the index's `total_size`. `--split-bytes` also reads each shard's JSON header (never tensor data) and sums tensor bytes into routed experts, shared experts, the MTP layer (layers at or beyond `config.json` `num_hidden_layers`, or `mtp`/`nextn` names) and other, checked against `total_size`. `--by-pattern` (implies `--split-bytes`) also sums bytes and tensor counts per tensor-name pattern (every all-digit name component replaced by `N`), with the dtypes and the first tensor's shape: the input of a per-rank memory budget (`bytes_by_pattern` in `--json`). `--json` prints one object per checkpoint. Exit status 1 when an index, an indexed shard or (with `--split-bytes`) an indexed tensor is missing.
+
+```bash
+python3 tools/ckpt_index_check.py --split-bytes /models/SOME-CHECKPOINT
+```
+
+`--hub-repo REPO [--hub-revision REV]` also compares the checkpoint with that Hub revision (default `main`), without downloading it. It lists the revision with the Hub API (`?blobs=true`, which resolves REV to a commit) and, for every file on both sides (local files walked recursively, skipping `__pycache__` and a top-level `.cache`), compares the size and the content identity the Hub records: the LFS sha256 for LFS files, the git blob SHA-1 of the bytes for the rest. The local side is hashed; `*.safetensors` only with `--hash-shards` (reads every shard; `--jobs N` in parallel, default 6). Each common shard's safetensors header is fetched with two HTTP Range requests and compared with the local one, and for each `--sample-shard NAME` (repeatable) `--sample N` tensors (default 10: the smallest `min(4, N)`, then a `--seed S` random choice of the rest; at most the first 64 MiB of each) are byte-compared over HTTP Range. A file in a Hugging Face cache snapshot also reports the blob it links to, the identity the download recorded (a stat-only claim, not a hash of the bytes). A server that answers a Range request with anything but 206 and the exact length, or a remote header length above 256 MiB, is an error, so a multi-GB shard is never read whole. `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) is sent when set; without it a gated, private or missing repo is reported as an `error`, not a crash. `--hub-endpoint` (default `HF_ENDPOINT` or `https://huggingface.co`) points it at a mirror. The facts go under `hub` in the `--json` object (`files`, `headers_equal`, `tensor_samples`, `only_hub`, `only_local`, `summary`, `all_checked_equal`); the text output prints one summary line plus the differing files and the samples. With `--hub-repo`, exit status 1 also when a checked fact differs or a file is on one side only.
+
+Pin `--hub-revision` to the full commit hash the checkpoint was downloaded at; `ORG/NAME`, `COMMIT_SHA` and the shard name below stand for that repo's own:
+
+```bash
+python3 tools/ckpt_index_check.py --json --hub-repo ORG/NAME --hub-revision COMMIT_SHA \
+  --sample 2 --sample-shard model-00001-of-00002.safetensors /models/SOME-CHECKPOINT
+```
+
+## Python AST equivalence
+
+`py_ast_equal.py [--ignore-docstrings] OLD.py NEW.py` or `py_ast_equal.py [--ignore-docstrings] --git REPO REV_A REV_B PATH...` parses both versions of each file with `ast` (which drops comments and formatting) and compares them; `--ignore-docstrings` also drops the module's and every class's and function's docstring. Use it to prove a comment-, docstring- or move-only edit leaves what a module executes unchanged. With `--git`, each repository-relative PATH is read at both revisions with `git show`. It prints `equal PATH` or `differs PATH` per file, and under a differing file each definition whose own statements differ, by qualified name (`Class.method`, `outer.inner`, `<module>` for statements outside any definition; a repeated name gets `#2`), as `changed`, `added` or `removed`. A change inside a nested definition is listed under that definition only. Exit status 0 when every file is equal, 1 when any differs, 2 on a usage, read or syntax error.
+
+```bash
+python3 tools/py_ast_equal.py --ignore-docstrings --git /path/to/repo BASE_COMMIT HEAD_COMMIT path/to/module.py
 ```
 
 ## Windows / WSL execution

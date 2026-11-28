@@ -8,6 +8,10 @@ touching it?", or "is this board tuned?", it belongs here.
 board/
 ├── README.md              # this file
 ├── gpu-lock               # run a command under an exclusive flock on the shared lock file
+├── leased-job.sh          # run one GPU job under gpu-lease (and a lock), recording the wait
+├── gpu-job.sh             # its inner step: core dumps off, disk floor, snapshots before and after
+├── test_leased_job.sh     # their tests (no GPU needed)
+├── test_gpu_job.sh
 ├── gpu-contention.sh      # who else holds /dev/kfd right now, from the HOST namespaces
 ├── gpu-wait.py            # wait until N GPUs are idle; or snapshot who is on them
 ├── test_gpu_wait.py       # its tests (no GPU needed)
@@ -31,7 +35,9 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   other processes hold does not count; on a pick it logs who holds memory there (host PIDs,
   from KFD, also inside a container). Never signals anything. `--idle-by process` waits for
   no process in `amd-smi process` instead. `--snapshot` prints amd-smi's process list as JSON. A held host-wide lock (`--host-lock`)
-  makes every GPU busy; `--hip` prints HIP ids (see below). Tests: `test_gpu_wait.py`.
+  makes every GPU busy; `--hip` prints HIP ids (see below). It does not read per-GPU
+  `gpu-lease` locks, so on a host that has them a GPU another user leased can read idle.
+  Tests: `test_gpu_wait.py`.
 - `gpu-queue` — a job queue for a shared host with no scheduler, where GPUs a job releases are
   taken by other users' queues before anyone can start the next job, and idle GPUs reserve
   nothing because other launches do not check. `gpu-queue serve DIR --count N --container NAME`
@@ -52,6 +58,10 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   claims, so share one DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
   not the caller's, so a job script sets up its own directory and environment; output and exit
   status land in `DIR/done/` or `DIR/failed/`. Tests: `test_gpu_queue.py`.
+
+  `gpu-queue` is for hosts without per-GPU leases. Its claim (`gpu-wait.py`) checks only the
+  single `--host-lock` file, so where other users lease GPUs through `gpu-lease` it would take GPUs
+  they hold; there, run each job under `gpu-lease run` instead (see `gpu-lock` below).
 
   The simplest setup runs everything inside the container: amd-smi there sees every GPU, so
   the idle check and HIP numbering work, and the log lands in `DIR/serve.log` where `status`
@@ -76,6 +86,26 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
 - `gpu-lock` — wraps a command in an exclusive `flock` on a shared lock file so only one
   wrapped application runs at a time. Cooperative, not a security boundary: anything
   launched without the wrapper bypasses it. That gap is what `lock-guard/` closes.
+  On a host whose users lease each GPU through amd-tracking's `gpu-lease` (per-GPU
+  `gpu-<N>.lock` files beside it, with an `AGENTS.md` of rules, as in `/data/lock`), that lease is
+  the lock the other users see: run GPU work under `gpu-lease run --gpus <set> --name <name> --`
+  and use `gpu-lock` only inside it, where it still keeps your own other containers waiting. Do not
+  pass the per-GPU files to a tool that takes them itself inside a lease; a nested attempt
+  contends with your own holder.
+- `leased-job.sh <record-dir> <command...>` — runs one GPU job the way the `gpu-lock` entry above
+  says to on a `gpu-lease` host: `gpu-lease run --gpus $HIP_VISIBLE_DEVICES --name
+  $GPU_LEASE_PREFIX<name> --wait $GPU_LEASE_WAIT -- [$GPU_LEASE_LOCK] gpu-job.sh <record-dir>
+  <command...>`, and records into `<record-dir>` when the lease was requested, granted and released,
+  the lease's job directory and its exit status (the command's, 75 not admitted, 124 stopped as
+  idle). The name prefix, the wait and the inner lock are the caller's policy: a project keeps a thin
+  wrapper that sets them (one user's lock only for a job on every GPU, a longer wait). `gpu-job.sh`
+  is the step it runs inside the lease: core dumps off (CPU and GPU), a free-disk floor, `amd-smi`,
+  `rocm-smi`, `df`, `/proc/meminfo` and `gpu-lease status` snapshots before and after (the lease status is the only
+  one that names other users' GPU processes from inside a container), and a SIGTERM from the lease
+  passed to the command with the after-step still recorded. Variables, defaults and recorded files
+  are in their headers. Both are one `main` function run by their last line, so a checkout that
+  rewrites one while a job runs does not change that job. Tests: `test_leased_job.sh`,
+  `test_gpu_job.sh`.
 - `gpu-contention.sh` — reports how many processes hold `/dev/kfd`, split into *ours* and
   *foreign*. `--selftest` drives every branch against synthetic `/proc` fixtures and needs
   no GPU, no docker and no privileges.
@@ -117,4 +147,4 @@ probe would never refuse again. Anything unreadable counts as foreign.
 | Variable | Used by | Default |
 | --- | --- | --- |
 | `GPU_CONTENTION_CONTAINER` | `gpu-contention.sh` | none — pass the container as argument 1 or set this |
-| `GPU_LOCK_FILE` | `lock-guard/` build, `demonstrate-guard.sh` | `/data/lock/amd-gpu.lock` |
+| `GPU_LOCK_FILE` | `gpu-lock`, `gpu-wait.py` (`--host-lock` default), `lock-guard/` build, `demonstrate-guard.sh` | `/data/lock/amd-gpu.lock` |

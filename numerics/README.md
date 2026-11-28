@@ -33,8 +33,14 @@ several configurations and the question is which is faster.
 ## Files
 
 - `range_compare.py` — standard library only. `summarize` groups rows of CSV or JSON tables by
-  key columns and writes `<metric>_median/_min/_max/_n` (dotted names reach into nested JSON,
-  `--where NAME~REGEX` filters). `compare` joins such summary tables on their keys and, for each
+  key columns and writes `<metric>_median/_min/_max/_n` (dotted names reach into nested JSON; a key
+  holding dots, such as EvalScope's `Spec. Accept Rate` in `summary.Spec. Accept Rate`, is matched
+  when splitting at every dot finds nothing;
+  `--where NAME~REGEX` filters); `--product NAME=A*B` (repeatable) adds a derived metric `NAME`,
+  the per-row product of fields `A` and `B` (for example TPOT x Avg Decoded Tok/Iter = time per
+  decode step), summarized after the `--metric` columns, not counted in a row where a factor is
+  missing or not a number, and refused when `NAME` is already a key, metric, other `--product` or
+  input field. `compare` joins such summary tables on their keys and, for each
   `--ratio A/B`, prints the ratio of medians, its conservative bounds `[A_min/B_max, A_max/B_min]`
   (`--bounds`) and `higher`/`lower` only when the two [min,max] ranges are disjoint, else
   `overlap`. `LABEL=a.csv+b.csv` (or `--pool` for one table) pools several rows of a key; otherwise a table with
@@ -51,6 +57,8 @@ several configurations and the question is which is faster.
   start-pair ratio at once. Without it the output is unchanged. Tests: `test_range_compare.py`.
 
   ```bash
+  python3 range_compare.py summarize benchmark.json --rows-field results --key c \
+      --metric summary.TPOT --product "step=summary.TPOT*summary.Avg Decoded Tok/Iter"
   python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \
       --table EP4=ep4/summary.csv --table TP4=tp4/summary.csv --ratio EP4/TP4
   python3 range_compare.py compare --key L,B --metric system_tok_s --bounds \

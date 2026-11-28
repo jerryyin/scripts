@@ -35,6 +35,21 @@ def test_summarize_groups_and_nested_fields() -> None:
     assert out[1]["s.x_median"] == 5.0 and out[1]["s.x_n"] == 1
 
 
+def test_dotted_keys_resolve() -> None:
+    row = {"c": 1, "summary": {"Spec. Accept Rate": 0.75, "rps": 2.0, "a": {"b": 1.0}, "a.b": 9.0,
+                               "Spec. Accept Length": {"p50": 3.5}}}
+    assert rc.field(row, "summary.Spec. Accept Rate") == 0.75
+    assert rc.field(row, "summary.Spec. Accept Length.p50") == 3.5
+    assert rc.field(row, "summary.rps") == 2.0
+    assert rc.field(row, "summary.a.b") == 1.0  # a path that resolved by splitting at every dot is unchanged
+    assert rc.field(row, "summary.Spec. Accept") is None and rc.field(row, "summary.Spec") is None
+    j = write("r.json", json.dumps({"results": [
+        {"c": 1, "summary": {"Spec. Accept Rate": r, "rps": 1.0}} for r in (0.7, 0.8, 0.75)]}))
+    out = run_summarize([str(j), "--rows-field", "results", "--key", "c", "--metric", "summary.Spec. Accept Rate"])
+    assert out == ("c,summary.Spec. Accept Rate_n,summary.Spec. Accept Rate_median,summary.Spec. Accept Rate_min,"
+                   "summary.Spec. Accept Rate_max\r\n1,3,0.75,0.7,0.8\r\n")
+
+
 def test_compare_csv_tables_with_scale_and_single_values() -> None:
     a = write("a.csv", "L,B,tok_median,tok_min,tok_max\n8192,1,100,99,101\n8192,4,400,390,410\n")
     b = write("b.json", json.dumps({"summary": [{"L": 8192, "B": 1, "tok": 50}]}))
@@ -256,6 +271,52 @@ def test_without_consensus_output_is_byte_identical_to_40f9d01() -> None:
     assert run_compare("v") == PINNED_SINGLE_MD
     assert run_compare("v", fmt="json", bounds=False) == PINNED_SINGLE_JSON
     assert "consensus" not in run_consensus(fmt="json") and run_consensus().count("|") == 7 * 6
+
+
+def run_summarize(args: list[str]) -> str:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert rc.main(["summarize", *args]) == 0
+    return buf.getvalue()
+
+
+def test_summarize_product_metric() -> None:
+    path = write("b.json", json.dumps({"results": [
+        {"c": 1, "phase": "measured-1", "summary": {"tpot": 3.0, "acc": 5.0}},
+        {"c": 1, "phase": "measured-2", "summary": {"tpot": 2.0, "acc": 4.0}},
+        {"c": 1, "phase": "measured-3", "summary": {"tpot": 4.0}},
+        {"c": 1, "phase": "measured-4", "summary": {"tpot": 4.0, "acc": "n/a"}},
+    ]}))
+    args = [str(path), "--rows-field", "results", "--key", "c", "--metric", "summary.tpot"]
+    (row,) = json.loads(run_summarize(args + ["--product", "step=summary.tpot*summary.acc", "--format", "json"]))
+    # missing and non-numeric factors give no product and are not counted
+    assert row["step_n"] == 2 and row["step_median"] == 11.5
+    assert row["step_min"] == 8.0 and row["step_max"] == 15.0
+    assert row["summary.tpot_n"] == 4
+    head, line = run_summarize(args + ["--product", "step=summary.tpot*summary.acc"]).splitlines()
+    assert head.split(",")[-4:] == ["step_n", "step_median", "step_min", "step_max"] and line.endswith(",2,11.5,8.0,15.0")
+    # without --product the output is that of the tool before the option
+    assert run_summarize(args) == "c,summary.tpot_n,summary.tpot_median,summary.tpot_min,summary.tpot_max\r\n1,4,3.5,2.0,4.0\r\n"
+    for bad in (["bad"], ["x=a"], ["=a*b"], ["x=a*"]):
+        try:
+            rc.parse_products(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"bad --product {bad} accepted")
+    for name in ("summary.tpot", "c", "phase"):  # a --metric, a --key, an input field
+        try:
+            run_summarize(args + ["--product", f"{name}=summary.tpot*summary.acc"])
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"--product name {name!r} collision accepted")
+    try:
+        run_summarize(args + ["--product", "s=summary.tpot*summary.acc", "--product", "s=summary.acc*summary.acc"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a --product name given twice must be refused")
 
 
 if __name__ == "__main__":

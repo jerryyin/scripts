@@ -2,14 +2,20 @@
 # Run a command (normally `ts serve ...`) with the step-timing instrumentation switched on.
 #
 # usage: INSTR=PATCHED_COPY timed.sh DUMP_DIR -- COMMAND...
-#        [STRIDE=1] [EVERY=4] [EAGER=0] [MAX_RECORDS=4000] in the environment
+#        [STRIDE=1] [EVERY=4] [EAGER=0] [MAX_RECORDS=4000] [SYNC=1] in the environment
 #
 # Puts the patched TokenSpeed copy INSTR (see README.md) first on PYTHONPATH, sets the
 # TS_STEP_TIMING_* variables that copy reads, writes per-rank dumps to DUMP_DIR, and execs COMMAND.
-# STRIDE times one layer in STRIDE; EVERY harvests every EVERY-th graph replay; EAGER=1 also times
-# eager decode steps (pass --enforce-eager to ts serve yourself). For the uninstrumented reference,
-# run the same command without this wrapper. To serve an amd-tracking layout recipe instrumented,
-# wrap its server manager (the server inherits this environment), see README.md:
+# STRIDE is a layer stride, not a replay sampling rate: markers are captured only in the layers whose
+# id % STRIDE == 0 (target and DSpark draft ids alike), and every replay of the graph runs them.
+# EVERY is the replay sampling: every EVERY-th decode-graph replay is timed and written as a record.
+# MAX_RECORDS caps the records per process (each TP rank). EAGER=1 also times eager decode steps
+# (pass --enforce-eager to ts serve yourself). SYNC=1 (default) reads a sampled replay's markers
+# before the next replay re-records them (the host waits once every EVERY replays); SYNC=0 never
+# waits and keeps only the graph span / host split exact (markers of a later replay, some
+# "incomplete"). For the uninstrumented reference, run the same command without this wrapper.
+# To serve an amd-tracking layout recipe instrumented, wrap its server manager (the server inherits
+# this environment), see README.md:
 #   timed.sh OUT/step-timing -- python3 $AT/skills/inference_engine/benchmark/scripts/manage_server.py \
 #     run --command-file $AT/apps/inference_engine_benchmark/recipes/<model>/<recipe>.sh ...
 set -euo pipefail
@@ -23,4 +29,5 @@ export PYTHONPATH=$INSTR/python:$INSTR/tokenspeed-kernel/python${PYTHONPATH:+:$P
 export TS_STEP_TIMING=1 TS_STEP_TIMING_DIR=$dump
 export TS_STEP_TIMING_EVERY=${EVERY:-4} TS_STEP_TIMING_LAYER_STRIDE=${STRIDE:-1}
 export TS_STEP_TIMING_EAGER=${EAGER:-0} TS_STEP_TIMING_MAX_RECORDS=${MAX_RECORDS:-4000}
+export TS_STEP_TIMING_SYNC=${SYNC:-1}
 exec "$@"

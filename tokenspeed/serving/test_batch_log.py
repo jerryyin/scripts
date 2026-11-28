@@ -39,6 +39,17 @@ def test_dp_spread_counts_new_sequences_per_rank_and_window() -> None:
         "rep2 rank2=7 total=7", "unset  total=0"]
 
 
+def test_dp_spread_counts_prefill_rows_not_requests() -> None:
+    """#new-seq is a round's extend rows: one request chunked over two Prefill rounds counts twice, and a
+    request whose prompt ran in a Mix round (beside decode rows) is not counted (documented, not fixable:
+    the lines carry no request id)."""
+    lines = [batch(T + 1, "Prefill", 0, new_seq=1, new_token=8192, cached_token=4096),  # request a, chunk 1
+             batch(T + 2, "Prefill", 0, new_seq=1, new_token=1808, cached_token=0),     # request a, chunk 2
+             batch(T + 3, "Mix", 1, new_seq=1, new_token=505, cached_token=9000, running_req=5)]  # request b
+    counts = batch_log.dp_spread(batch_log.parse_lines(lines), [("w", T, T + 10)])
+    assert counts == {"w": {0: 2}}
+
+
 def test_parse_window_bounds() -> None:
     start = ts(T)[:19] + "Z"
     assert batch_log.parse_window(f"rep1={start},{ts(T + 10)[:19]}Z") == ("rep1", T, T + 10)
@@ -55,6 +66,52 @@ def test_dp_spread_cli() -> None:
                               "--window", f"smoke={iso(T)},{iso(T + 10)}", "--window", f"rep1={iso(T + 10)},{iso(T + 20)}"],
                              capture_output=True, text=True, check=True).stdout
         assert out.splitlines() == ["smoke rank0=1 rank1=1 rank2=1 rank3=1 total=4", "rep1 rank0=3 rank1=5 rank3=2 total=10"]
+
+
+def tokens_log() -> list[str]:
+    return [batch(T + 1, "Prefill", 0, new_seq=2, new_token=1000, cached_token=0),
+            batch(T + 2, "Prefill", 1, new_seq=1, new_token=200, cached_token=9000),
+            batch(T + 2.5, "Mix", 1, new_seq=1, new_token=300, cached_token=0, running_req=4),
+            batch(T + 3, "Prefill", 0, new_seq=1, new_token=100, cached_token=5000),
+            batch(T + 4, "Decode", 0, running_req=3),
+            batch(T + 30, "Prefill", 1, new_seq=4, new_token=7)]  # outside the window
+
+
+def test_dp_tokens_sums_prefilled_and_cached_tokens_per_rank() -> None:
+    tok = batch_log.dp_tokens(batch_log.parse_lines(tokens_log()), [("w", T, T + 10), ("unset", None, T + 10)])
+    assert tok == {"w": {0: {"new_seq": 3, "mix_new_seq": 0, "new_token": 1100, "cached_token": 5000,
+                             "prefill_lines": 2, "mix_lines": 0, "hit_lines": 1},
+                         1: {"new_seq": 1, "mix_new_seq": 1, "new_token": 500, "cached_token": 9000,
+                             "prefill_lines": 1, "mix_lines": 1, "hit_lines": 1}},
+                   "unset": {}}
+    out = batch_log.render_dp_tokens({"w": tok["w"]}, {"w": 4}).splitlines()
+    assert out[0] == ("w rank0 new_seq=3 mix_new_seq=0 prefilled=1100 cached=5000 cached_share=0.820 "
+                      "prefill_lines=2 mix_lines=0 hit_lines=1")
+    assert out[-1] == ("w all new_seq=4 mix_new_seq=1 prefilled=1600 cached=14000 cached_share=0.897 "
+                       "prefill_lines=3 mix_lines=1 hit_lines=2 requests=4 prefilled_per_request=400 "
+                       "cached_per_request=3500")
+
+
+def test_dp_spread_tokens_cli() -> None:
+    import json
+
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.stderr.log"
+        log.write_text("".join(tokens_log()))
+        iso = lambda t: ts(t)[:19] + "Z"  # noqa: E731
+        cmd = [sys.executable, str(HERE / "batch_log.py"), "dp-spread", str(log), "--window", f"w={iso(T)},{iso(T + 10)}"]
+        out = subprocess.run(cmd + ["--tokens", "--requests", "w=4"], capture_output=True, text=True, check=True).stdout
+        lines = out.splitlines()
+        assert lines[0] == "w rank0=3 rank1=1 total=4" and len(lines) == 4
+        assert lines[-1].startswith("w all new_seq=4 mix_new_seq=1 prefilled=1600 cached=14000")
+        assert lines[-1].endswith("requests=4 prefilled_per_request=400 cached_per_request=3500")
+        js = json.loads(subprocess.run(cmd + ["--tokens", "--json"], capture_output=True, text=True, check=True).stdout)
+        assert js["spread"] == {"w": {"0": 3, "1": 1}} and js["tokens"]["w"]["1"]["mix_new_seq"] == 1
+        assert js["requests"] == {}
+        p = subprocess.run(cmd + ["--requests", "w=4"], capture_output=True, text=True)
+        assert p.returncode == 2 and "--requests needs --tokens" in p.stderr
+        p = subprocess.run(cmd + ["--tokens", "--requests", "x=4"], capture_output=True, text=True)
+        assert p.returncode == 2 and "NAME=N for a --window NAME" in p.stderr
 
 
 def prefill_log() -> list[str]:
@@ -108,8 +165,8 @@ def test_prefill_cli_with_matrix_benchmark_json() -> None:
 
 
 def test_prefill_validity_from_prefill_lines_without_requeststats() -> None:
-    """Ported from r0002-f2's prefill-steps test: a server without RequestStats lines (TokenSpeed e8fd096e)
-    is checked from the Prefill lines' #cached-token; batching = steps, present_max and the step sequence."""
+    """A server without RequestStats lines (TokenSpeed e8fd096e) is checked from the Prefill lines'
+    #cached-token; batching = steps, present_max and the step sequence."""
     import json
     lines = [batch(T + 1.0, "Prefill", 0, new_seq=2, new_token=8192, running_req=2, queue_req=6),
              batch(T + 1.5, "Prefill", 0, new_seq=2, new_token=7808, cached_token=0, running_req=2, queue_req=4),
@@ -159,6 +216,15 @@ def test_prefill_cli_matrix_phases_repeated_across_concurrencies() -> None:
         res = json.loads(out.read_text())["points"]
         assert {k: (v["requests"], v["valid"]) for k, v in res.items()} == {"measured-1/c2": (2, True), "measured-1/c1": (1, False)}
 
+
+def test_finish_line_with_accept_num_tokens_avg() -> None:
+    import batch_log
+    ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: abc-01 Finish! "
+                              "Accept_num_tokens_avg: 3.48\n")
+    assert ev["kind"] == "Finish" and ev["rid"] == "abc-01" and ev["stats"] == {"acc_len": 3.48}
+    ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: x Finish! "
+                              "Accept_num_tokens_avg: 0\n")
+    assert ev["stats"] == {"acc_len": 0}
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

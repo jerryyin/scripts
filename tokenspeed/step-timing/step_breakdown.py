@@ -27,6 +27,7 @@ import collections
 import csv
 import glob
 import json
+import math
 import os
 import statistics
 import sys
@@ -90,6 +91,9 @@ def table(analysis_dir, dump_dir, label, clean_ms=None, components=None):
            "period": {str(r): float(summ[r]["period_ms"]) for r in ranks},
            "host_gap": {str(r): float(summ[r]["host_gap_ms"]) for r in ranks},
            "harvest": {str(r): float(summ[r]["harvest_ms"]) for r in ranks},
+           # graph-replay span vs serving step (analyzer summary.csv; None for pre-1be88db0 dumps)
+           **{k: {str(r): _num_or_none(summ[r].get(k)) for r in ranks}
+              for k in ("gpu_step_ms", "outside_graph_ms", "host_step_ms", "launch_ms")},
            "n": {str(r): int(summ[r]["n"]) for r in ranks},
            "aux": {a: {str(r): cat[r].get(a, 0.0) for r in ranks} for a in aux}}
     for comp in comps:
@@ -104,6 +108,15 @@ def table(analysis_dir, dump_dir, label, clean_ms=None, components=None):
             "markers": markers,
             "corr": vals[ref] - markers * delta if delta is not None else None}
     return out
+
+
+def _num_or_none(x):
+    """A summary.csv cell as a float, None when missing or nan (older analyzer output)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(v) else v
 
 
 def table_markdown(t):
@@ -129,8 +142,13 @@ def table_markdown(t):
     lines.append("| **sum of components** | " + " | ".join(f"**{tot[r]:.3f}**" for r in ranks) +
                  f" | | {t['main_markers_per_step']} | {num(totc, '.3f')} |")
     for key, title in (("graph", "GPU graph span (median)"), ("period", "step period (median)"),
-                       ("host_gap", "host gap = period - graph"), ("harvest", "harvest ms (host)")):
-        lines.append(f"| {title} | " + " | ".join(f"{t[key][r]:.3f}" for r in ranks) + " | | | |")
+                       ("host_gap", "host gap = period - graph"), ("harvest", "harvest ms (host)"),
+                       ("gpu_step_ms", "GPU step: replay start to next replay start"),
+                       ("outside_graph_ms", "GPU outside the graph (non-graph kernels + idle)"),
+                       ("host_step_ms", "host step: between replay calls"), ("launch_ms", "replay call (host)")):
+        if key not in t or all(t[key][r] is None for r in ranks):
+            continue
+        lines.append(f"| {title} | " + " | ".join(num(t[key][r], ".3f") for r in ranks) + " | | | |")
     lines.append("| sum vs graph | " + " | ".join(f"{(tot[r] / t['graph'][r] - 1) * 100:+.2f}%" for r in ranks) + " | | | |")
     for a, v in t["aux"].items():
         lines.append(f"| {a} (overlapped, not in sum) | " + " | ".join(f"{v[r]:.3f}" for r in ranks) + " | | | |")

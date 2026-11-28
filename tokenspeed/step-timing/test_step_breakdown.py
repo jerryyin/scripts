@@ -87,6 +87,37 @@ def test_share_on_self_test_dumps() -> None:
         assert len(csv_path.read_text().splitlines()) == 1 + 2 * len(rows)
 
 
+def test_table_graph_span_vs_serving_step() -> None:
+    """The table carries the analyzer's replay-span split; an older summary.csv without it gives no rows."""
+    import analyze_step_timing as ast
+    with tempfile.TemporaryDirectory() as d:
+        dump, out = Path(d) / "dump", Path(d) / "analysis"
+        ast.synth(str(dump))
+        ast.analyze(str(dump), str(out), skip=20)
+        t = sb.table(str(out), str(dump), "synth")
+        assert abs(t["outside_graph_ms"]["2"] - ast.SYNTH_OUTSIDE_MS) < 0.02 * ast.SYNTH_OUTSIDE_MS
+        assert abs(t["gpu_step_ms"]["2"] - t["graph"]["2"] - ast.SYNTH_OUTSIDE_MS) < 0.05 * ast.SYNTH_OUTSIDE_MS
+        assert "GPU outside the graph" in sb.table_markdown(t)
+        old = Path(d) / "old"
+        old.mkdir()
+        analysis, old_dump = fixture(old)
+        t = sb.table(str(analysis), str(old_dump), "old")
+        assert t["outside_graph_ms"] == {"0": None, "1": None}
+        assert "GPU outside the graph" not in sb.table_markdown(t)
+
+
+def test_matrix_window_from_benchmark_json() -> None:
+    import analyze_step_timing as ast
+    bj = {"results": [{"phase": p, "concurrency": c, "output_dir": f"{p}/c{c}",
+                       "started_at": f"2026-11-28T01:00:{10 * i:02d}.5Z", "finished_at": f"2026-11-28T01:00:{10 * i + 9:02d}Z"}
+                      for i, (p, c) in enumerate((("warmup-1", 1), ("measured-1", 1), ("measured-1", 2)))]}
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "benchmark.json"
+        path.write_text(json.dumps(bj))
+        t0, t1 = ast.matrix_window(str(path), "measured-1/c1")
+        assert t1 - t0 == 8.5 and int(t0) % 60 == 10
+
+
 def test_draft_markers_counted_apart() -> None:
     assert sb.marker_name("0:moe.experts") == "moe.experts"
     assert sb.marker_name("1000:moe.experts") == "draft:moe.experts"

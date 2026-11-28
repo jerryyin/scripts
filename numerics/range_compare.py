@@ -5,7 +5,9 @@ Two subcommands over keyed tables (CSV, a JSON list of objects, or a JSON object
 list under --rows-field):
 
   summarize  group rows by --key (comma list; "" = all rows one group) and write
-             <metric>_median/_min/_max/_n per group
+             <metric>_median/_min/_max/_n per group; --product NAME=A*B (repeatable) adds a
+             metric NAME, the per-row product of fields A and B (None, so not counted, when either
+             is missing or not a number), summarized after the --metric columns
   compare    join labelled summary tables on --key; for each --ratio A/B print the ratio of
              medians, its conservative bounds [A_min/B_max, A_max/B_min] and a verdict:
              'higher' or 'lower' only when the [min,max] ranges are disjoint, else 'overlap'.
@@ -20,6 +22,8 @@ Metric names may be dotted paths into nested JSON objects (summary.Req Throughpu
 Standard library only.
 
   range_compare.py summarize --key batch_size --metric output_tok_s stages.json --rows-field stages
+  range_compare.py summarize --key c --metric summary.TPOT --rows-field results benchmark.json \\
+      --product "step=summary.TPOT*summary.Avg Decoded Tok/Iter"
   range_compare.py compare --key L,B --metric system_tok_s \\
       --table EP4=ep4/summary.csv --table TP4=tp4/summary.csv --ratio EP4/TP4 [--scale EP8=0.5]
 
@@ -58,14 +62,33 @@ def read_rows(path: str | Path, rows_field: str | None = None) -> list[dict]:
 
 
 def field(row: dict, name: str):
+    """Field `name` of `row`: a key of the row, or a dotted path into nested objects.
+
+    A path is split at every dot first (`summary.rps`); when that does not resolve, a key that itself
+    holds dots is tried, the longest key the remaining path starts with at each level first, so
+    `summary.Spec. Accept Rate` reaches EvalScope's `Spec. Accept Rate` inside `summary`.
+    """
     if name in row:
         return row[name]
     value = row
     for part in name.split("."):
         if not isinstance(value, dict) or part not in value:
-            return None
+            return dotted_key_field(row, name)
         value = value[part]
     return value
+
+
+def dotted_key_field(value, path: str):
+    """`path` under `value`, matching keys that contain dots (longest first); None when absent."""
+    if not isinstance(value, dict):
+        return None
+    if path in value:
+        return value[path]
+    for key in sorted((k for k in value if isinstance(k, str) and path.startswith(k + ".")), key=len, reverse=True):
+        found = dotted_key_field(value[key], path[len(key) + 1:])
+        if found is not None:
+            return found
+    return None
 
 
 def number(value) -> float | None:
@@ -85,6 +108,43 @@ def key_of(row: dict, key: list[str]) -> tuple:
         n = number(v)
         out.append(int(n) if n is not None and n == int(n) else (n if n is not None else v))
     return tuple(out)
+
+
+def parse_products(specs: list[str], taken=()) -> list[tuple[str, str, str]]:
+    """Parse --product NAME=A*B into (NAME, A, B); a NAME in taken (the --key and --metric names) or
+    given twice is refused."""
+    out = []
+    for spec in specs:
+        name, sep, expr = spec.partition("=")
+        a, star, b = expr.partition("*")
+        if not sep or not star or not name or not a or not b:
+            raise ValueError(f"--product {spec!r}: expected NAME=A*B")
+        out.append((name, a, b))
+    taken = set(taken)
+    for name, a, b in out:
+        if name in taken:
+            raise ValueError(f"--product {name}={a}*{b}: {name!r} is already a --key, --metric or --product name")
+        taken.add(name)
+    return out
+
+
+def add_products(rows: list[dict], products: list[tuple[str, str, str]]) -> list[dict]:
+    """Copy each row with every product metric set.
+
+    The product is None (left out of _n) when a factor is missing or not a number. A product name
+    that is already a field of a row is refused (ValueError) rather than overwriting it."""
+    if not products:
+        return rows
+    out = []
+    for row in rows:
+        row = dict(row)
+        for name, a, b in products:
+            if field(row, name) is not None:
+                raise ValueError(f"--product {name}={a}*{b}: the input already has a field {name!r}")
+            x, y = number(field(row, a)), number(field(row, b))
+            row[name] = None if x is None or y is None else x * y
+        out.append(row)
+    return out
 
 
 def summarize(rows: list[dict], key: list[str], metrics: list[str]) -> list[dict]:
@@ -305,6 +365,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rows-field")
     s.add_argument("--where", action="append", default=[],
                    help="NAME=VALUE or NAME~REGEX row filter (repeatable)")
+    s.add_argument("--product", action="append", default=[],
+                   help="NAME=A*B: add metric NAME, the per-row product of fields A and B, before grouping "
+                        "(e.g. TPOT times decoded tokens per iteration = time per decode step; repeatable)")
     s.add_argument("--format", choices=["csv", "json"], default="csv")
     c = sub.add_parser("compare")
     c.add_argument("--table", action="append", required=True, help="LABEL=PATH")
@@ -333,8 +396,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         ap.error(str(exc))
     if a.cmd == "summarize":
+        try:
+            products = parse_products(a.product, set(key) | set(a.metric))
+        except ValueError as exc:
+            ap.error(str(exc))
         rows = [r for p in a.inputs for r in read_rows(p, a.rows_field) if keep(r, where)]
-        write_rows(summarize(rows, key, a.metric), a.format, sys.stdout)
+        try:
+            rows = add_products(rows, products)
+        except ValueError as exc:
+            ap.error(str(exc))
+        write_rows(summarize(rows, key, a.metric + [n for n, _, _ in products]), a.format, sys.stdout)
         return 0
     dup = sorted({m for m in a.metric if a.metric.count(m) > 1})
     if dup:

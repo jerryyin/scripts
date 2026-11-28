@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from log_fixtures import batch, evalscope_db, finish, ts  # noqa: E402,F401
+from log_fixtures import batch, evalscope_db, finish, finish_acc, ts, write_agentic_c1  # noqa: E402,F401
 
 
 def load(rel: str):
@@ -55,6 +56,65 @@ def test_e2e_decompose_residency_phases_and_markdown() -> None:
             assert "started_at" in str(exc)
         else:
             raise AssertionError("phases without times must be refused")
+
+
+def test_benchmark_json_repeated_phase_slices_per_concurrency() -> None:
+    """A matrix benchmark.json repeats a phase at each concurrency: one slice and one row per window."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = []
+    for w, (t0, n) in enumerate(((T, 1), (T + 10, 2))):  # window w: n requests of 2 chunks of 1000, 3 decode lines
+        for i in range(2 * n):
+            lines.append(batch(t0 + 0.1 * i, "Prefill", 0, new_seq=1, new_token=1000, running_req=n))
+        for i in range(3):
+            lines.append(batch(t0 + 0.5 + 0.2 * i, "Decode", 0, running_req=n, gen=50.0, acc=3.0))
+        lines += [finish(t0 + 0.9, f"r{w}{k}", 2000, 0, out=11, acc=3.0) for k in range(n)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        bj = Path(d) / "benchmark.json"
+        bj.write_text(json.dumps({"results": [
+            {"phase": "measured-1", "concurrency": c, "output_dir": f"{d}/o{c}",
+             "started_at": ts(t0 - 0.5), "finished_at": ts(t0 + 5)} for c, t0 in ((1, T), (2, T + 10))]}))
+        assert [w[0] for w in e2e.phase_windows(str(bj))] == ["measured-1", "measured-1"]
+        slices, out = Path(d) / "slices", Path(d) / "out.json"
+        proc = subprocess.run([sys.executable, str(HERE / "e2e_decompose.py"), "--benchmark-json", str(bj),
+                               "--server-log", str(log), "--slices-dir", str(slices), "--out-json", str(out),
+                               "--prompt-tokens", "2000", "--markdown"], capture_output=True, text=True, check=True)
+        assert sorted(p.name for p in slices.iterdir()) == ["measured-1_c1.log", "measured-1_c2.log"]
+        assert [len((slices / f).read_text().splitlines()) for f in ("measured-1_c1.log", "measured-1_c2.log")] == [6, 9]
+        assert [r["label"] for r in json.loads(out.read_text())] == ["measured-1/c1", "measured-1/c2"]
+        rows = [x for x in proc.stdout.splitlines() if x.startswith("| measured-1")]
+        assert [x.split(" | ")[0] for x in rows] == ["| measured-1/c1", "| measured-1/c2"]
+        assert [x.split(" | ")[2] for x in rows] == ["1", "2"]  # requests per rank: each row its own window
+        # a phase that does not repeat keeps its name next to repeated ones; a same-concurrency repeat is refused
+        res = json.loads(bj.read_text())["results"]
+        bj.write_text(json.dumps({"results": [dict(res[0], phase="warmup-1")] + res}))
+        assert [w[0] for w in e2e.phase_windows(str(bj), per_concurrency=True)] == ["warmup-1", "measured-1/c1", "measured-1/c2"]
+        bj.write_text(json.dumps({"results": [res[0], res[0]]}))
+        try:
+            e2e.phase_windows(str(bj), per_concurrency=True)
+        except SystemExit as exc:
+            assert "measured-1/c1" in str(exc)
+        else:
+            raise AssertionError("two windows of one phase and concurrency must be refused")
+
+
+def test_markdown_without_request_prompt_length() -> None:
+    # No finished request of >= 1000 prompt tokens: requests per rank is unknown (None), printed "-".
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = [batch(T + 0.1 * i, "Prefill", 0, new_seq=1, new_token=1000, running_req=2) for i in range(4)]
+    lines += [batch(T + 0.4 + 0.2 * i, "Decode", 0, running_req=2, gen=50.0, acc=3.0) for i in range(6)]
+    lines += [finish(T + 1.6, "a", 500, 0, out=11, acc=3.0), finish(T + 1.7, "b", 500, 0, out=11, acc=2.0)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        r = e2e.decompose(str(log))
+        assert r["request_prompt_tokens"] is None and r["ranks"]["0"]["requests_by_prefill_tokens"] is None
+        r["label"] = "p1"
+        row = e2e.markdown([r], log_interval=10).splitlines()[2]
+        assert row.startswith("| p1 | 1.40 | - | 0.40 = 4 x 100.0 "), row
 
 
 def test_predict_terms_and_whatifs() -> None:
@@ -132,6 +192,118 @@ def test_tpot_from_number_or_retained_kv_repetition_table() -> None:
                 assert word in str(exc)
             else:
                 raise AssertionError(point)
+
+
+def stalled_decode_log(T):
+    """One request on one rank: a Prefill line, a Decode line right after it, 11 clean Decode-line gaps of
+    40 rounds of 10 ms, then one stalled gap of 2 s. Returns (lines, time of the last Decode line)."""
+    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0, seq=seq)  # noqa: E731
+    lines = [batch(T, "Prefill", 0, new_seq=1, new_token=300, cached_token=300000, running_req=1)]
+    t = T + 0.01
+    lines.append(dec(t, 300300))  # dispatched right after the prefill: the next gap holds the prefill
+    t += 0.6; lines.append(dec(t, 300400))
+    for i in range(10):  # 40 rounds of 10 ms per line
+        t += 0.4; lines.append(dec(t, 300500 + i))
+    t += 2.0; lines.append(dec(t, 300600))  # stalled interval
+    return lines, t
+
+
+def test_window_finish_line_splits_decode_from_idle() -> None:
+    """Agentic window mode on a single-rank log: a Finish line splits decode from idle."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines, t = stalled_decode_log(T)
+    lines.append(finish_acc(t + 0.1, "r", 4.0))
+    lines.append(batch(t + 5.0, "Prefill", 0, new_seq=1, new_token=200, cached_token=300600, running_req=1))
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        r = e2e.decompose(str(log), window=(T - 1, T + 30))
+        y = r["ranks"]["0"]
+        assert abs(y["idle_between_waves_s"] - 4.9) < 1e-4  # Finish at t+0.1 to the next Prefill at t+5.0
+
+
+def test_step_table_bins_long_gaps_and_post_prefill() -> None:
+    """--step-table: clean Decode gaps give the step by batch/context, the gap right after a Prefill
+    line is kept out of the bins, and a stalled clean gap is listed with its excess."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines, _ = stalled_decode_log(T)
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        x = e2e.step_table(str(log), 40, (T - 1, T + 30))["ranks"]["0"]
+        row = x["clean_steps"]["bs1/256k-512k"]
+        assert abs(row["step_ms_median"] - 10.0) < 1e-3 and row["accept_len_mean"] == 4.0
+        assert abs(row["ms_per_token_per_request"] - 2.5) < 1e-3
+        assert x["post_prefill_gaps"] == 1
+        assert x["long_clean_gaps"]["n"] == 1 and abs(x["long_clean_gaps"]["excess_s"] - 1.6) < 1e-4
+
+
+def test_window_finish_split_needs_every_running_request_finished() -> None:
+    """Two requests running, one Finish line between two Decode lines: the other request keeps
+    decoding, so the gap stays decode (no idle); after the second Finish the wait is idle."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines = [batch(T, "Prefill", 0, new_seq=2, new_token=2000, running_req=2),
+             batch(T + 1.0, "Decode", 0, running_req=2, gen=400.0),
+             finish_acc(T + 1.5, "a", 3.0),
+             batch(T + 2.0, "Decode", 0, running_req=1, gen=200.0),
+             finish_acc(T + 2.5, "b", 3.0),
+             batch(T + 6.0, "Prefill", 0, new_seq=1, new_token=1000, running_req=1)]
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text("".join(lines))
+        y = e2e.decompose(str(log), window=(T, T + 6.0))["ranks"]["0"]
+        assert abs(y["idle_between_waves_s"] - 3.5) < 1e-4  # only (T+2.5, T+6.0]
+
+
+def test_aiperf_window_is_the_profiling_phase() -> None:
+    e2e = load("e2e_decompose.py")
+    recs = [{"metadata": {"benchmark_phase": "warmup", "request_start_ns": 1_000_000_000, "request_end_ns": 2_000_000_000}},
+            {"metadata": {"benchmark_phase": "profiling", "request_start_ns": 5_000_000_000, "request_end_ns": 7_500_000_000}},
+            {"metadata": {"benchmark_phase": "profiling", "request_start_ns": 6_000_000_000, "request_end_ns": 9_250_000_000}}]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "profile_export.jsonl"
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        assert e2e.aiperf_window(str(p)) == (5.0, 9.25)
+        # as InferenceX counts records: no benchmark_phase is profiling, an errored record is dropped
+        recs += [{"metadata": {"request_start_ns": 4_000_000_000, "request_end_ns": 9_000_000_000}},
+                 {"error": {"code": 500}, "metadata": {"benchmark_phase": "profiling", "request_start_ns": 6_000_000_000,
+                                                       "request_end_ns": 12_000_000_000}}]
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs) + "\n")
+        assert e2e.aiperf_window(str(p)) == (4.0, 9.25)
+
+
+def test_agentic_c1_window_places_short_turns_and_client_gaps() -> None:
+    """AgentX at C=1 on one rank (Finish lines with Accept_num_tokens_avg only): with the AIPerf window, a
+    short turn's Prefill -> next Prefill gap and a long turn's last Decode -> next Prefill gap end decode at
+    the turn's Finish line, so prefill is the chunks, decode the rounds and the client gaps idle; the only
+    loss is the last turn's rounds after its last Decode line (no RequestStats token counts for a tail)."""
+    e2e = load("e2e_decompose.py")
+    with tempfile.TemporaryDirectory() as d:
+        truth = write_agentic_c1(d)
+        log, pe = Path(d) / "server.log", Path(d) / "profile_export.jsonl"
+        win = e2e.aiperf_window(str(pe))
+        assert win == truth["window"]
+        y = e2e.decompose(str(log), window=win)["ranks"]["0"]
+        tail = 10 * truth["decode_step_s"]  # last turn: 250 rounds, Decode lines every 40
+        assert abs(y["prefill_time_s"] - truth["prefill_s"]) < 1e-4
+        assert abs(y["decode_time_s"] - (truth["decode_s"] - tail)) < 1e-4
+        assert abs(y["idle_between_waves_s"] - 33.5) < 1e-4  # the client gaps after every Finish
+        assert y["prefill_stalls"]["n_gaps_gt_2x_median"] == 0 and y["chunk_time_s"]["n"] == 4
+        fs = y["finish_split_gaps"]  # 6 turns before the last: 3 short (from their Prefill), 3 from a Decode line
+        assert (fs["n"], fs["from_prefill"]) == (6, 3) and abs(fs["idle_s"] - 33.5) < 1e-4
+        assert abs(fs["prefill_s"] - 3 * 0.125) < 1e-4 and abs(fs["decode_s"] - (20 + 35 + 10 + 3 * 10) * 0.01066) < 1e-4
+        assert e2e.decompose(str(log))["ranks"]["0"]["finish_split_gaps"] is None  # start/end rules: no split
+        st = e2e.step_table(str(log), 40, win)["ranks"]["0"]
+        assert {k: (v["n"], round(v["step_ms_median"], 3)) for k, v in st["clean_steps"].items()} == {
+            "bs1/256k-512k": (9, 10.66), "bs1/512k-1024k": (22, 10.66)}
+        pool = st["clean_all"]
+        assert pool["n"] == 31 and abs(pool["step_ms_median"] - 10.66) < 1e-3 and pool["accept_len_mean"] == 3.5
+        assert abs(pool["ms_per_token_per_request"] - 10.66 / 3.5) < 1e-3
+        md = e2e.step_markdown(e2e.step_table(str(log), 40, win)).splitlines()
+        assert md[-1].startswith("| 0 | all | 31 | 10.66 [10.66, 10.66] | 3.50 | 3.05 |"), md[-1]
 
 
 if __name__ == "__main__":
