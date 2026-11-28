@@ -12,7 +12,8 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
                                 `Req: RID Finish! Accept_num_tokens_avg: X` with stats {"acc_len": X}.
 LogTail follows a growing log from its current end.
 dp_spread(events, windows) sums "#new-seq" of "Prefill batch." lines per attention-DP rank inside each
-named time window [start, end).
+named time window [start, end) (in_windows); dp_tokens(events, windows) sums the Prefill and Mix lines'
+tokens and line counts the same way (--tokens below).
 
 What the batch-line fields count (TokenSpeed tokenspeed-engine/crates/ts-control/src/batch_log.rs, the same
 from 1be88db0 to 377b44e4): a line is written per dispatched round that holds extend (prefill) rows,
@@ -180,17 +181,25 @@ class LogTail:
         return self.lines
 
 
-def dp_spread(events, windows):
-    """{window name: {dp_rank: sum of #new-seq}} over Prefill events with a timestamp; windows are
-    (name, start_epoch_or_None, end_epoch_or_None), a line counts when start <= ts < end. #new-seq is the
-    round's extend rows: a chunked prompt counts once per chunk, Mix rounds are not read (module docstring)."""
-    counts = {name: {} for name, _, _ in windows}
+def in_windows(events, windows, kinds):
+    """(window name, event) for each timestamped event of `kinds` in each window (name, start_epoch_or_None,
+    end_epoch_or_None) with start <= ts < end, in log order; a window without start holds nothing, one without
+    end runs to the end of the log. The window rule of dp_spread and dp_tokens."""
     for e in events:
-        if e["kind"] != "Prefill" or e["ts"] is None or "new_seq" not in e:
+        if e["kind"] not in kinds or e["ts"] is None:
             continue
         for name, start, end in windows:
             if start is not None and e["ts"] >= start and (end is None or e["ts"] < end):
-                counts[name][e["dp_rank"]] = counts[name].get(e["dp_rank"], 0) + e["new_seq"]
+                yield name, e
+
+
+def dp_spread(events, windows):
+    """{window name: {dp_rank: sum of #new-seq}} over the Prefill events in each window (in_windows). #new-seq is the
+    round's extend rows: a chunked prompt counts once per chunk, Mix rounds are not read (module docstring)."""
+    counts = {name: {} for name, _, _ in windows}
+    for name, e in in_windows(events, windows, ("Prefill",)):
+        if "new_seq" in e:
+            counts[name][e["dp_rank"]] = counts[name].get(e["dp_rank"], 0) + e["new_seq"]
     return counts
 
 
@@ -198,26 +207,21 @@ TOKEN_KEYS = ("new_seq", "mix_new_seq", "new_token", "cached_token", "prefill_li
 
 
 def dp_tokens(events, windows):
-    """{window name: {dp_rank: {key: sum}}} over timestamped Prefill and Mix events in [start, end), keys
+    """{window name: {dp_rank: {key: sum}}} over the Prefill and Mix events in each window (in_windows), keys
     TOKEN_KEYS: new_seq / mix_new_seq the #new-seq of Prefill / Mix lines (extend rows: a chunked prompt
     counts once per chunk), new_token and cached_token the sums of #new-token and #cached-token over both
     (a chunked prompt continues on later lines; #cached-token is nonzero only on a request's first chunk;
     #new-token of a Mix line includes its decode rows' tokens), and the Prefill, Mix and cache-hit line
     counts. See the module docstring for what each field counts."""
     out = {name: {} for name, _, _ in windows}
-    for e in events:
-        if e["kind"] not in ("Prefill", "Mix") or e["ts"] is None:
-            continue
-        for name, start, end in windows:
-            if start is None or e["ts"] < start or (end is not None and e["ts"] >= end):
-                continue
-            r = out[name].setdefault(e["dp_rank"], dict.fromkeys(TOKEN_KEYS, 0))
-            mix = e["kind"] == "Mix"
-            r["mix_new_seq" if mix else "new_seq"] += e.get("new_seq") or 0
-            r["mix_lines" if mix else "prefill_lines"] += 1
-            r["new_token"] += e.get("new_token") or 0
-            r["cached_token"] += e.get("cached_token") or 0
-            r["hit_lines"] += 1 if (e.get("cached_token") or 0) > 0 else 0
+    for name, e in in_windows(events, windows, ("Prefill", "Mix")):
+        r = out[name].setdefault(e["dp_rank"], dict.fromkeys(TOKEN_KEYS, 0))
+        mix = e["kind"] == "Mix"
+        r["mix_new_seq" if mix else "new_seq"] += e.get("new_seq") or 0
+        r["mix_lines" if mix else "prefill_lines"] += 1
+        r["new_token"] += e.get("new_token") or 0
+        r["cached_token"] += e.get("cached_token") or 0
+        r["hit_lines"] += 1 if (e.get("cached_token") or 0) > 0 else 0
     return out
 
 
