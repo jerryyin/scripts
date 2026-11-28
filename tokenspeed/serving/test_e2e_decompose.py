@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from log_fixtures import agentic_c1, batch, evalscope_db, finish, ts  # noqa: E402,F401
+from log_fixtures import batch, evalscope_db, finish, finish_acc, ts, write_agentic_c1  # noqa: E402,F401
 
 
 def load(rel: str):
@@ -194,12 +194,10 @@ def test_tpot_from_number_or_retained_kv_repetition_table() -> None:
                 raise AssertionError(point)
 
 
-def test_window_finish_line_splits_decode_from_idle() -> None:
-    """Agentic window mode on a single-rank log: a Finish line splits decode from idle."""
-    e2e = load("e2e_decompose.py")
-    T = 1_800_000_000.0
-    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0).replace(
-        "\n", f", avg_seq_len: {seq}\n")
+def stalled_decode_log(T):
+    """One request on one rank: a Prefill line, a Decode line right after it, 11 clean Decode-line gaps of
+    40 rounds of 10 ms, then one stalled gap of 2 s. Returns (lines, time of the last Decode line)."""
+    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0, seq=seq)  # noqa: E731
     lines = [batch(T, "Prefill", 0, new_seq=1, new_token=300, cached_token=300000, running_req=1)]
     t = T + 0.01
     lines.append(dec(t, 300300))  # dispatched right after the prefill: the next gap holds the prefill
@@ -207,7 +205,15 @@ def test_window_finish_line_splits_decode_from_idle() -> None:
     for i in range(10):  # 40 rounds of 10 ms per line
         t += 0.4; lines.append(dec(t, 300500 + i))
     t += 2.0; lines.append(dec(t, 300600))  # stalled interval
-    lines.append(f"[ts] {ts(t + 0.1)}  INFO ts_control::output: Req: r Finish! Accept_num_tokens_avg: 4.0\n")
+    return lines, t
+
+
+def test_window_finish_line_splits_decode_from_idle() -> None:
+    """Agentic window mode on a single-rank log: a Finish line splits decode from idle."""
+    e2e = load("e2e_decompose.py")
+    T = 1_800_000_000.0
+    lines, t = stalled_decode_log(T)
+    lines.append(finish_acc(t + 0.1, "r", 4.0))
     lines.append(batch(t + 5.0, "Prefill", 0, new_seq=1, new_token=200, cached_token=300600, running_req=1))
     with tempfile.TemporaryDirectory() as d:
         log = Path(d) / "server.log"
@@ -222,15 +228,7 @@ def test_step_table_bins_long_gaps_and_post_prefill() -> None:
     line is kept out of the bins, and a stalled clean gap is listed with its excess."""
     e2e = load("e2e_decompose.py")
     T = 1_800_000_000.0
-    dec = lambda t, seq: batch(t, "Decode", 0, running_req=1, gen=400.0, acc=4.0).replace(
-        "\n", f", avg_seq_len: {seq}\n")
-    lines = [batch(T, "Prefill", 0, new_seq=1, new_token=300, cached_token=300000, running_req=1)]
-    t = T + 0.01
-    lines.append(dec(t, 300300))  # dispatched right after the prefill: the next gap holds the prefill
-    t += 0.6; lines.append(dec(t, 300400))
-    for i in range(10):  # 40 rounds of 10 ms per line
-        t += 0.4; lines.append(dec(t, 300500 + i))
-    t += 2.0; lines.append(dec(t, 300600))  # stalled interval
+    lines, _ = stalled_decode_log(T)
     with tempfile.TemporaryDirectory() as d:
         log = Path(d) / "server.log"
         log.write_text("".join(lines))
@@ -249,9 +247,9 @@ def test_window_finish_split_needs_every_running_request_finished() -> None:
     T = 1_800_000_000.0
     lines = [batch(T, "Prefill", 0, new_seq=2, new_token=2000, running_req=2),
              batch(T + 1.0, "Decode", 0, running_req=2, gen=400.0),
-             f"[ts] {ts(T + 1.5)}  INFO ts_control::output: Req: a Finish! Accept_num_tokens_avg: 3.0\n",
+             finish_acc(T + 1.5, "a", 3.0),
              batch(T + 2.0, "Decode", 0, running_req=1, gen=200.0),
-             f"[ts] {ts(T + 2.5)}  INFO ts_control::output: Req: b Finish! Accept_num_tokens_avg: 3.0\n",
+             finish_acc(T + 2.5, "b", 3.0),
              batch(T + 6.0, "Prefill", 0, new_seq=1, new_token=1000, running_req=1)]
     with tempfile.TemporaryDirectory() as d:
         log = Path(d) / "server.log"
@@ -283,11 +281,9 @@ def test_agentic_c1_window_places_short_turns_and_client_gaps() -> None:
     the turn's Finish line, so prefill is the chunks, decode the rounds and the client gaps idle; the only
     loss is the last turn's rounds after its last Decode line (no RequestStats token counts for a tail)."""
     e2e = load("e2e_decompose.py")
-    lines, recs, truth = agentic_c1(1_800_000_000.0)
     with tempfile.TemporaryDirectory() as d:
+        truth = write_agentic_c1(d)
         log, pe = Path(d) / "server.log", Path(d) / "profile_export.jsonl"
-        log.write_text("".join(lines))
-        pe.write_text("".join(json.dumps(r) + "\n" for r in recs))
         win = e2e.aiperf_window(str(pe))
         assert win == truth["window"]
         y = e2e.decompose(str(log), window=win)["ranks"]["0"]
