@@ -12,6 +12,7 @@ def ts(t: float) -> str:
 
 def batch(t, kind, rank, **f):
     fields = {"Prefill": ["new-seq", "new-token", "cached-token", "running-req", "queue-req"],
+              "Mix": ["new-seq", "new-token", "cached-token", "running-req", "queue-req"],
               "Decode": ["running-req", "gen", "queue-req"]}[kind]
     parts = [f"#dp-rank: {rank}"]
     for name in fields:

@@ -11,14 +11,25 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
                                 (numbers as int/float, quoted strings unquoted, None as None), or from
                                 `Req: RID Finish! Accept_num_tokens_avg: X` with stats {"acc_len": X}.
 LogTail follows a growing log from its current end.
-dp_spread(events, windows) counts new sequences per attention-DP rank ("#new-seq" of "Prefill batch."
-lines) inside each named time window [start, end).
+dp_spread(events, windows) sums "#new-seq" of "Prefill batch." lines per attention-DP rank inside each
+named time window [start, end).
+
+What the batch-line fields count (TokenSpeed tokenspeed-engine/crates/ts-control/src/batch_log.rs, the same
+from 1be88db0 to 377b44e4): a line is written per dispatched round that holds extend (prefill) rows,
+"Prefill" when every row extends, "Mix" when decode rows ride along. "#new-seq" is the round's extend rows,
+so a prompt chunked over k rounds counts k times; "#new-token" is the tokens every row feeds the round
+(extend chunks plus, on a Mix line, the decode rows' tokens); "#cached-token" is the prefix-cache tokens
+ahead of the extend rows the rank logs for the first time (a request's first chunk), 0 for later chunks.
+The lines carry no request id, so requests per rank cannot be counted exactly from them.
 
 usage: batch_log.py LOG   prints the count of each kind (a quick check that a log parses)
        batch_log.py dp-spread LOG --window NAME=START[,END] [--window ...] [--json]
-           new sequences per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
+           new-sequence rows per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
            is given, e.g. 2026-11-12T23:05:00Z); a window without START counts nothing, one without END
-           runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window.
+           runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window. K is the sum of
+           "#new-seq" over Prefill lines, i.e. prefill rows, not requests: a chunked prompt counts once
+           per chunk (over-counting), and a request whose chunks all ran in Mix rounds is not counted
+           (under-counting). It shows how evenly placement spread prefill work, not request counts.
        batch_log.py prefill LOG [LOG ...] (--benchmark-json BJ | --window NAME=START,END ...
                     --prompt-tokens L --requests B) [--chunk-cost] [--tail] [--out-json PATH]
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
@@ -160,8 +171,9 @@ class LogTail:
 
 
 def dp_spread(events, windows):
-    """{window name: {dp_rank: new sequences}} over Prefill events with a timestamp; windows are
-    (name, start_epoch_or_None, end_epoch_or_None), a line counts when start <= ts < end."""
+    """{window name: {dp_rank: sum of #new-seq}} over Prefill events with a timestamp; windows are
+    (name, start_epoch_or_None, end_epoch_or_None), a line counts when start <= ts < end. #new-seq is the
+    round's extend rows: a chunked prompt counts once per chunk, Mix rounds are not read (module docstring)."""
     counts = {name: {} for name, _, _ in windows}
     for e in events:
         if e["kind"] != "Prefill" or e["ts"] is None or "new_seq" not in e:
@@ -197,7 +209,8 @@ def render_dp_spread(counts):
 def dp_spread_main(argv):
     import argparse, json
     ap = argparse.ArgumentParser(prog="batch_log.py dp-spread",
-                                 description="new sequences per attention-DP rank per time window, from Prefill lines")
+                                 description="#new-seq (prefill rows: a chunked prompt counts once per chunk) per attention-DP rank "
+                                             "per time window, from Prefill lines")
     ap.add_argument("log")
     ap.add_argument("--window", action="append", required=True, metavar="NAME=START[,END]")
     ap.add_argument("--json", action="store_true", help="print {window: {rank: count}} as JSON instead")

@@ -39,6 +39,17 @@ def test_dp_spread_counts_new_sequences_per_rank_and_window() -> None:
         "rep2 rank2=7 total=7", "unset  total=0"]
 
 
+def test_dp_spread_counts_prefill_rows_not_requests() -> None:
+    """#new-seq is a round's extend rows: one request chunked over two Prefill rounds counts twice, and a
+    request whose prompt ran in a Mix round (beside decode rows) is not counted (documented, not fixable:
+    the lines carry no request id)."""
+    lines = [batch(T + 1, "Prefill", 0, new_seq=1, new_token=8192, cached_token=4096),  # request a, chunk 1
+             batch(T + 2, "Prefill", 0, new_seq=1, new_token=1808, cached_token=0),     # request a, chunk 2
+             batch(T + 3, "Mix", 1, new_seq=1, new_token=505, cached_token=9000, running_req=5)]  # request b
+    counts = batch_log.dp_spread(batch_log.parse_lines(lines), [("w", T, T + 10)])
+    assert counts == {"w": {0: 2}}
+
+
 def test_parse_window_bounds() -> None:
     start = ts(T)[:19] + "Z"
     assert batch_log.parse_window(f"rep1={start},{ts(T + 10)[:19]}Z") == ("rep1", T, T + 10)
