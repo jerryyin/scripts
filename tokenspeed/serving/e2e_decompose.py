@@ -300,7 +300,8 @@ def step_table(log, interval, window=None, long_factor=1.5):
     step_ms = gap / interval. A gap that holds other ranks' Prefill/Mix lines is "prefill-held": its excess over
     interval x the clean median step of its bin is decode stall caused by prefill. Also per rank: Prefill/Mix
     rounds dispatched while decode requests were resident (#running-req > #new-seq) and their chunk time
-    (gap to the rank's next line when that is a Prefill/Mix line, else the median chunk gap)."""
+    (gap to the rank's next line when that is a Prefill/Mix line, else the median chunk gap). clean_all pools
+    a rank's clean gaps over its bins (n, median, p10, p90, min, max step ms, accepted tokens per round)."""
     ev = [e for e in parse_lines(open(log, errors="replace")) if e["kind"] in ("Prefill", "Mix", "Decode") and e["ts"]]
     if window:
         ev = [e for e in ev if window[0] <= e["ts"] <= window[1]]
@@ -357,7 +358,14 @@ def step_table(log, interval, window=None, long_factor=1.5):
                     long_gaps.append({"end_utc": dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%H:%M:%S.%f")[:-3],
                                       "gap_s": g, "excess_s": g - interval * m / 1e3, "bin": f"bs{k[0]}/{k[1]}"})
         long_gaps.sort(key=lambda x: x["end_utc"])
-        out["ranks"][str(r)] = {"clean_steps": rows, "prefill_held_gaps": len(held_r), "post_prefill_gaps": post_prefill,
+        # every clean gap of the rank pooled over its bins (the rank's overall decode round time)
+        pool = [x for v in bins.values() for x in v]; pacc = [x for v in acc.values() for x in v]
+        pam = statistics.mean(pacc) if pacc else None
+        pooled = {"n": len(pool), "step_ms_median": statistics.median(pool) if pool else None,
+                  "p10": pct(pool, .1), "p90": pct(pool, .9), "min": min(pool, default=None),
+                  "max": max(pool, default=None), "accept_len_mean": pam,
+                  "ms_per_token_per_request": statistics.median(pool) / pam if pool and pam else None}
+        out["ranks"][str(r)] = {"clean_steps": rows, "clean_all": pooled, "prefill_held_gaps": len(held_r), "post_prefill_gaps": post_prefill,
                                 "long_clean_gaps": {"factor": long_factor, "n": len(long_gaps),
                                                     "excess_s": sum(x["excess_s"] for x in long_gaps), "gaps": long_gaps},
                                 "prefill_rounds_with_decode_resident": {"n": pf_res_n, "tokens": pf_res_tok,
@@ -377,7 +385,10 @@ def step_markdown(st):
     lines = ["| rank | bin (running batch / context) | n gaps | step ms median [p10, p90] | accept/step | ms per token per request |",
              "|---|---|---|---|---|---|"]
     for r, x in st["ranks"].items():
-        for k, v in x["clean_steps"].items():
+        steps = dict(x["clean_steps"])
+        if len(steps) > 1 and x.get("clean_all", {}).get("n"):
+            steps["all"] = x["clean_all"]
+        for k, v in steps.items():
             a = v["accept_len_mean"]; t = v["ms_per_token_per_request"]
             lines.append(f"| {r} | {k} | {v['n']} | {v['step_ms_median']:.2f} [{v['p10']:.2f}, {v['p90']:.2f}] | "
                          f"{a:.2f} | {t:.2f} |" if a else f"| {r} | {k} | {v['n']} | {v['step_ms_median']:.2f} | - | - |")

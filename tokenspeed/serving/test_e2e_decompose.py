@@ -303,6 +303,11 @@ def test_agentic_c1_window_places_short_turns_and_client_gaps() -> None:
         st = e2e.step_table(str(log), 40, win)["ranks"]["0"]
         assert {k: (v["n"], round(v["step_ms_median"], 3)) for k, v in st["clean_steps"].items()} == {
             "bs1/256k-512k": (9, 10.66), "bs1/512k-1024k": (22, 10.66)}
+        pool = st["clean_all"]
+        assert pool["n"] == 31 and abs(pool["step_ms_median"] - 10.66) < 1e-3 and pool["accept_len_mean"] == 3.5
+        assert abs(pool["ms_per_token_per_request"] - 10.66 / 3.5) < 1e-3
+        md = e2e.step_markdown(e2e.step_table(str(log), 40, win)).splitlines()
+        assert md[-1].startswith("| 0 | all | 31 | 10.66 [10.66, 10.66] | 3.50 | 3.05 |"), md[-1]
 
 
 if __name__ == "__main__":
