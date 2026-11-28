@@ -69,7 +69,7 @@ decode_log_interval rounds. Mixed batches (if any) are counted as prefill time.
 import argparse, bisect, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from batch_log import parse_lines, parse_ts  # noqa: E402
+from batch_log import parse_lines, parse_ts, quantile as pct  # noqa: E402
 
 
 def sha256(p):
@@ -78,13 +78,6 @@ def sha256(p):
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
     return h.hexdigest()
-
-
-def pct(xs, q):
-    if not xs:
-        return None
-    xs = sorted(xs); k = (len(xs) - 1) * q; i = int(k)
-    return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
 
 
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, window=None):
@@ -257,6 +250,12 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
                   "mean_idle_s": statistics.mean(x["idle_s"] for x in R)}
     res["sum"]["max_rank_prefill_plus_decode_plus_between_wave_idle_s"] = max(
         x["prefill_time_s"] + x["decode_time_s"] + x["idle_between_waves_s"] for x in R)
+    if window:  # the window's Finish lines (and those up to 1 s after it)
+        wfin = [e for e in fin if e["ts"] and window[0] <= e["ts"] <= window[1] + 1.0]
+        accs = [float(e["stats"]["acc_len"]) for e in wfin if isinstance(e["stats"].get("acc_len"), float)
+                and e["stats"]["acc_len"] > 0]
+        res["window_finish_lines"] = {"n": len(wfin), "acc_len_mean_nonzero": statistics.mean(accs) if accs else None,
+                                      "n_acc_len_zero": sum(1 for e in wfin if e["stats"].get("acc_len") == 0)}
     return res
 
 
@@ -664,13 +663,6 @@ def main():
     for i, lg in enumerate(a.log):
         win = aiperf_window(a.window_from_aiperf[i]) if i < len(a.window_from_aiperf) else None
         r = decompose(lg, a.prompt_tokens, window=win)
-        if win:
-            fin = [e for e in parse_lines(open(lg, errors="replace")) if e["kind"] == "Finish" and e["ts"]
-                   and win[0] <= e["ts"] <= win[1] + 1.0]
-            accs = [float(e["stats"]["acc_len"]) for e in fin if isinstance(e["stats"].get("acc_len"), float)
-                    and e["stats"]["acc_len"] > 0]
-            r["window_finish_lines"] = {"n": len(fin), "acc_len_mean_nonzero": statistics.mean(accs) if accs else None,
-                                        "n_acc_len_zero": sum(1 for e in fin if e["stats"].get("acc_len") == 0)}
         if a.step_table:
             r["step_table"] = step_table(lg, a.decode_log_interval, win)
         r["label"] = a.label[i] if i < len(a.label) else os.path.basename(lg)
