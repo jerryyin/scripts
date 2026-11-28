@@ -322,10 +322,10 @@ index ad2797c06..daf90cba6 100644
                  hidden_states.new_zeros(hidden_states.shape)
 diff --git a/python/tokenspeed/runtime/utils/step_timing.py b/python/tokenspeed/runtime/utils/step_timing.py
 new file mode 100644
-index 000000000..bb2110e31
+index 000000000..db1ff2e4b
 --- /dev/null
 +++ b/python/tokenspeed/runtime/utils/step_timing.py
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,351 @@
 +"""TEST-ONLY decode-step component timing (campaign instrumentation, not upstream).
 +
 +Off unless TS_STEP_TIMING=1. Records torch.cuda.Event(enable_timing=True,
@@ -343,8 +343,17 @@ index 000000000..bb2110e31
 +(GPU time between this replay's end and the next replay's start: kernels launched
 +outside the graph plus GPU idle, i.e. the host gap seen by the GPU), host_step_ms
 +(host wall time between the two replay calls) and launch_ms (host time of the replay
-+call itself). Records are harvested only once their events have completed
-+(event.query()), so harvesting never blocks the host or removes its run-ahead.
++call itself).
++
++Harvesting: the marker events are nodes of the captured graph (and, for eager steps, the same
++pool events), so EVERY replay re-records them, not only the sampled ones; a sampled step's markers
++must be read before the next replay of its graph (or the next eager decode) is launched. With
++TS_STEP_TIMING_SYNC=1 (default) that forward first waits for the sampled step's events (the host
++loses its run-ahead once every EVERY replays). With SYNC=0 nothing waits: a record is written once
++its next-begin event completed (event.query()); graph_ms, next_begin_ms, outside_graph_ms,
++host_step_ms and launch_ms stay exact (fresh events per sample), but the marker times are those of a
++later replay, and markers not yet completed are written as None and listed in "incomplete".
++Each seq record carries "sync" so the analyzer can tell.
 +
 +Env:
 +  TS_STEP_TIMING=1                 enable
@@ -353,6 +362,8 @@ index 000000000..bb2110e31
 +  TS_STEP_TIMING_MAX_RECORDS=<n>   stop harvesting after n records (default 4000)
 +  TS_STEP_TIMING_LAYER_STRIDE=<s>  only instrument layers with id % s == 0 (default 1)
 +  TS_STEP_TIMING_EAGER=1           fallback: also time eager (no-graph) decode forwards
++  TS_STEP_TIMING_SYNC=0            never wait for a sampled step before the next forward (default 1:
++                                   wait, so its marker times are its own; see Harvesting above)
 +
 +Draft-model layers (DSpark stages, marked between set_layer_offset(DRAFT_LAYER_OFFSET) and
 +set_layer_offset(0)) are selected by their own id % stride and recorded as id + DRAFT_LAYER_OFFSET,
@@ -373,6 +384,13 @@ index 000000000..bb2110e31
 +_MAX = int(os.environ.get("TS_STEP_TIMING_MAX_RECORDS", "4000"))
 +_STRIDE = max(1, int(os.environ.get("TS_STEP_TIMING_LAYER_STRIDE", "1")))
 +_EAGER = os.environ.get("TS_STEP_TIMING_EAGER", "0") == "1"
++# The captured marker events are re-recorded by EVERY replay of their graph, so a sampled replay's
++# markers must be read before the next replay of that graph is launched. SYNC=1 (default) does that:
++# the replay after a sampled one first waits for it (once every EVERY replays the host loses its
++# run-ahead for one step). SYNC=0 never waits: graph_ms / next_begin_ms / outside_graph_ms /
++# host_step_ms / launch_ms stay exact (their events are fresh per sample), but the marker times are
++# those of the following replay, mostly not yet completed (written as None, "incomplete").
++_SYNC = os.environ.get("TS_STEP_TIMING_SYNC", "1") == "1"
 +DRAFT_LAYER_OFFSET = 1000
 +
 +
@@ -504,7 +522,7 @@ index 000000000..bb2110e31
 +    _S.pool_hint = max(_S.pool_hint, len(seq.names) + 64)
 +    _write({"type": "seq", "sid": seq.sid, "bs": bs, "names": seq.names,
 +            "streams": seq.streams, "dropped": seq.dropped, "pid": os.getpid(),
-+            "rank": _rank(), "stride": _STRIDE, "every": _EVERY})
++            "rank": _rank(), "stride": _STRIDE, "every": _EVERY, "sync": int(_SYNC)})
 +    seq.written = True
 +
 +
@@ -532,7 +550,19 @@ index 000000000..bb2110e31
 +        h0 = time.perf_counter()
 +        last.synchronize()
 +        n = len(seq.names)
-+        t = [round(begin.elapsed_time(seq.pool[i]), 5) for i in range(n)]
++        # With SYNC=0 the next replay of the graph has re-recorded the markers; those it has not
++        # reached yet are not ready and elapsed_time would raise and kill the scheduler (TokenSpeed
++        # 1be88db0 TP4). Record None for them and name them in "incomplete".
++        t, bad = [], []
++        for i in range(n):
++            ev = seq.pool[i]
++            if ev.query():
++                t.append(round(begin.elapsed_time(ev), 5))
++            else:
++                t.append(None)
++                bad.append(i)
++        if bad:
++            meta["incomplete"] = bad
 +        meta["graph_ms"] = round(begin.elapsed_time(end), 5)
 +        nb = extra.get("next_begin")
 +        if nb is not None:
@@ -551,7 +581,7 @@ index 000000000..bb2110e31
 +    now = time.time()
 +    seq = _S.seqs.get(id(graph))
 +    _close_open_step(now, "replay" if seq is not None else "other")
-+    _harvest()
++    _harvest(block=_SYNC)
 +    _S.replays += 1
 +    if seq is None or _S.records + len(_S.pending) >= _MAX or _S.replays % _EVERY:
 +        return None
@@ -582,7 +612,7 @@ index 000000000..bb2110e31
 +        return None
 +    now = time.time()
 +    _close_open_step(now, "eager")
-+    _harvest()
++    _harvest(block=_SYNC)  # this forward re-records the eager pool's events
 +    if _S.eager is None:
 +        _S.eager = _new_seq(_S.pool_hint)
 +    _S.eager_cursor = 0
@@ -606,7 +636,7 @@ index 000000000..bb2110e31
 +    if not seq.written:
 +        _write({"type": "seq", "sid": seq.sid, "bs": None, "eager": True,
 +                "names": seq.names, "streams": seq.streams, "dropped": seq.dropped,
-+                "pid": os.getpid(), "rank": _rank(), "stride": _STRIDE, "every": 1})
++                "pid": os.getpid(), "rank": _rank(), "stride": _STRIDE, "every": 1, "sync": int(_SYNC)})
 +        seq.written = True
 +    elif _S.eager_cursor != len(seq.names):
 +        meta["marker_mismatch"] = _S.eager_cursor

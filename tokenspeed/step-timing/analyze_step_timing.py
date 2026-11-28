@@ -21,6 +21,10 @@ dumps). period_ms / host_gap_ms are the older estimate: host wall time between s
 the replays between them, minus the graph span.
 Draft-model layers (DSpark stages) are dumped as layer id + DRAFT_LAYER_OFFSET (instrumentation.diff,
 step_timing.set_layer_offset); their segments get categories "draft:<category>" in bucket "draft".
+Harvest (instrumentation.diff TS_STEP_TIMING_SYNC): a marker written as null (not completed when a SYNC=0
+dump harvested it, listed in the record's "incomplete") takes the previous marker's time, so its segment
+merges into the one before; the report counts such records per rank and warns, per rank, about records
+whose seq was dumped with SYNC=0 ("sync": 0), whose marker times belong to a later replay.
 --stage-json takes the decode window of one amd-tracking retained-KV stage (stage.json:
 started_unix + prefill_request_seconds .. finished_unix), i.e. one batch x repetition point.
 """
@@ -167,12 +171,23 @@ def stage_window(path, selected=False):
     return max(lo, min(firsts)), min(hi, max(lasts) + (max(periods) if periods else 0.0))
 
 
+def fill_incomplete(t):
+    """Replace None (a marker event that had not completed when harvested) by the previous time."""
+    out, last = [], 0.0
+    for v in t:
+        last = last if v is None else v
+        out.append(last)
+    return out
+
+
 def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=None, wall_to=None, busy_ranks=None):
     os.makedirs(out, exist_ok=True)
     ranks = load(dirpath)
     rows, bucket_rows, summary = [], [], []
     report = [f"# step-timing analysis of {dirpath}", ""]
     per_rank = {}
+    incomplete = collections.defaultdict(collections.Counter)
+    nosync = collections.Counter()  # records whose seq was dumped with SYNC=0 (markers of a later replay)
     for rank, files in sorted(ranks.items()):
         recs = []
         for f, seqs, steps in files:
@@ -181,6 +196,10 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
                 seq = seqs.get(s["sid"])
                 if seq is None or len(s["t"]) != len(seq["names"]):
                     continue
+                if any(v is None for v in s["t"]):
+                    # markers the instrumentation found not completed ("incomplete"): give each
+                    # the time of the marker before it, so its segment merges into the previous one
+                    s = dict(s, t=fill_incomplete(s["t"]))
                 period = None
                 if prev is not None and s["replay"] > prev["replay"]:
                     period = (s["wall"] - prev["wall"]) * 1e3 / (s["replay"] - prev["replay"])
@@ -195,6 +214,10 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             recs = [r for r in recs if r[1].get("bs") == want_bs or r[1].get("padded_bs") == want_bs]
         if not recs:
             report.append(f"rank {rank}: no usable records"); continue
+        for seq, s, _ in recs:  # over the analysed records only (after the window, --skip and --bs)
+            nosync[rank] += seq.get("sync") == 0
+            if s.get("incomplete"):
+                incomplete[rank][tuple(seq["names"][i] for i in s["incomplete"])] += 1
         busy = [r for r in recs if (r[1].get("input_num_tokens") or 0) > 0]
         role = "busy" if len(busy) * 2 >= len(recs) else "idle"
         if busy_ranks is not None:
@@ -226,7 +249,7 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             return f"{spm[k]:.3f} [{pct(v,.1):.3f}, {pct(v,.9):.3f}]" if v else "n/a"
         report += [f"## rank {rank} ({role}; {len(recs)} sampled steps; instrumented layers={n_layers}"
                    + (f" of {expect_layers}" if expect_layers else "") + ")",
-                   f"- GPU graph span median {gmed:.3f} ms; step period median {pmed:.3f} ms; host gap (period - graph) {pmed - gmed:.3f} ms; harvest cost median {statistics.median(harvest):.3f} ms",
+                   f"- GPU graph span median {gmed:.3f} [p10 {pct(graph,.1):.3f}, p90 {pct(graph,.9):.3f}] ms; step period median {pmed:.3f} ms; host gap (period - graph) {pmed - gmed:.3f} ms; harvest cost median {statistics.median(harvest):.3f} ms",
                    f"- graph-replay span vs serving step (median [p10, p90] over {len(SP['next_begin_ms'])} steps whose next "
                    f"forward was a graph replay): GPU step (replay start to next replay start) {q('next_begin_ms')} ms; "
                    f"graph span {gmed:.3f} ms; GPU outside the graph (non-graph kernels + idle) {q('outside_graph_ms')} ms; "
@@ -268,6 +291,14 @@ def analyze(dirpath, out, skip=20, want_bs=None, expect_layers=None, wall_from=N
             im = statistics.median([statistics.median(per_rank[r]["B"][k]) for r in idle if per_rank[r]["B"].get(k)] or [0.0])
             report.append(f"| {k} | {bm:.3f} | {im:.3f} | {im-bm:+.3f} |")
         report.append("")
+    for rank in sorted(r for r, k in nosync.items() if k):
+        report.append(f"rank {rank}: {nosync[rank]} records dumped with SYNC=0: their marker times are those of a later "
+                      f"replay, so the bucket and category tables do not describe the sampled step; only the graph-replay "
+                      f"split (graph span, GPU step, outside-graph, host step, replay call) is exact")
+    for rank in sorted(incomplete):
+        for names, k in incomplete[rank].most_common():
+            report.append(f"rank {rank}: {k} records with markers not completed at harvest (filled with the "
+                          f"previous marker's time): {', '.join(names) or 'unnamed'}")
     for name, data, cols in (("per_category.csv", rows, ["rank", "role", "category", "median_ms", "p10", "p90", "n"]),
                              ("per_bucket.csv", bucket_rows, ["rank", "role", "bucket", "median_ms", "p10", "p90", "n"]),
                              ("summary.csv", summary, ["rank", "role", "n", "graph_ms", "period_ms", "host_gap_ms", "bucket_sum_ms", "layers", "harvest_ms", "main_markers",

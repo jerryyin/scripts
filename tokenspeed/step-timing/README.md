@@ -11,7 +11,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`); the one against `0dd8d477` was this file at toolkit `f7666cd18ceedff1c5c004dfb605fa6d1e58b682`, a commit no longer in this repository's history |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
 | `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage, `--benchmark-json BJ --window PHASE/cB` to one phase x concurrency of an amd-tracking matrix run (windows of `../serving/e2e_decompose.py` `phase_windows`, e.g. `measured-1/c1`); `--self-test` runs without a GPU |
-| `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting only completed records |
+| `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting (`SYNC=1`: a sampled replay or eager step is read before the next one re-records its markers; `SYNC=0`: only completed records, markers not completed written as `null`), and the analyzer on such dumps |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
 
@@ -47,10 +47,24 @@ From the 1be88db0 version on, each sampled decode-graph replay records, besides 
 | `outside_graph_ms` | `next_begin_ms - graph_ms`: GPU time between the end of this replay and the start of the next forward, i.e. kernels launched outside the graph (input preparation, adaptive DSpark verify-budget graphs, sampling or output copies outside the graph) plus GPU idle while the host prepares the next step |
 | `host_step_ms`, `launch_ms` | host wall time between this replay call and the next forward's, and the host time of the replay call itself |
 
-Records are written only once their events have completed (`event.query()`), so harvesting never
-synchronizes the host with the GPU and does not remove the scheduler's run-ahead (the e8fd096e version
-synchronized on the previous sampled replay, which held the host once every `EVERY` replays). The
-analyzer's report gives, per rank, the median [p10, p90] of the GPU step, graph span, outside-graph time,
+The marker events are nodes of the captured graph, so **every** replay of that graph re-records them,
+not only the sampled ones (an eager step likewise records the same pool events again): a sampled
+replay's markers must be read before the next replay of its graph (or the next timed eager decode) is
+launched. `SYNC=1` (`TS_STEP_TIMING_SYNC`, the default) does that: the forward after a sampled one
+first waits for it (the host loses its run-ahead once every `EVERY` replays, as in the e8fd096e
+version; at TokenSpeed 1be88db0 TP4 C=1 the serving step did not move, 9.73-9.88 ms against
+9.79-9.83 ms with `SYNC=0`, because the host does not run ahead of the GPU there; the analyzer's
+`harvest cost` is that wait, about one graph span). `SYNC=0` never waits: records are written once
+`next_begin` completed (`event.query()`), so `graph_ms`, `next_begin_ms`, `outside_graph_ms`,
+`host_step_ms` and `launch_ms` (fresh events per sample) stay exact, but the marker times are those of
+a later replay, and the markers it has not reached yet are written as `null` and listed in the
+record's `incomplete`. Before this, `elapsed_time` raised on them and killed every TP rank's scheduler
+at the first harvest ("Both events must be completed before calculating elapsed time", TokenSpeed
+1be88db0 TP4). Each `seq` record carries `sync` (1 or 0). The analyzer fills an incomplete marker with
+the previous marker's time and, per rank, counts the analysed records with incomplete markers and warns
+about records dumped with `SYNC=0`, whose bucket and category tables do not describe the sampled step;
+use `SYNC=0` only for the graph-replay split below. The analyzer's report gives, per rank, the median
+[p10, p90] of the GPU step, graph span, outside-graph time,
 host step and replay call over the steps whose next forward was a decode replay (`next_kind` `replay`),
 and `summary.csv` their medians (`gpu_step_ms`, `outside_graph_ms`, `host_step_ms`, `launch_ms`,
 `split_n`); `step_breakdown.py table` prints them as rows. Reading: `graph_ms` close to the serving step
@@ -81,7 +95,7 @@ python3 "$AT/skills/inference_engine/benchmark/scripts/manage_server.py" run \
   --client canonical-L50000-O500 --emit-job "$OUT/job.sh" --run-dir "$OUT/run" \
   --model-path "$MODEL_PATH" --tokenspeed-source "$TS" --client-venv "$OUT/evalscope-venv"
 # inside the GPU lease (HIP_VISIBLE_DEVICES = 4 GPUs):
-TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=200000 \
+TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=200000 SYNC=1 \
   ./timed.sh "$OUT/step-timing" -- bash "$OUT/job.sh"
 ```
 
