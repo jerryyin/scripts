@@ -31,7 +31,9 @@ Attribution rule (per rank, consecutive lines a -> b of that rank, gap = b.ts - 
     a gap a -> b holding at least as many Finish lines as line a's running requests ends them all at
     the last of them (lf): prefill gets min(lf - a, c_med) when a is Prefill/Mix, decode the rest of
     [a, lf], and (lf, b] is 'idle_between_waves'; c_med then comes only from Prefill->Prefill gaps
-    without a Finish line (chunks of one request).
+    without a Finish line (chunks of one request). Such gaps are counted per rank in finish_split_gaps
+    (n; from_prefill, those starting at a Prefill/Mix line, e.g. a turn shorter than one Decode-line
+    interval; and the prefill, decode and idle seconds they were given).
 Per rank it also reports residency (max running requests, max queued requests on Decode lines,
 i.e. waiting while the rank decodes) and the gap between
 consecutive Decode lines at the rank's full batch with no prefill between them (one log interval
@@ -157,11 +159,14 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
         dd = [g for a, b, g in gaps if a["kind"] == "Decode" and b["kind"] == "Decode"]
         dmed = statistics.median(dd) if dd else None
         tp = td = gap_idle = 0.0; nb = 0; stall_n = 0; stall_s = 0.0
+        fsplit = {"n": 0, "from_prefill": 0, "prefill_s": 0.0, "decode_s": 0.0, "idle_s": 0.0}
         for a, b, g in gaps:
             lf = all_finished(a, b) if fts else None
             if lf is not None:  # requests ended at lf: [a, lf] is its chunk and/or decode, (lf, b] waits for arrivals
                 c = min(lf - a["ts"], cmed(a.get("new_token", 0))) if a["kind"] in ("Prefill", "Mix") else 0.0
                 tp += c; td += lf - a["ts"] - c; gap_idle += b["ts"] - lf
+                fsplit["n"] += 1; fsplit["from_prefill"] += a["kind"] in ("Prefill", "Mix")
+                fsplit["prefill_s"] += c; fsplit["decode_s"] += lf - a["ts"] - c; fsplit["idle_s"] += b["ts"] - lf
                 if a["kind"] in ("Prefill", "Mix") and b["kind"] not in ("Prefill", "Mix"):
                     nb += 1
                 continue
@@ -241,6 +246,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
             "decode_line_interval_median_s": dmed, "decode_lines_without_reference": unref,
             "estimated_rank_end_uncapped_s": rank_end_uncapped - t0, "tail_after_last_line_s": tail,
             "prefill_stalls": {"n_gaps_gt_2x_median": stall_n, "excess_s": stall_s},
+            "finish_split_gaps": fsplit if fts else None,
             "fractions": {"prefill": tp / span, "decode": td / span, "idle": idle / span}}
     R = res["ranks"].values()
     res["sum"] = {"prefill_tokens": sum(x["prefill_tokens"] for x in R),
@@ -683,7 +689,9 @@ def main():
             print(f" rank{k}: req={x['requests_by_prefill_tokens']} chunks={x['prefill_chunks']} "
                   f"prefill={x['prefill_time_s']:.2f}s ({x['prefill_tok_per_s_while_prefilling'] or 0:.0f} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms over {x['chunk_time_s']['n']} gaps) "
                   f"decode={x['decode_time_s']:.2f}s ({x['decode_tok_per_s_while_decoding'] or 0:.1f} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
-                  f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
+                  f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s "
+                  + (f"finish-split={x['finish_split_gaps']['n']} ({x['finish_split_gaps']['from_prefill']} from prefill) "
+                     if x.get('finish_split_gaps') else "") + f"tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
     for r in runs:

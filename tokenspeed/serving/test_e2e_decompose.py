@@ -296,6 +296,10 @@ def test_agentic_c1_window_places_short_turns_and_client_gaps() -> None:
         assert abs(y["decode_time_s"] - (truth["decode_s"] - tail)) < 1e-4
         assert abs(y["idle_between_waves_s"] - 33.5) < 1e-4  # the client gaps after every Finish
         assert y["prefill_stalls"]["n_gaps_gt_2x_median"] == 0 and y["chunk_time_s"]["n"] == 4
+        fs = y["finish_split_gaps"]  # 6 turns before the last: 3 short (from their Prefill), 3 from a Decode line
+        assert (fs["n"], fs["from_prefill"]) == (6, 3) and abs(fs["idle_s"] - 33.5) < 1e-4
+        assert abs(fs["prefill_s"] - 3 * 0.125) < 1e-4 and abs(fs["decode_s"] - (20 + 35 + 10 + 3 * 10) * 0.01066) < 1e-4
+        assert e2e.decompose(str(log))["ranks"]["0"]["finish_split_gaps"] is None  # start/end rules: no split
         st = e2e.step_table(str(log), 40, win)["ranks"]["0"]
         assert {k: (v["n"], round(v["step_ms_median"], 3)) for k, v in st["clean_steps"].items()} == {
             "bs1/256k-512k": (9, 10.66), "bs1/512k-1024k": (22, 10.66)}
