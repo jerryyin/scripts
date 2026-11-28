@@ -10,7 +10,7 @@ and the timing events slow the graph, so numbers from it are labelled instrument
 | --- | --- |
 | `instrumentation.diff` | The patch, against TokenSpeed `1be88db0a7b020d1cc45241eb02935c03d692335` (DeepSeek V4.1 model, MoE and DSpark draft files, forward step, Gluon Petit `mega_moe.py`, new `runtime/utils/step_timing.py`); the version against `e8fd096ed80112d6108725bad1fbdc3accb0a559` is this file at toolkit `98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57` (`git show 98f245c1b56f1e3fb0b5bcbd0e0c3e0704a83b57:tokenspeed/step-timing/instrumentation.diff`) |
 | `timed.sh` | Run `ts serve` (or any command) with the patched copy first on `PYTHONPATH` and the `TS_STEP_TIMING_*` variables set |
-| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage, `--benchmark-json BJ --window PHASE/cB` to one phase x concurrency of an amd-tracking matrix run (windows of `../serving/e2e_decompose.py` `phase_windows`, e.g. `measured-1/c1`); `--self-test` runs without a GPU |
+| `analyze_step_timing.py` | Turn the per-rank dumps into a per-component breakdown and the graph-replay span against the serving step (below); `--stage-json` (with `--stage-selected`) restricts it to one retained-KV stage, `--benchmark-json BJ --window PHASE-cC` to one phase x concurrency of an amd-tracking matrix run (windows of `../serving/e2e_decompose.py` `phase_windows`, e.g. `measured-1-c1`); `--self-test` runs without a GPU |
 | `test_step_timing_module.py` | CPU test of the runtime module the patch adds (`step_timing.py`, read from `instrumentation.diff`) with a fake `torch`: sampled spans, the GPU step to the next forward and its kind, harvesting (`SYNC=1`: a sampled replay or eager step is read before the next one re-records its markers; `SYNC=0`: only completed records, markers not completed written as `null`), and the analyzer on such dumps |
 | `categories.json` | Kernel-name to category map for DeepSeek V4.1, the project-specific input to `profiling/analyze_trace.py` |
 | `step_breakdown.py`, `components.json` | Component tables from the analyzer output: per-rank time of each requested component (`components.json` maps them to analyzer categories and timing markers), a per-marker overhead correction against the uninstrumented step (`--clean-ms`, e.g. the stride-40 graph span), two points side by side (`diff`), the instrumentation overhead per point (`overhead`), the Gluon Petit MoE's share of the step projected to all MoE layers (`share`, with `--marker-us` also net of a fixed per-marker cost; rows for `numerics/range_compare.py`), and the whole step's components projected the same way with a `remainder` row (`project`, `--groups` for coarse groups); tests in `test_step_breakdown.py` |
@@ -109,7 +109,7 @@ TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=$MAX_RECORDS 
 last window you analyse, warmup phases included: about the decode steps run until then / `EVERY`, where
 a request's decode steps are its output tokens / accepted tokens per step. The default 4000 can stop
 recording before a late window. Then per phase x concurrency window of the matrix's `benchmark.json`
-(`PHASE/cB`, e.g. `measured-1/c1`):
+(`PHASE-cC`, e.g. `measured-1-c1`):
 
 ```bash
 BJ=$OUT/run/$CLIENT/tokenspeed/benchmark.json
@@ -184,6 +184,14 @@ drafter replays the decode graph, and the DSpark draft model marks `draft.begin`
 (`step_timing.DRAFT_LAYER_OFFSET`); the analyzer reports them as `draft:<category>`. The Petit MoE of
 one layer is `moe.experts` + `petit.s1` + `petit.s2` + `petit.comb` + `petit.post` (router/top-k,
 shared expert and the add excluded); without the kernel markers `moe.experts` alone spans the call.
+
+Not yet in this patch: the EP4 campaign's version (TokenSpeed `100621d17`; tag
+`archive/ep4-beats-tp4-campaign` of this repository, `tokenspeed/step-timing/instrumentation.diff`)
+also marks `moe.split` (attention TP with Petit's MoE: this rank's slice of the replicated rows),
+`moe.comm` (before the MoE output all-reduce, where one runs after the call) and, with
+`TOKENSPEED_PETIT_FUSE_POST=1`, `petit.cwait` / `petit.combr` in place of `petit.comb`.
+`components.json` and `step_breakdown.py` already know those categories; porting the markers to
+this patch is open.
 
 The markers cover every DeepSeek V4.1 decode path of the layouts the recipes serve:
 attention (TP, attention DP) in `DeepseekV41Attention`, where `attn.fork` .. `attn.kvidx.e` bracket the

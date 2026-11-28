@@ -10,6 +10,7 @@ parse_line(text) returns None for any other line, else a dict with "ts" (epoch s
   "Finish"                      from `Req: RID Finish! RequestStats(...)`, with "rid" and "stats"
                                 (numbers as int/float, quoted strings unquoted, None as None), or from
                                 `Req: RID Finish! Accept_num_tokens_avg: X` with stats {"acc_len": X}.
+acceptance_by_rid(paths) maps each request id to its acceptance: the acc_len of its Finish line, either form.
 LogTail follows a growing log from its current end.
 dp_spread(events, windows) sums "#new-seq" of "Prefill batch." lines per attention-DP rank inside each
 named time window [start, end) (in_windows); dp_tokens(events, windows) sums the Prefill and Mix lines'
@@ -41,6 +42,10 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            of a session reach the rank that holds their prefix. --requests NAME=N (a window's request
            count from the client, e.g. AIPerf's profiled requests) adds prefilled and cached tokens per
            request on that window's "all" row. With --json the output is {"spread": ..., "tokens": ...}.
+       batch_log.py line-gaps THRESHOLD_S LOG [LOG ...] [--out-json PATH]
+           per log and attention-DP rank, every gap above THRESHOLD_S seconds between consecutive
+           Prefill/Mix/Decode lines of that rank, with both lines' kinds and log timestamps (the times of
+           prefill-chunk stalls, e.g. as bounds of a GPU-activity window).
        batch_log.py prefill LOG [LOG ...] (--benchmark-json BJ | --window NAME=START,END ...
                     --prompt-tokens L --requests B) [--chunk-cost] [--tail] [--out-json PATH]
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
@@ -65,7 +70,10 @@ usage: batch_log.py LOG   prints the count of each kind (a quick check that a lo
            final prefill step (last Prefill line to last Finish line) by tail-chunk size and a
            least-squares line final_step_ms = fixed + per_token x tail_tokens over group medians.
 """
-import collections, datetime as dt, re, statistics, sys, time
+import collections, datetime as dt, os, re, statistics, sys, time
+
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "numerics"))
+from range_compare import percentile  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS_PATTERNS = [
@@ -92,7 +100,7 @@ FINISH_RE = re.compile(r"Req: (\S+) Finish! RequestStats\((.*)\)")
 # TokenSpeed builds whose Finish! line carries only the request's mean accepted tokens per verify step
 # (e.g. 1be88db0: "Req: RID Finish! Accept_num_tokens_avg: 3.4"); parsed as a Finish event whose stats
 # hold only "acc_len" (0 for a request that never ran a verify step, e.g. one output token).
-FINISH_ACC_RE = re.compile(r"Req: (\S+) Finish! Accept_num_tokens_avg: ([-+]?\d+(?:\.\d+)?)")
+FINISH_ACC_RE = re.compile(r"Req: (\S+) Finish! Accept_num_tokens_avg: " + NUM)
 STAT_RE = re.compile(r"(\w+)=('[^']*'|[^,()]+)")
 
 
@@ -163,6 +171,20 @@ def parse_line(raw):
 
 def parse_lines(lines):
     return [e for e in (parse_line(l) for l in lines) if e is not None]
+
+
+def acceptance_by_rid(paths):
+    """{rid: acceptance} from the server logs at paths: the acc_len of each Finish line (RequestStats, or
+    Accept_num_tokens_avg), a request's mean tokens per speculative verify step; a RequestStats line whose
+    acc_len is not a number (None without speculative decoding) gives none."""
+    out = {}
+    for path in paths:
+        with open(path, errors="replace") as fh:
+            for e in parse_lines(fh):
+                v = e["stats"].get("acc_len") if e["kind"] == "Finish" else None
+                if isinstance(v, (int, float)):
+                    out[e["rid"]] = float(v)
+    return out
 
 
 class LogTail:
@@ -305,12 +327,45 @@ def dp_spread_main(argv):
     return 0
 
 
-def quantile(xs, q):
-    xs = sorted(xs)
-    if not xs:
-        return None
-    k = (len(xs) - 1) * q; i = int(k)
-    return xs[i] + (xs[min(i + 1, len(xs) - 1)] - xs[i]) * (k - i)
+def line_gaps(paths, threshold):
+    """Per log and rank, every gap > threshold s between consecutive Prefill/Mix/Decode lines of that rank
+    (batch_log.parse_line; no #dp-rank -> rank 0), with both lines' kinds and timestamps as written in the log.
+    Gives timestamps to the prefill-chunk stalls e2e_decompose.py only counts (prefill_stalls), e.g. as
+    activity-window bounds."""
+    iso = next(p for p, kind in TS_PATTERNS if kind == "iso")
+    out = []
+    for path in paths:
+        prev = {}
+        for e in parse_lines(open(path, errors="replace")):
+            if e["kind"] == "Finish" or e["ts"] is None:
+                continue
+            m = iso.search(e["line"]); r = e["dp_rank"]
+            text = m.group(0) if m else dt.datetime.fromtimestamp(e["ts"], dt.timezone.utc).isoformat()
+            if r in prev and e["ts"] - prev[r][0] > threshold:
+                out.append({"log": os.path.basename(path), "rank": r, "from_kind": prev[r][1], "to_kind": e["kind"],
+                            "from_utc": prev[r][2], "to_utc": text, "gap_s": e["ts"] - prev[r][0]})
+            prev[r] = (e["ts"], e["kind"], text)
+    return out
+
+
+def line_gap_lines(gaps):
+    return [f"{g['log']} rank {g['rank']} {g['from_kind']} -> {g['to_kind']} {g['from_utc']} -> {g['to_utc']} "
+            f"{g['gap_s']:.2f}s" for g in gaps]
+
+
+def line_gaps_main(argv):
+    import argparse, json
+    ap = argparse.ArgumentParser(prog="batch_log.py line-gaps",
+                                 description="per log and rank, every gap above THRESHOLD_S between consecutive batch lines")
+    ap.add_argument("threshold", type=float, metavar="THRESHOLD_S")
+    ap.add_argument("log", nargs="+")
+    ap.add_argument("--out-json")
+    a = ap.parse_args(argv)
+    gaps = line_gaps(a.log, a.threshold)
+    if a.out_json:
+        json.dump(gaps, open(a.out_json, "w"), indent=1)
+    print("\n".join(line_gap_lines(gaps)))
+    return 0
 
 
 def prefill_point(events, prompt_tokens, requests, start=None, end=None):
@@ -348,7 +403,7 @@ def prefill_point(events, prompt_tokens, requests, start=None, end=None):
             "first_prefill_line_s": P[0]["ts"], "last_prefill_line_s": P[-1]["ts"],
             "last_chunk_tokens": P[-1].get("new_token", 0),
             "chunk_time_median_s": med, "chunk_time_source": src,
-            "chunk_time_p10_s": quantile(pp, .1), "chunk_time_p90_s": quantile(pp, .9),
+            "chunk_time_p10_s": percentile(pp, .1), "chunk_time_p90_s": percentile(pp, .9),
             "chunk_time_by_tokens": {str(k): {"n": len(v), "median_s": statistics.median(v)}
                                      for k, v in sorted(by.items())},
             "prefill_span_s": span, "prefill_tok_per_s": tok / span if span else None,
@@ -410,8 +465,8 @@ def chunk_cost(points):
                        "B1" if p["requests"] == 1 else "B>=4")
                 pool.setdefault(key, []).append(g["dt_s"])
     return [{"chunk_tokens": k[0], "new_seq": k[1], "completes_request": k[2], "batch_class": k[3], "n": len(v),
-             "median_ms": 1e3 * statistics.median(v), "p10_ms": 1e3 * quantile(v, .1),
-             "p90_ms": 1e3 * quantile(v, .9), "tok_per_s": k[0] / statistics.median(v)}
+             "median_ms": 1e3 * statistics.median(v), "p10_ms": 1e3 * percentile(v, .1),
+             "p90_ms": 1e3 * percentile(v, .9), "tok_per_s": k[0] / statistics.median(v)}
             for k, v in sorted(pool.items())]
 
 
@@ -467,12 +522,12 @@ def prefill_main(argv):
         from e2e_decompose import phase_windows
         bj = json.load(open(a.benchmark_json))
         # one point per result; the matrix reuses phase names across concurrencies (measured-1 at c1, c2, ...),
-        # so once any phase name repeats every name gets "/c<concurrency>" (e2e_decompose.py suffixes only the
-        # repeated names; unifying the two would change one tool's output for a mix of repeated and single phases)
+        # so once any phase name repeats every name gets "/c<concurrency>" (e2e_decompose.py phase_windows labels
+        # only the repeated names, PHASE-cC; only its times are used here, so this tool's names stay as they were)
         names = [r["phase"] for r in bj["results"]]
         dup = len(set(names)) < len(names)
-        specs = [(f'{ph}/c{int(r["concurrency"])}' if dup else ph, s, e, int(bj["prompt_tokens"]), int(r["concurrency"]))
-                 for r, (ph, _, s, e) in zip(bj["results"], phase_windows(a.benchmark_json))]
+        specs = [(f'{r["phase"]}/c{int(r["concurrency"])}' if dup else r["phase"], s, e, int(bj["prompt_tokens"]),
+                  int(r["concurrency"])) for r, (_, _, s, e) in zip(bj["results"], phase_windows(a.benchmark_json))]
     for w in a.window:
         name, s, e = parse_window(w)
         if s is None or e is None:
@@ -515,6 +570,8 @@ if __name__ == "__main__":
         sys.exit(dp_spread_main(sys.argv[2:]))
     if sys.argv[1:2] == ["prefill"]:
         sys.exit(prefill_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["line-gaps"]:
+        sys.exit(line_gaps_main(sys.argv[2:]))
     if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0 if len(sys.argv) == 2 else 2)

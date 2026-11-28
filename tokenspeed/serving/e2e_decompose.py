@@ -34,14 +34,35 @@ Attribution rule (per rank, consecutive lines a -> b of that rank, gap = b.ts - 
     without a Finish line (chunks of one request). Such gaps are counted per rank in finish_split_gaps
     (n; from_prefill, those starting at a Prefill/Mix line, e.g. a turn shorter than one Decode-line
     interval; and the prefill, decode and idle seconds they were given).
+The busiest rank of a run, in every table, model and fit below, is the rank with the largest prefill + decode
+time (busiest_rank).
 Per rank it also reports residency (max running requests, max queued requests on Decode lines,
 i.e. waiting while the rank decodes) and the gap between
 consecutive Decode lines at the rank's full batch with no prefill between them (one log interval
 of decode rounds; --decode-log-interval converts it to a per-round time).
 
+prefill_to_decode_gap_s (per rank): every Prefill/Mix line followed by a Decode line of the same rank is
+a boundary between a prefill and the decode rounds after it (the first Decode line can come up to one
+--decode-log-interval of rounds after the chunk). Per rank it gives n (boundaries), median and max
+gap (s), the max gap's two line timestamps (max_prefill_line_utc, max_decode_line_utc) and stalls:
+every boundary whose gap exceeds max(2 x (c_med(chunk) + Decode-line interval median), 1 s), with its
+gap_s, prefill_line_utc and decode_line_utc. A long one is a request stalled between its last prefill
+chunk and its first decode round (e.g. the first decode after a 50,000-token prefill). With
+--benchmark-json each (phase, concurrency) slice gets its own record; a boundary whose two lines fall
+in different slices is in neither; a gap split at Finish lines (finish_split_gaps above) ends requests and
+waits for arrivals, so it is not a boundary. The per-rank stdout line prints it as p2d=n/median/max s, stalls N.
+
+--samples SAMPLES_JSONL (repeatable; amd-tracking apps/shared/gpu_admission.py samples, e.g. the load window's
+and the measurement window's) adds gpu_activity to every stall record: the per-GPU activity, state and timeline
+of profiling/gpu_activity.py for three windows, before_prefill (--samples-window s before the last Prefill/Mix
+line), stall (from --samples-margin s after that line to --samples-margin s plus one Decode-line interval before
+the first Decode line) and after_decode (--samples-window s from the first Decode line), and stall_timeline from
+before_prefill to after_decode. One stdout line per stall window is printed. A window the log shows without a
+Decode line (e.g. after a 1-output request's last Prefill line) is profiling/gpu_activity.py --window's job.
+
 With --benchmark-json (amd-tracking run_evalscope_matrix.py output) the whole server log is
-cut into one slice per phase first, from the phases' recorded start and finish times; a phase
-the matrix repeats across concurrencies is named PHASE/cB (slice PHASE_cB.log), one per window.
+cut into one slice per phase first, from the phases' recorded start and finish times; a phase with
+one result per concurrency (a matrix ladder) is cut per point and labelled PHASE-cC (slice PHASE-cC.log).
 
 --predict models a closed-loop benchmark of R requests of L prompt and O output tokens at
 concurrency C (R/C waves) from the fixed-batch measurements, and swaps measured terms between
@@ -65,11 +86,87 @@ not swap:
 Error: per prefill->decode boundary at most |actual chunk - c_med| (chunk times
 are tight, see chunk_time stats); the tail estimate is bounded by
 decode_log_interval rounds. Mixed batches (if any) are counted as prefill time.
-"""
-import argparse, bisect, collections, csv, datetime as dt, hashlib, json, os, statistics, sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from batch_log import parse_lines, parse_ts, quantile as pct  # noqa: E402
+--chunk-model what-ifs prefill chunk sizes and placements from a two-parameter chunk-time line
+t(x) = a + b x (x tokens in the chunk). --chunk-fit NAME=JSON[,JSON...] fits the line through the medians,
+per chunk size, of the busiest rank's per-size median chunk time over this tool's measured runs (labels
+measured or measured-N), least squares when more than two sizes (runs of one size give no line but
+can still be a DECODE source); --chunk-line NAME=A_MS:B_US states a line
+instead (an assumption, e.g. a bound). A fitted line also reports its fixed share a / t(x) at the largest
+fitted size x (fixed_share, fixed_share_at: how much of a full chunk's time does not scale with its tokens)
+and its spread over repetitions (spread): per size one median per repetition index N (the runs of every
+input file at N together; label measured is N = 1); the line through every combination of one value per
+size (combinations) gives a, b and the fixed share as [min, max] (a_ms_range, b_us_per_token_range,
+fixed_share_range), beside each size's per-repetition values (per_repetition_points_ms, points_ms_range).
+The line table prints the points with their [min, max], the a and b ranges and the fixed share with its
+range. a, b, points and scenarios are those of the medians as before. --chunk-scenario
+NAME=LINE:CHUNK:GROUPS[:DECODE] puts C prompts of
+--prompt-tokens L round-robin on GROUPS independent prefill groups (1 = one TP group; 4 = four DP ranks),
+each group packing its prompts first come first served into CHUNK-token chunks (a prompt's tail shares a
+chunk with the next prompt's head, as TokenSpeed's chunked prefill does). Per --concurrency C it reports
+  prefill_end_s = chunks of the busiest group x t(CHUNK) (the last partial chunk at t(remainder));
+  ttft_own_mean_s = mean over prompts of the end of the chunk holding the prompt's last token;
+and, with DECODE (a --chunk-fit NAME whose runs give, per concurrency, the busiest rank's full-batch
+Decode-line gap / --decode-log-interval and its line-mean acceptance),
+  decode_s = (--output-tokens - 1) / acceptance x step;  tok_per_s = C x O / (prefill_end_s + decode_s),
+the throughput of one wave whose first tokens wait for the whole wave's prefill. Ratios are printed
+against the first scenario.
+
+--point-table JSON... --decode-log-interval N tabulates this tool's JSON (a decomposition), one row per run with ranks:
+the busiest rank (largest prefill + decode time), its prefill chunks x median chunk ms; the full-batch decode round
+(per rank the median full-batch Decode-line gap / N; over the ranks that have one, the upper median, element n // 2
+of the sorted values); and the largest prefill_to_decode_gap_s max over ranks with its rank (Markdown, --out-json).
+
+--accept-split REF=BENCHMARK_JSON --accept-split X=BENCHMARK_JSON ... (amd-tracking matrix benchmark.json files of
+the same workload) splits each configuration's mean end-to-end latency gap to the first (REF), per point (phase
+and concurrency) paired with REF's point of the same phase and concurrency (the same prompts and repetition), into
+  ttft_part_ms   = TTFT_X - TTFT_REF                    (EvalScope "Avg TTFT (ms)")
+  decode_part_ms = D x (TPOT_X - TPOT_REF)              (EvalScope "Avg TPOT (ms)", D = O - 1, O "Avg Output Tokens")
+(a pair whose output lengths differ has no parts), and with --accept-decompose LABEL=JSON (this tool's
+decomposition of that run: --benchmark-json --server-log --out-json) for every label and --decode-log-interval
+N the decode part into DSpark acceptance and speed (below).
+Per point and label: output tok/s, mean TTFT and TPOT (EvalScope summary), the decode step s (the full-batch
+decode round of --point-table: per rank median full-batch Decode-line gap / N, upper median over ranks) and
+the acceptance A from per-request values: --accept-requests LABEL=JSONL (amd-tracking evalscope_degeneracy.py
+--requests output: per request EvalScope's (completion tokens - 1) / (stream chunks - 1)) and, matched by
+request id (the stream's completion id is the server's rid), --accept-server-log LABEL=LOG (the server's
+acc_len of each request's Finish line, `Req: RID Finish! Accept_num_tokens_avg: X` or RequestStats, read by
+batch_log.acceptance_by_rid). The server's values are used when
+every request of the point matched one (the server counts verify steps; EvalScope counts stream chunks, which
+can carry more than one step), else EvalScope's per-request values; acceptance_source names the one used and
+the largest per-request difference between the two is reported. A request of A_i tokens per step decodes in
+(O-1) / A_i steps, so the mean TPOT is s x mean(1/A_i) and A is the harmonic mean 1 / mean(1/A_i); the
+arithmetic means (EvalScope's "Avg Decoded Tok/Iter" among them) are shown for information. The decode
+part splits into
+  step_part_ms   = D x (s_X - s_REF) / A_REF          (X's step at REF's acceptance)
+  accept_part_ms = D x s_X x (1/A_X - 1/A_REF)        (X's acceptance at X's step)
+  other_part_ms  = D x [(TPOT_X - s_X/A_X) - (TPOT_REF - s_REF/A_REF)]  (decode time per token that is not
+                   step / acceptance: prefill rounds interleaved at C >= 2, scheduling gaps)
+which sum to decode_part_ms, and with ttft_part_ms to the latency gap, exactly; shares are parts / gap. The
+two points of a pair must take A from the same source; a pair whose sources differ, or a point without
+per-request acceptance, has no step, acceptance or other part (split_incomplete names why).
+In log terms the decode rate is A / s, so log(rate_X / rate_REF) = log(A_X / A_REF) - log(s_X / s_REF)
+(log_accept, log_step). Per label and concurrency the measured points (phase measured, measured-N) give
+median [min, max] of every part, share and ratio over the per-repetition differences (n counts the repetitions
+that have the part); warmup points
+are listed in the per-point table only. --concurrency-list restricts the concurrencies (e.g. 1,2).
+point_summary (and the last Markdown table) gives per label and concurrency the median [min, max] over the
+measured points of tok/s, TTFT, TPOT, the acceptance used (with its source), EvalScope's summary acceptance
+beside it, the decode step and step/A.
+"""
+import argparse, bisect, collections, csv, datetime as dt, hashlib, itertools, json, math, os, statistics, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "profiling"))
+from batch_log import acceptance_by_rid, parse_lines, parse_ts, percentile  # noqa: E402
+from gpu_activity import (load_samples, own_kfd_pids, parse_iso, window_activity, window_state,  # noqa: E402
+                          window_timeline)
+
+
+def fmt(value, spec):
+    """value formatted with spec, '-' when it is None (a prefill-only run has no decode rate)."""
+    return "-" if value is None else format(value, spec)
 
 
 def sha256(p):
@@ -78,6 +175,109 @@ def sha256(p):
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
     return h.hexdigest()
+
+
+def busiest_rank(ranks):
+    """(rank id, record) of the busiest rank of a run's "ranks": the largest prefill + decode time. Every table,
+    model and fit of this tool takes this one rank."""
+    k = max(ranks, key=lambda q: ranks[q]["prefill_time_s"] + ranks[q]["decode_time_s"])
+    return k, ranks[k]
+
+
+def prefill_to_decode_gaps(p2d, cmed, dmed):
+    """Gaps between a rank's last Prefill/Mix line and its next Decode line: count, median, the
+    largest with both line timestamps, and the ones longer than expected (a chunk + one Decode-line
+    interval, times 2, and at least 1 s) as stalls."""
+    if not p2d:
+        return {"n": 0, "median": None, "max": None, "max_prefill_line_utc": None,
+                "max_decode_line_utc": None, "stalls": []}
+    iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    g, a, b = max(p2d, key=lambda x: x[0])
+    stalls = [{"gap_s": x, "prefill_line_utc": iso(pa["ts"]), "decode_line_utc": iso(pb["ts"])}
+              for x, pa, pb in p2d if x > max(2 * (cmed(pa.get("new_token", 0)) + (dmed or 0)), 1.0)]
+    return {"n": len(p2d), "median": statistics.median(x for x, _, _ in p2d), "max": g,
+            "max_prefill_line_utc": iso(a["ts"]), "max_decode_line_utc": iso(b["ts"]), "stalls": stalls}
+
+
+def attach_samples(runs, samples, window_s=2.0, margin_s=1.0):
+    """Add gpu_activity to every prefill_to_decode_gap_s stall record: the window before the stall (prefill:
+    window_s before the last Prefill/Mix line), the stall itself (from margin_s after that line to the
+    first Decode line minus margin_s plus one Decode-line interval, since that line is logged after up to
+    --decode-log-interval decode rounds) and after it (decode: window_s from the first Decode line)."""
+    own = own_kfd_pids(samples)
+    for r in runs:
+        for x in r["ranks"].values():
+            dli = x.get("decode_line_interval_median_s") or 0.0
+            for st in x["prefill_to_decode_gap_s"]["stalls"]:
+                a, b = parse_iso(st["prefill_line_utc"]), parse_iso(st["decode_line_utc"])
+                stall_end = max(a + margin_s, b - margin_s - dli)
+                acts = {"before_prefill": window_activity(samples, a - window_s, a, own),
+                        "stall": window_activity(samples, a + margin_s, stall_end, own),
+                        "after_decode": window_activity(samples, b, b + window_s, own)}
+                st["gpu_activity"] = {k: {**v, **window_state(v)} for k, v in acts.items()}
+                st["gpu_activity"]["own_kfd_pids"] = sorted(own)
+                st["gpu_activity"]["stall_timeline"] = window_timeline(samples, a - window_s, b + window_s, own)
+    return runs
+
+
+def stall_activity_lines(runs):
+    """One stdout line per stall and window: state and per GPU busy share / own cu_occupancy mean / SDMA share."""
+    out = []
+    for r in runs:
+        for k, x in r["ranks"].items():
+            for st in x["prefill_to_decode_gap_s"]["stalls"]:
+                ga = st.get("gpu_activity")
+                if not ga:
+                    continue
+                out.append(f" stall {r['label']} rank{k} {st['prefill_line_utc']} -> {st['decode_line_utc']} ({st['gap_s']:.2f} s)")
+                for w in ("before_prefill", "stall", "after_decode"):
+                    v = ga[w]
+                    cells = " ".join(
+                        f"g{g}:busy{c['busy_share']:.2f}/cu{fmt(c.get('cu_occupancy_mean'), '.0f')}/sdma{fmt(c.get('sdma_share'), '.3f')}"
+                        for g, c in v["gpus"].items())
+                    out.append(f"   {w:<15} n={v['n_samples']:<3} {v['state']:<9} idle={','.join(v['idle_gpus']) or '-'} {cells}")
+    return out
+
+
+def point_table(paths, interval):
+    """Per run of this tool's JSON(s): the busiest rank (largest prefill + decode time), its prefill chunks x
+    median chunk time, the full-batch decode round (per rank: median full-batch Decode-line gap / interval;
+    over ranks the upper median, element n // 2 of the sorted ranks with a gap) and the largest
+    prefill_to_decode_gap_s max over ranks."""
+    out = []
+    for path in paths:
+        for r in json.load(open(path)):
+            R = r.get("ranks") or {}
+            if not R:
+                continue
+            k, b = busiest_rank(R)
+            chunk = b["chunk_time_s"]["median"] if b.get("chunk_time_s") else None
+            rounds = {q: x["full_batch_line_gap_s"]["median"] / interval for q, x in R.items()
+                      if (x.get("full_batch_line_gap_s") or {}).get("median")}
+            vals = sorted(rounds.values())
+            p2d = {q: x["prefill_to_decode_gap_s"]["max"] or 0.0 for q, x in R.items()}
+            pk = max(p2d, key=p2d.get)
+            out.append({"file": os.path.basename(path), "label": r["label"], "busiest_rank": k,
+                        "prefill_chunks": b["prefill_chunks"], "chunk_median_s": chunk,
+                        "chunks_x_median_s": b["prefill_chunks"] * chunk if chunk is not None else None,
+                        "decode_round_s_by_rank": rounds,
+                        "decode_round_s_upper_median": vals[len(vals) // 2] if vals else None,
+                        "prefill_to_decode_gap_max_s": p2d[pk], "prefill_to_decode_gap_max_rank": pk,
+                        "decode_log_interval": interval})
+    return out
+
+
+def point_table_lines(rows):
+    out = ["| file | run | busiest rank | chunks x median chunk ms = s | full-batch decode round ms (upper median over "
+           "ranks; per rank) | prefill->decode gap max s (rank) |", "|" + "---|" * 6]
+    for x in rows:
+        per = ", ".join(f"{q}:{v * 1e3:.1f}" for q, v in sorted(x["decode_round_s_by_rank"].items()))
+        cm = x["chunk_median_s"]
+        out.append(f"| {x['file']} | {x['label']} | {x['busiest_rank']} | {x['prefill_chunks']} x "
+                   f"{fmt(None if cm is None else cm * 1e3, '.1f')} = {fmt(x['chunks_x_median_s'], '.2f')} | "
+                   f"{fmt(None if x['decode_round_s_upper_median'] is None else x['decode_round_s_upper_median'] * 1e3, '.1f')}"
+                   f" ({per or '-'}) | {x['prefill_to_decode_gap_max_s']:.2f} ({x['prefill_to_decode_gap_max_rank']}) |")
+    return out
 
 
 def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, window=None):
@@ -153,6 +353,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
         dmed = statistics.median(dd) if dd else None
         tp = td = gap_idle = 0.0; nb = 0; stall_n = 0; stall_s = 0.0
         fsplit = {"n": 0, "from_prefill": 0, "prefill_s": 0.0, "decode_s": 0.0, "idle_s": 0.0}
+        p2d = []  # (gap, last Prefill/Mix line, first Decode line) per prefill->decode boundary
         for a, b, g in gaps:
             lf = all_finished(a, b) if fts else None
             if lf is not None:  # requests ended at lf: [a, lf] is its chunk and/or decode, (lf, b] waits for arrivals
@@ -171,6 +372,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
                         stall_n += 1; stall_s += g - c
                 else:
                     c = min(g, cmed(a.get("new_token", 0))); tp += c; td += g - c; nb += 1
+                    p2d.append((g, a, b))
             elif b["kind"] == "Decode" or dmed is None:
                 td += g
             else:  # Decode -> Prefill/Mix: at most one log interval of decode, rest waiting for arrivals
@@ -225,7 +427,7 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
             "estimated_rank_end_s": rank_end - t0, "end_lag_s": t1 - rank_end,
             "prefill_chunks": len(pf), "prefill_tokens": ptok, "requests_by_prefill_tokens": nreq,
             "chunk_tokens_hist": dict(collections.Counter(e.get("new_token", 0) for e in pf)),
-            "chunk_time_s": {"median": cmed_all, "p10": pct(allc, .1), "p90": pct(allc, .9), "n": len(allc)},
+            "chunk_time_s": {"median": cmed_all, "p10": percentile(allc, .1), "p90": percentile(allc, .9), "n": len(allc)},
             "chunk_time_by_size_median_s": {str(k): statistics.median(v) for k, v in sorted(bysize.items())},
             "prefill_time_s": tp, "prefill_time_chunk_model_s": len(pf) * cmed_all,
             "prefill_overhead_vs_chunk_model_s": tp - len(pf) * cmed_all, "prefill_tok_per_s_while_prefilling": ptok / tp if tp else None,
@@ -240,6 +442,9 @@ def decompose(log, req_prompt=None, start_min_tokens=512, out_tokens=None, windo
             "estimated_rank_end_uncapped_s": rank_end_uncapped - t0, "tail_after_last_line_s": tail,
             "prefill_stalls": {"n_gaps_gt_2x_median": stall_n, "excess_s": stall_s},
             "finish_split_gaps": fsplit if fts else None,
+            # a request stalled between its last prefill chunk and its first decode round shows as a long
+            # Prefill/Mix -> Decode gap: at most one chunk plus one Decode-line interval is expected
+            "prefill_to_decode_gap_s": prefill_to_decode_gaps(p2d, cmed, dmed),
             "fractions": {"prefill": tp / span, "decode": td / span, "idle": idle / span}}
     R = res["ranks"].values()
     res["sum"] = {"prefill_tokens": sum(x["prefill_tokens"] for x in R),
@@ -344,8 +549,8 @@ def step_table(log, interval, window=None, long_factor=1.5):
         rows = {}
         for k in sorted(bins):
             v = bins[k]; am = statistics.mean(acc[k]) if acc[k] else None
-            rows[f"bs{k[0]}/{k[1]}"] = {"n": len(v), "step_ms_median": statistics.median(v), "p10": pct(v, .1),
-                                         "p90": pct(v, .9), "accept_len_mean": am,
+            rows[f"bs{k[0]}/{k[1]}"] = {"n": len(v), "step_ms_median": statistics.median(v), "p10": percentile(v, .1),
+                                         "p90": percentile(v, .9), "accept_len_mean": am,
                                          "ms_per_token_per_request": statistics.median(v) / am if am else None}
         # clean gaps (no prefill line anywhere) far above their bin's median: decode stalls with no
         # logged prefill cause (host stalls, compiles, collectives waiting on another rank)
@@ -361,7 +566,7 @@ def step_table(log, interval, window=None, long_factor=1.5):
         pool = [x for v in bins.values() for x in v]; pacc = [x for v in acc.values() for x in v]
         pam = statistics.mean(pacc) if pacc else None
         pooled = {"n": len(pool), "step_ms_median": statistics.median(pool) if pool else None,
-                  "p10": pct(pool, .1), "p90": pct(pool, .9), "min": min(pool, default=None),
+                  "p10": percentile(pool, .1), "p90": percentile(pool, .9), "min": min(pool, default=None),
                   "max": max(pool, default=None), "accept_len_mean": pam,
                   "ms_per_token_per_request": statistics.median(pool) / pam if pool and pam else None}
         out["ranks"][str(r)] = {"clean_steps": rows, "clean_all": pooled, "prefill_held_gaps": len(held_r), "post_prefill_gaps": post_prefill,
@@ -403,39 +608,33 @@ def evalscope(d):
     return None
 
 
-def phase_windows(benchmark_json, per_concurrency=False):
-    """(phase, output_dir, start, end) epoch windows of an amd-tracking EvalScope matrix run, from
-    each result's started_at/finished_at. A matrix repeats a phase name across concurrencies
-    (measured-1 at c1, c2, ...); with per_concurrency, a phase name that repeats becomes PHASE/cB
-    so each window keeps its own slice, and a phase that does not repeat keeps its name (batch_log.py
-    prefill, which reads the default, suffixes every phase once any repeats)."""
+def phase_windows(benchmark_json):
+    """(label, output_dir, start, end) epoch windows of an amd-tracking EvalScope matrix run, from
+    each result's started_at/finished_at; the label is the phase, PHASE-cC for a phase the matrix repeats
+    across concurrencies (measured-1 at c1, c2, ...)."""
     bj = json.load(open(benchmark_json))
     missing = [r.get("phase") for r in bj["results"] if "started_at" not in r or "finished_at" not in r]
     if missing:
         raise SystemExit(f"{benchmark_json}: phases {missing} have no started_at/finished_at "
                          "(recorded by amd-tracking's run_evalscope_matrix.py)")
-    names = [r["phase"] for r in bj["results"]]
-    if per_concurrency:
-        count = collections.Counter(names)
-        names = [f'{r["phase"]}/c{int(r["concurrency"])}' if count[r["phase"]] > 1 and "concurrency" in r
-                 else r["phase"] for r in bj["results"]]
-        dup = sorted(n for n, k in collections.Counter(names).items() if k > 1)
-        if dup:
-            raise SystemExit(f"{benchmark_json}: windows {dup} repeat with the same phase and concurrency")
+    labels = phase_labels(bj["results"])
+    dup = [k for k, n in collections.Counter(labels).items() if n > 1]
+    if dup:
+        raise SystemExit(f"{benchmark_json}: results {dup} share a phase and concurrency")
     return [(n, r["output_dir"], parse_iso(r["started_at"]), parse_iso(r["finished_at"]))
-            for n, r in zip(names, bj["results"])]
+            for n, r in zip(labels, bj["results"])]
 
 
-def parse_iso(text):
-    text = text.rstrip("Z")
-    head, _, frac = text.partition(".")
-    value = dt.datetime.strptime(head, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
-    return value + (float("0." + frac) if frac else 0.0)
+def phase_labels(results):
+    """The label of each matrix result: PHASE-cC for a phase with one result per concurrency (a matrix ladder,
+    so the slices of one phase do not overwrite each other), else PHASE. Runs of this tool carry it as "label"."""
+    count = collections.Counter(r["phase"] for r in results)
+    return [f"{r['phase']}-c{int(r['concurrency'])}" if count[r["phase"]] > 1 and "concurrency" in r else r["phase"]
+            for r in results]
 
 
 def write_slices(logs, windows, out_dir):
-    """Write the lines of the server logs that fall in each window to out_dir/PHASE.log (PHASE/cB to
-    PHASE_cB.log)."""
+    """Write the lines of the server logs that fall in each window to out_dir/LABEL.log."""
     os.makedirs(out_dir, exist_ok=True)
     lines = []
     for log in logs:
@@ -446,7 +645,7 @@ def write_slices(logs, windows, out_dir):
     lines.sort(key=lambda x: x[0])
     paths = []
     for phase, _, a, b in windows:
-        path = os.path.join(out_dir, phase.replace("/", "_") + ".log")
+        path = os.path.join(out_dir, f"{phase}.log")
         with open(path, "w") as fh:
             fh.writelines(text for t, text in lines if a <= t and (b is None or t < b))
         paths.append(path)
@@ -460,8 +659,8 @@ def markdown(runs, log_interval=None):
     lines = [head, "|" + "---|" * 10]
     for r in runs:
         R = r["ranks"]
-        k = max(R, key=lambda q: R[q]["prefill_time_s"] + R[q]["decode_time_s"])
-        b = R[k]; span = r["server_span_s"]
+        k, b = busiest_rank(R)
+        span = r["server_span_s"]
         g = b["full_batch_line_gap_s"]["median"]
         rnd = f"{g / log_interval * 1e3:.1f}" if g and log_interval else "-"
         acc = [R[q]["avg_accept_len_line_mean"] for q in sorted(R)]
@@ -512,7 +711,7 @@ def run_terms(runs, interval, steps):
     """Medians over runs of the busiest rank's prefill, decode and idle time and Decode-line step."""
     if any(not r["ranks"] for r in runs):
         raise SystemExit("a run has no ranks")
-    b = [max(r["ranks"].values(), key=lambda x: x["prefill_time_s"] + x["decode_time_s"]) for r in runs]
+    b = [busiest_rank(r["ranks"])[1] for r in runs]
     if any(x["decode_line_interval_median_s"] is None for x in b):
         raise SystemExit("a run's busiest rank has no consecutive Decode lines")
     accs = [(r.get("requeststats") or {}).get("acc_len_mean") for r in runs]
@@ -582,6 +781,368 @@ def predict_markdown(res):
     return "\n".join(lines) + "\n"
 
 
+
+def _repetition(phase, prefix):
+    """Repetition index of a measured phase: 'measured' (one repetition) -> 1, 'measured-N' -> N."""
+    rest = str(phase)[len(prefix):]
+    if rest == "":
+        return 1
+    if rest.startswith("-") and rest[1:].isdigit():
+        return int(rest[1:])
+    return None
+
+
+def _range(values):
+    v = [x for x in values if x is not None]
+    return {"median": statistics.median(v), "min": min(v), "max": max(v), "n": len(v)} if v else None
+
+
+def harmonic_mean(values):
+    """1 / mean(1/v): the acceptance whose step count matches a set of requests' (each decodes in D / A_i steps)."""
+    return len(values) / sum(1 / v for v in values)
+
+
+def accept_points(label, bench, decomp, interval, server_log=None, requests=None, concurrencies=None):
+    """Per (phase, concurrency) point of one run: tok/s, TTFT, TPOT, the decode step (s) from this tool's
+    decomposition JSON and the acceptance: the harmonic mean of per-request values, the server's when every
+    request matched a server line, else EvalScope's per-request values, else None (acceptance_source None)."""
+    bj = json.load(open(bench))
+    steps = {}
+    for row in point_table([decomp], interval) if decomp else []:
+        steps[row["label"]] = row["decode_round_s_upper_median"]
+    server = acceptance_by_rid(server_log) if server_log else {}
+    per_req = collections.defaultdict(list)
+    for path in requests or []:
+        for line in open(path):
+            if line.strip():
+                x = json.loads(line)
+                per_req[(x["phase"], int(x["concurrency"]))].append(x)
+    out = {}
+    for r, name in zip(bj["results"], phase_labels(bj["results"])):
+        c = int(r["concurrency"])
+        if concurrencies and c not in concurrencies:
+            continue
+        s = r["summary"]
+        point = {"label": label, "phase": r["phase"], "concurrency": c,
+                 "output_tokens": float(s["Avg Output Tokens"]),
+                 "tok_per_s": float(s["Output Throughput (tok/s)"]), "ttft_ms": float(s["Avg TTFT (ms)"]),
+                 "tpot_ms": float(s["Avg TPOT (ms)"]), "latency_ms": float(s["Avg Latency (s)"]) * 1e3,
+                 "acceptance": None, "acceptance_source": None,
+                 "acceptance_evalscope_summary": s.get("Avg Decoded Tok/Iter"),
+                 "step_ms": None if steps.get(name) is None else steps[name] * 1e3}
+        reqs = per_req.get((r["phase"], c), [])
+        acc = [x["acc_len"] for x in reqs if x.get("acc_len") is not None]
+        srv = [server[x["request_id"]] for x in reqs if x.get("request_id") in server]
+        if reqs:
+            point["acceptance_requests"] = acc
+            point["acceptance_requests_mean"] = statistics.mean(acc) if acc else None
+        if reqs and server:
+            point["acceptance_server"] = srv
+            point["acceptance_server_mean"] = statistics.mean(srv) if srv else None
+            point["server_matched_requests"] = len(srv)
+            diffs = [abs(x["acc_len"] - server[x["request_id"]]) for x in reqs
+                     if x.get("acc_len") is not None and x.get("request_id") in server]
+            point["acceptance_evalscope_vs_server_max_abs_diff"] = max(diffs) if diffs else None
+        # The server counts verify steps; EvalScope counts stream chunks, and one chunk can carry more than
+        # one step's tokens, so the server's values (when every request matched) are the ones used.
+        if reqs and len(srv) == len(reqs):
+            point["acceptance"], point["acceptance_source"] = harmonic_mean(srv), "server"
+        elif reqs and len(acc) == len(reqs):
+            point["acceptance"], point["acceptance_source"] = harmonic_mean(acc), "evalscope requests"
+        if point["acceptance"] is not None and point["step_ms"]:
+            point["implied_tpot_ms"] = point["step_ms"] / point["acceptance"]
+        out[(r["phase"], c)] = point
+    return out
+
+
+def accept_split(specs, decomps, interval, server_logs=None, requests=None, concurrencies=None,
+                 phase_prefix="measured"):
+    if len(specs) < 2:
+        raise SystemExit("--accept-split needs REF=BENCHMARK_JSON and at least one more LABEL=BENCHMARK_JSON")
+    server_logs, requests, decomps = server_logs or {}, requests or {}, decomps or {}
+    missing = [l for l, _ in specs if l not in decomps]
+    if decomps and missing:
+        raise SystemExit(f"--accept-split: no --accept-decompose for {missing}")
+    prompts = {json.load(open(p)).get("prompt_tokens") for _, p in specs} - {None}
+    if len(prompts) > 1:
+        raise SystemExit(f"--accept-split: prompt lengths differ ({sorted(prompts)})")
+    points = {l: accept_points(l, p, decomps.get(l), interval, server_logs.get(l), requests.get(l), concurrencies)
+              for l, p in specs}
+    ref = specs[0][0]
+    res = {"reference": ref, "decode_log_interval": interval,
+           "inputs": {l: {"benchmark_json": p, "sha256": sha256(p), "decompose_json": decomps.get(l),
+                          "server_logs": server_logs.get(l), "requests": requests.get(l)} for l, p in specs},
+           "points": [pt for l, _ in specs for pt in points[l].values()], "pairs": [], "summary": []}
+    for label, _ in specs[1:]:
+        for key, x in points[label].items():
+            r = points[ref].get(key)
+            if r is None:
+                continue
+            pair = {"label": label, "reference": ref, "phase": key[0], "concurrency": key[1]}
+            d = x["output_tokens"] - 1
+            pair["tok_per_s_ratio"] = x["tok_per_s"] / r["tok_per_s"]
+            pair["log_tok_per_s_ratio"] = math.log(pair["tok_per_s_ratio"])
+            pair["latency_gap_ms"] = ((x["ttft_ms"] + d * x["tpot_ms"])
+                                      - (r["ttft_ms"] + (r["output_tokens"] - 1) * r["tpot_ms"]))
+            pair["ttft_part_ms"] = x["ttft_ms"] - r["ttft_ms"]
+            if x["output_tokens"] != r["output_tokens"]:
+                pair["split_incomplete"] = f"output lengths differ: {x['output_tokens']:g} vs {r['output_tokens']:g}"
+                res["pairs"].append(pair)
+                continue
+            pair["decode_part_ms"] = d * (x["tpot_ms"] - r["tpot_ms"])
+            if not decomps:
+                pair["split_incomplete"] = "no --accept-decompose (TTFT and decode parts only)"
+            elif x["acceptance_source"] != r["acceptance_source"]:
+                pair["split_incomplete"] = (f"acceptance sources differ: {x['acceptance_source']} vs "
+                                            f"{r['acceptance_source']}")
+            elif x["acceptance_source"] is None:
+                pair["split_incomplete"] = "no per-request acceptance (--accept-requests)"
+            elif not (x["step_ms"] and r["step_ms"]):
+                pair["split_incomplete"] = "no decode step in the decomposition"
+            else:
+                ax, ar, sx, sr = x["acceptance"], r["acceptance"], x["step_ms"], r["step_ms"]
+                pair["acceptance_source"] = x["acceptance_source"]
+                pair.update(acceptance_ratio=ax / ar, step_ratio=sx / sr,
+                            log_accept=math.log(ax / ar), log_step=-math.log(sx / sr),
+                            step_part_ms=d * (sx - sr) / ar, accept_part_ms=d * sx * (1 / ax - 1 / ar),
+                            other_part_ms=d * ((x["tpot_ms"] - sx / ax) - (r["tpot_ms"] - sr / ar)))
+                g = pair["latency_gap_ms"]
+                for k in ("ttft", "step", "accept", "other"):
+                    pair[f"{k}_share"] = pair[f"{k}_part_ms"] / g if g else None
+            res["pairs"].append(pair)
+        cs = sorted({p["concurrency"] for p in res["pairs"] if p["label"] == label})
+        for c in cs:
+            meas = [p for p in res["pairs"] if p["label"] == label and p["concurrency"] == c
+                    and str(p["phase"]).startswith(phase_prefix)]
+            row = {"label": label, "reference": ref, "concurrency": c, "repetitions": len(meas),
+                   "split_incomplete": sum("split_incomplete" in p for p in meas)}
+            for k in ("tok_per_s_ratio", "acceptance_ratio", "step_ratio", "latency_gap_ms", "ttft_part_ms",
+                      "decode_part_ms", "step_part_ms", "accept_part_ms", "other_part_ms", "ttft_share", "step_share",
+                      "accept_share", "other_share", "log_tok_per_s_ratio", "log_accept", "log_step"):
+                row[k] = _range([p.get(k) for p in meas])
+            res["summary"].append(row)
+    # per label and concurrency: median [min, max] of each measured point's own values (the reference included)
+    res["point_summary"] = []
+    for label, _ in specs:
+        for c in sorted({k[1] for k in points[label]}):
+            meas = [p for k, p in points[label].items() if k[1] == c and str(k[0]).startswith(phase_prefix)]
+            row = {"label": label, "concurrency": c, "repetitions": len(meas),
+                   "acceptance_source": sorted({str(p["acceptance_source"]) for p in meas})}
+            for k in ("tok_per_s", "ttft_ms", "tpot_ms", "acceptance", "acceptance_evalscope_summary", "step_ms",
+                      "implied_tpot_ms"):
+                row[k] = _range([p.get(k) for p in meas])
+            res["point_summary"].append(row)
+    return res
+
+
+def accept_split_markdown(res):
+    f = lambda v, spec: "-" if v is None else format(v, spec)
+    out = ["| config | phase | C | tok/s | TTFT ms | TPOT ms | acceptance used (harmonic; source) | per-request EvalScope mean "
+           "| server mean (matched) | max abs diff | decode step ms | step/A ms |", "|" + "---|" * 12]
+    for p in res["points"]:
+        out.append(f"| {p['label']} | {p['phase']} | {p['concurrency']} | {p['tok_per_s']:.1f} | {p['ttft_ms']:.1f} | "
+                   f"{p['tpot_ms']:.2f} | {f(p['acceptance'], '.3f')} ({p['acceptance_source'] or '-'}) | "
+                   f"{f(p.get('acceptance_requests_mean'), '.3f')} | "
+                   f"{f(p.get('acceptance_server_mean'), '.3f')} ({p.get('server_matched_requests', '-')}) | "
+                   f"{f(p.get('acceptance_evalscope_vs_server_max_abs_diff'), '.3f')} | {f(p['step_ms'], '.2f')} | "
+                   f"{f(p.get('implied_tpot_ms'), '.2f')} |")
+    out += ["", "| config vs ref | phase | C | tok/s ratio | A ratio | step ratio | latency gap ms | TTFT part | decode part "
+            "| step part | acceptance part | other part | acceptance share |", "|" + "---|" * 13]
+    for p in res["pairs"]:
+        out.append(f"| {p['label']} vs {p['reference']} | {p['phase']} | {p['concurrency']} | {p['tok_per_s_ratio']:.3f} | "
+                   f"{f(p.get('acceptance_ratio'), '.3f')} | {f(p.get('step_ratio'), '.3f')} | {p['latency_gap_ms']:.1f} | "
+                   f"{p['ttft_part_ms']:.1f} | {f(p.get('decode_part_ms'), '.1f')} | {f(p.get('step_part_ms'), '.1f')} | "
+                   f"{f(p.get('accept_part_ms'), '.1f')} | "
+                   f"{f(p.get('other_part_ms'), '.1f')} | {f(p.get('accept_share'), '.2f')} |")
+    rng = lambda x, spec: "-" if not x else f"{format(x['median'], spec)} [{format(x['min'], spec)}, {format(x['max'], spec)}]"
+    out += ["", "| config vs ref | C | reps | tok/s ratio | A ratio | step ratio | latency gap ms | TTFT part ms "
+            "| decode part ms | step part ms | acceptance part ms | other part ms | acceptance share | step share "
+            "| TTFT share |", "|" + "---|" * 15]
+    for r in res["summary"]:
+        out.append(f"| {r['label']} vs {r['reference']} | {r['concurrency']} | {r['repetitions']} | "
+                   f"{rng(r['tok_per_s_ratio'], '.3f')} | {rng(r['acceptance_ratio'], '.3f')} | {rng(r['step_ratio'], '.3f')} | "
+                   f"{rng(r['latency_gap_ms'], '.0f')} | {rng(r['ttft_part_ms'], '.0f')} | {rng(r['decode_part_ms'], '.0f')} | "
+                   f"{rng(r['step_part_ms'], '.0f')} | "
+                   f"{rng(r['accept_part_ms'], '.0f')} | {rng(r['other_part_ms'], '.0f')} | {rng(r['accept_share'], '.2f')} | "
+                   f"{rng(r['step_share'], '.2f')} | {rng(r['ttft_share'], '.2f')} |")
+    out += ["", "| config | C | reps | tok/s | TTFT ms | TPOT ms | acceptance used (harmonic) | EvalScope summary acceptance | decode step ms "
+            "| step/A ms |", "|" + "---|" * 10]
+    for r in res.get("point_summary", []):
+        out.append(f"| {r['label']} | {r['concurrency']} | {r['repetitions']} | {rng(r['tok_per_s'], '.1f')} | "
+                   f"{rng(r['ttft_ms'], '.0f')} | {rng(r['tpot_ms'], '.2f')} | {rng(r['acceptance'], '.2f')} | "
+                   f"{rng(r['acceptance_evalscope_summary'], '.2f')} | {rng(r['step_ms'], '.2f')} | {rng(r['implied_tpot_ms'], '.2f')} |")
+    return "\n".join(out) + "\n"
+
+
+def measured_runs(paths):
+    """this tool's JSON runs of the measured phases (label measured, measured-N or measured-N-cC)."""
+    out = []
+    for path in paths:
+        out += [r for r in json.load(open(path)) if str(r.get("label", "")).startswith("measured")]
+    if not out:
+        raise SystemExit(f"{paths}: no measured runs")
+    return out
+
+
+def run_concurrency(r):
+    """C from a PHASE-cC label, else None."""
+    head, sep, c = str(r.get("label", "")).rpartition("-c")
+    return int(c) if sep and c.isdigit() else None
+
+
+def fit_chunk_line(runs):
+    """(a_s, b_s_per_token, points {size: median s}) of t = a + b x over the runs' busiest ranks."""
+    bysize = collections.defaultdict(list)
+    for r in runs:
+        for k, v in busiest_rank(r["ranks"])[1]["chunk_time_by_size_median_s"].items():
+            bysize[int(k)].append(v)
+    pts = {k: statistics.median(v) for k, v in sorted(bysize.items())}
+    if len(pts) < 2:
+        return None, None, pts  # one chunk size: no line (the runs can still give decode steps)
+    xs, ys = list(pts), list(pts.values())
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
+    return my - b * mx, b, pts
+
+
+def run_repetition(r):
+    """Repetition index N of a measured run label measured, measured-N or measured-N-cC (measured -> 1)."""
+    head, sep, c = str(r.get("label", "")).rpartition("-c")
+    phase = head if sep and c.isdigit() else str(r.get("label", ""))
+    return _repetition(phase, "measured")
+
+
+def fit_chunk_line_spread(runs):
+    """Spread of the line over repetitions: per chunk size, the median over each repetition's runs of the busiest
+    rank's chunk time (one value per repetition index N, the runs of every input file at N together); the line
+    is fitted through every combination of one per-repetition value per size (the envelope of what the
+    repetitions allow). Returns None for fewer than two sizes, else {points_ms_range, per_repetition_points_ms,
+    a_ms_range, b_us_per_token_range, fixed_share_range, fixed_share_at} where fixed_share = a / t(x) at the
+    largest fitted size x."""
+    by = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in runs:
+        n = run_repetition(r)
+        for k, v in busiest_rank(r["ranks"])[1]["chunk_time_by_size_median_s"].items():
+            by[int(k)][n].append(v)
+    if len(by) < 2:
+        return None
+    reps = {k: {n: statistics.median(v) for n, v in sorted(d.items())} for k, d in sorted(by.items())}
+    xs, top = list(reps), max(reps)
+    mx = statistics.mean(xs)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    lines = []
+    for ys in itertools.product(*(list(reps[x].values()) for x in xs)):
+        my = statistics.mean(ys)
+        b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        a = my - b * mx
+        lines.append((a, b, a / (a + b * top)))
+    rng = lambda vals: [min(vals), max(vals)]  # noqa: E731
+    return {"per_repetition_points_ms": {x: {n: v * 1e3 for n, v in d.items()} for x, d in reps.items()},
+            "points_ms_range": {x: rng([v * 1e3 for v in d.values()]) for x, d in reps.items()},
+            "a_ms_range": rng([l[0] * 1e3 for l in lines]), "b_us_per_token_range": rng([l[1] * 1e6 for l in lines]),
+            "fixed_share_range": rng([l[2] for l in lines]), "fixed_share_at": top, "combinations": len(lines)}
+
+
+def decode_steps(runs, interval):
+    """{C: (step_s, acceptance)}: medians over the runs at C of the busiest rank's full-batch line gap / interval
+    and line-mean acceptance."""
+    by = collections.defaultdict(list)
+    for r in runs:
+        c, x = run_concurrency(r), busiest_rank(r["ranks"])[1]
+        if c is not None and x["full_batch_line_gap_s"]["median"] and x["full_batch_accept_len_line_mean"]:
+            by[c].append((x["full_batch_line_gap_s"]["median"] / interval, x["full_batch_accept_len_line_mean"]))
+    return {c: (statistics.median(v[0] for v in vals), statistics.median(v[1] for v in vals)) for c, vals in by.items()}
+
+
+def chunk_wave(a, b, chunk, groups, c, tokens):
+    """(prefill_end_s, ttft_own_mean_s) of C prompts of TOKENS spread round-robin over GROUPS groups."""
+    t = lambda x: a + b * x  # noqa: E731
+    ends, own = [], []
+    for g in range(groups):
+        n = len(range(g, c, groups))
+        if not n:
+            continue
+        total = n * tokens
+        full, rem = divmod(total, chunk)
+        ends.append(full * t(chunk) + (t(rem) if rem else 0.0))
+        for i in range(1, n + 1):
+            k = -(-i * tokens // chunk)  # 1-based index of the chunk holding the prompt's last token
+            own.append(ends[-1] if k > full else k * t(chunk))
+    return max(ends), statistics.mean(own)
+
+
+def chunk_model(fits, lines, scenarios, concurrencies, tokens, output_tokens, interval):
+    models, steps = {}, {}
+    for name, paths in fits:
+        runs = measured_runs(paths.split(","))
+        a, b, pts = fit_chunk_line(runs)
+        if a is not None:
+            top = max(pts)
+            models[name] = {"a_ms": a * 1e3, "b_us_per_token": b * 1e6, "source": "fit",
+                            "points_ms": {k: v * 1e3 for k, v in pts.items()},
+                            "fixed_share": a / (a + b * top), "fixed_share_at": top,
+                            "spread": fit_chunk_line_spread(runs)}
+        else:  # one chunk size: reported, usable as DECODE only
+            models.setdefault("_points", {})[name] = {k: v * 1e3 for k, v in pts.items()}
+        if interval:
+            steps[name] = decode_steps(runs, interval)
+    for name, spec in lines:
+        am, sep, bu = spec.partition(":")
+        if not sep:
+            raise SystemExit(f"--chunk-line {name}={spec!r}: expected NAME=A_MS:B_US")
+        models[name] = {"a_ms": float(am), "b_us_per_token": float(bu), "source": "stated"}
+    rows = []
+    for name, spec in scenarios:
+        parts = spec.split(":")
+        if len(parts) not in (3, 4) or parts[0] not in models or parts[0] == "_points":
+            raise SystemExit(f"--chunk-scenario {name}={spec!r}: expected NAME=LINE:CHUNK:GROUPS[:DECODE], LINE one of {sorted(models)}")
+        m = models[parts[0]]
+        chunk, groups = int(parts[1]), int(parts[2])
+        dec = parts[3] if len(parts) == 4 else None
+        if dec is not None and dec not in steps:
+            raise SystemExit(f"--chunk-scenario {name}: DECODE {dec!r} needs a --chunk-fit of that name and --decode-log-interval")
+        for c in concurrencies:
+            end, own = chunk_wave(m["a_ms"] / 1e3, m["b_us_per_token"] / 1e6, chunk, groups, c, tokens)
+            row = {"scenario": name, "line": parts[0], "chunk": chunk, "groups": groups, "concurrency": c,
+                   "prefill_end_s": end, "ttft_own_mean_s": own}
+            if dec is not None and c in steps[dec]:
+                step, acc = steps[dec][c]
+                row.update(decode_step_ms=step * 1e3, acceptance=acc, decode_s=(output_tokens - 1) / acc * step)
+                row["tok_per_s"] = c * output_tokens / (end + row["decode_s"])
+            rows.append(row)
+    base = {r["concurrency"]: r for r in rows if r["scenario"] == scenarios[0][0]}
+    for r in rows:
+        b0 = base.get(r["concurrency"])
+        if b0 and r.get("tok_per_s") and b0.get("tok_per_s"):
+            r["tok_per_s_ratio_to_first"] = r["tok_per_s"] / b0["tok_per_s"]
+    return {"models": models, "rows": rows, "prompt_tokens": tokens, "output_tokens": output_tokens}
+
+
+def chunk_model_markdown(res):
+    out = ["| line | a ms | b us/token | source | points ms | a ms [min, max] | b us/token [min, max] | fixed share a/t(x) at x [min, max] |",
+           "|---|---|---|---|---|---|---|---|"]
+    for k, m in res["models"].items():
+        if k == "_points":
+            out += [f"| {n} | - | - | one chunk size | " + " ".join(f"{s}:{v:.1f}" for s, v in p.items()) + " | - | - | - |"
+                    for n, p in m.items()]
+            continue
+        sp = m.get("spread")
+        pts = " ".join(f"{s}:{v:.1f}" + (" [{:.1f}, {:.1f}]".format(*sp["points_ms_range"][s]) if sp else "")
+                       for s, v in m.get("points_ms", {}).items()) or "-"
+        ar = "[{:.2f}, {:.2f}]".format(*sp["a_ms_range"]) if sp else "-"
+        br = "[{:.3f}, {:.3f}]".format(*sp["b_us_per_token_range"]) if sp else "-"
+        fs = (f"{m['fixed_share']:.3f} at {m['fixed_share_at']}" + (" [{:.3f}, {:.3f}]".format(*sp["fixed_share_range"]) if sp else "")
+              if "fixed_share" in m else "-")
+        out.append(f"| {k} | {m['a_ms']:.2f} | {m['b_us_per_token']:.3f} | {m['source']} | {pts} | {ar} | {br} | {fs} |")
+    out += ["", "| scenario | line | chunk | groups | C | prefill end s | TTFT own-end mean s | step ms | accept | decode s | wave tok/s | ratio to first |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in res["rows"]:
+        out.append(f"| {r['scenario']} | {r['line']} | {r['chunk']} | {r['groups']} | {r['concurrency']} | {r['prefill_end_s']:.3f} | "
+                   f"{r['ttft_own_mean_s']:.3f} | {fmt(r.get('decode_step_ms'), '.2f')} | {fmt(r.get('acceptance'), '.2f')} | "
+                   f"{fmt(r.get('decode_s'), '.3f')} | {fmt(r.get('tok_per_s'), '.1f')} | {fmt(r.get('tok_per_s_ratio_to_first'), '.2f')} |")
+    return "\n".join(out) + "\n"
+
+
 def split_spec(spec, flag):
     name, sep, value = spec.partition("=")
     if not sep or not name or not value:
@@ -612,7 +1173,7 @@ def main_predict(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log", action="append", default=[], help="server log slice (repeatable)")
+    ap.add_argument("--log", action="extend", nargs="+", default=[], help="server log slice(s) (repeatable)")
     ap.add_argument("--evalscope", action="append", default=[], help="evalscope perf output dir per --log")
     ap.add_argument("--label", action="append", default=[])
     ap.add_argument("--benchmark-json", help="amd-tracking EvalScope matrix benchmark.json: slice the --server-log "
@@ -629,6 +1190,32 @@ def main():
     ap.add_argument("--step-table", action="store_true",
                     help="also give decode round time by running batch and context (needs --decode-log-interval)")
     ap.add_argument("--out-json")
+    ap.add_argument("--samples", action="append", default=[], metavar="SAMPLES_JSONL",
+                    help="amd-tracking gpu_admission.py samples.jsonl (repeatable: load window and measurement windows): "
+                    "add gpu_activity (per GPU busy, own cu_occupancy, queues, SDMA delta) before, during and after "
+                    "every prefill_to_decode_gap_s stall")
+    ap.add_argument("--samples-window", type=float, default=2.0, help="seconds of the before/after windows (default 2)")
+    ap.add_argument("--samples-margin", type=float, default=1.0,
+                    help="seconds trimmed from each end of the stall window (default 1)")
+    ac = ap.add_argument_group("--accept-split")
+    ac.add_argument("--accept-split", action="append", default=[], metavar="LABEL=BENCHMARK_JSON",
+                    help="split each run's latency gap to the first into TTFT and decode parts, and with "
+                    "--accept-decompose, --decode-log-interval and per-request acceptance the decode part into step, "
+                    "acceptance and other")
+    ac.add_argument("--accept-decompose", action="append", default=[], metavar="LABEL=JSON")
+    ac.add_argument("--accept-server-log", action="append", default=[], metavar="LABEL=LOG")
+    ac.add_argument("--accept-requests", action="append", default=[], metavar="LABEL=JSONL")
+    ap.add_argument("--point-table", action="extend", nargs="+", default=[], metavar="JSON",
+                    help="instead of a decomposition: per run of this tool's JSON(s), busiest rank's chunks x median "
+                    "chunk ms, full-batch decode round ms (Decode-line gap / --decode-log-interval, upper median over "
+                    "ranks) and max prefill_to_decode_gap_s over ranks")
+    cm = ap.add_argument_group("--chunk-model")
+    cm.add_argument("--chunk-model", action="store_true", help="chunk-time line fit (with its fixed share a/t(x) and [min, max] over repetitions) and chunk-size/placement what-ifs")
+    cm.add_argument("--chunk-fit", action="append", default=[], metavar="NAME=JSON[,JSON]", help="fit a line from this tool's JSON(s); "
+                    "reports fixed_share and the a, b and fixed-share [min, max] over repetition indexes (spread)")
+    cm.add_argument("--chunk-line", action="append", default=[], metavar="NAME=A_MS:B_US", help="a stated line")
+    cm.add_argument("--chunk-scenario", action="append", default=[], metavar="NAME=LINE:CHUNK:GROUPS[:DECODE]")
+    cm.add_argument("--concurrency-list", help="comma-separated concurrencies for --chunk-model")
     pr = ap.add_argument_group("--predict")
     pr.add_argument("--predict", action="store_true", help="prediction and what-ifs instead of decomposition")
     pr.add_argument("--runs", action="append", default=[], help="CFG=JSON written by this tool (repeatable)")
@@ -639,6 +1226,39 @@ def main():
     pr.add_argument("--output-tokens", type=int)
     pr.add_argument("--concurrency", type=int)
     a = ap.parse_args()
+    if a.point_table:
+        if not a.decode_log_interval:
+            ap.error("--point-table needs --decode-log-interval")
+        rows = point_table(a.point_table, a.decode_log_interval)
+        if a.out_json:
+            json.dump(rows, open(a.out_json, "w"), indent=1)
+        print("\n".join(point_table_lines(rows)))
+        return
+    if a.accept_split:
+        if a.accept_decompose and not a.decode_log_interval:
+            ap.error("--accept-decompose needs --decode-log-interval")
+        multi = lambda xs, flag: {k: [v] for k, v in (split_spec(x, flag) for x in xs)}
+        res = accept_split([split_spec(x, "--accept-split") for x in a.accept_split],
+                           dict(split_spec(x, "--accept-decompose") for x in a.accept_decompose),
+                           a.decode_log_interval, multi(a.accept_server_log, "--accept-server-log"),
+                           multi(a.accept_requests, "--accept-requests"),
+                           [int(c) for c in a.concurrency_list.split(",")] if a.concurrency_list else None)
+        if a.out_json:
+            json.dump(res, open(a.out_json, "w"), indent=1)
+        print(accept_split_markdown(res), end="")
+        return
+    if a.chunk_model:
+        if not a.chunk_scenario or not a.prompt_tokens or not a.output_tokens or not a.concurrency_list:
+            ap.error("--chunk-model needs --chunk-scenario, --prompt-tokens, --output-tokens and --concurrency-list")
+        res = chunk_model([split_spec(x, "--chunk-fit") for x in a.chunk_fit],
+                          [split_spec(x, "--chunk-line") for x in a.chunk_line],
+                          [split_spec(x, "--chunk-scenario") for x in a.chunk_scenario],
+                          [int(c) for c in a.concurrency_list.split(",")], a.prompt_tokens, a.output_tokens,
+                          a.decode_log_interval)
+        if a.out_json:
+            json.dump(res, open(a.out_json, "w"), indent=1)
+        print(chunk_model_markdown(res), end="")
+        return
     if a.predict:
         missing = [f for f in ("runs", "prefill", "requests", "prompt_tokens", "output_tokens", "concurrency",
                                "decode_log_interval") if not getattr(a, f)]
@@ -651,7 +1271,7 @@ def main():
     if a.benchmark_json:
         if not a.server_log or not a.slices_dir:
             ap.error("--benchmark-json needs --server-log and --slices-dir")
-        windows = phase_windows(a.benchmark_json, per_concurrency=True)
+        windows = phase_windows(a.benchmark_json)
         a.log = write_slices(a.server_log, windows, a.slices_dir)
         a.label = [w[0] for w in windows]
         a.evalscope = [w[1] for w in windows]
@@ -671,7 +1291,7 @@ def main():
             if es:
                 n = es["Total Requests"]
                 pred = r["sum"]["max_rank_prefill_plus_decode_plus_between_wave_idle_s"]
-                busiest = max(r["ranks"].values(), key=lambda x: x["prefill_time_s"] + x["decode_time_s"] + x["idle_between_waves_s"])
+                busiest = busiest_rank(r["ranks"])[1]
                 model = busiest["prefill_time_chunk_model_s"] + busiest["decode_time_s"] + busiest["idle_between_waves_s"]
                 r["reconciliation"] = {
                     "busiest_rank_model_s (chunks x median chunk + decode + between-wave idle)": model,
@@ -685,16 +1305,21 @@ def main():
                     "req_per_s_server_span": n / r["server_span_s"],
                     "req_per_s_predicted_busiest_rank": n / pred}
         runs.append(r)
+    if a.samples:
+        attach_samples(runs, load_samples(a.samples), a.samples_window, a.samples_margin)
     json.dump(runs, open(a.out_json, "w"), indent=1, default=str)
     for r in runs:
         print("==", r["label"], "span %.2f s" % r["server_span_s"], json.dumps(r.get("reconciliation"), default=str))
         for k, x in r["ranks"].items():
+            p2d = x["prefill_to_decode_gap_s"]
             print(f" rank{k}: req={x['requests_by_prefill_tokens']} chunks={x['prefill_chunks']} "
-                  f"prefill={x['prefill_time_s']:.2f}s ({x['prefill_tok_per_s_while_prefilling'] or 0:.0f} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms over {x['chunk_time_s']['n']} gaps) "
-                  f"decode={x['decode_time_s']:.2f}s ({x['decode_tok_per_s_while_decoding'] or 0:.1f} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
+                  f"prefill={x['prefill_time_s']:.2f}s ({fmt(x['prefill_tok_per_s_while_prefilling'], '.0f')} tok/s, chunk med {x['chunk_time_s']['median']*1e3:.1f} ms over {x['chunk_time_s']['n']} gaps) "
+                  f"decode={x['decode_time_s']:.2f}s ({fmt(x['decode_tok_per_s_while_decoding'], '.1f')} tok/s, logged {x['decode_tokens_logged']:.0f}/{x['decode_tokens_expected']}) "
                   f"idle={x['idle_s']:.2f}s (between waves {x['idle_between_waves_s']:.2f}) stalls={x['prefill_stalls']['n_gaps_gt_2x_median']}/{x['prefill_stalls']['excess_s']:.2f}s "
                   + (f"finish-split={x['finish_split_gaps']['n']} ({x['finish_split_gaps']['from_prefill']} from prefill) "
-                     if x.get('finish_split_gaps') else "") + f"tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
+                     if x.get('finish_split_gaps') else "") + f"p2d={p2d['n']}/{fmt(p2d['median'], '.2f')}/{fmt(p2d['max'], '.2f')}s stalls {len(p2d['stalls'])} tail={x['tail_after_last_line_s']:.2f} lag0={x['first_line_lag_s']:.2f} end={x['estimated_rank_end_s']:.2f} bs={x['decode_batch_size_lines']}")
+    for line in stall_activity_lines(runs):
+        print(line)
     if a.markdown:
         print(markdown(runs, a.decode_log_interval), end="")
     for r in runs:

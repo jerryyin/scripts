@@ -17,6 +17,14 @@ list under --rows-field):
              'higher' or 'lower' when every listed ratio present in the row has that verdict,
              'no verdict' when any is 'overlap' or they differ, '-' when none is present
 
+Per-repetition tables (load_reps: one row per repetition, {key: {repetition index: value}}) give an
+interval of a ratio of medians: bootstrap_ratio (percentile bootstrap, each side resampled on its own)
+or bootstrap_ratio_paired (repetition indices drawn jointly), both refusing fewer than MIN_REPETITIONS
+(5) values a side or a 0 in the denominator; interval_verdict reads it as 'higher', 'lower' or
+'no verdict', combine_flags turns a verdict and flags into a run word ('flagged', 'incomplete' or the
+verdict) and final_word applies a re-run to a flagged first run. tokenspeed/serving/decide.py is the
+serving comparison built from them.
+
 A metric without _median/_min/_max columns is read as a single value (min = median = max).
 Metric names may be dotted paths into nested JSON objects (summary.Req Throughput (req/s)).
 Standard library only.
@@ -33,14 +41,15 @@ batch_size=B and --where L=50000 join tables whose key columns differ; --key-div
 --scale EP8=0.125 compares per-rank batch and per-GPU throughput across rank counts.
 
 --where NAME=VALUE (equal as text) or NAME~REGEX (re.search) is the same filter in both
-subcommands: it applies to rows that have the field, and rows without it are kept, so one filter can
-serve tables with different columns.
+subcommands and in load_reps: it applies to rows that have the field, and rows without it are
+kept, so one filter can serve tables with different columns.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import random
 import re
 import statistics
 import sys
@@ -353,6 +362,117 @@ def write_compare(results: dict[str, tuple[list[str], list[dict]]], key: list[st
         return
     out.write("\n".join(f"### {m}\n\n" + markdown(rows, key, labels, ratios, digits, ratio_digits, bounds, groups)
                          for m, (labels, rows) in results.items()))
+
+
+# ---------------------------------------------------------------- intervals of a ratio of medians over repetitions
+
+def percentile(values: list[float], q: float) -> float | None:
+    """Linear-interpolation percentile (q in [0, 1]) of values in any order (numpy's default method); None when
+    there are none. The one percentile of the toolkit's statistics tools."""
+    if not values:
+        return None
+    vals = sorted(values)
+    pos = q * (len(vals) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(vals) - 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
+
+
+# Fewest repetitions per side that decide bootstraps. The percentile bootstrap of a median only has the
+# side's own values to draw from: at n = 1 the interval is the point median(a)/median(b), and at n = 3 its
+# lower bound is min(a)/max(b) (both resampled medians take their extreme with probability 7/27 > 2.5 %).
+MIN_REPETITIONS = 5
+
+
+def check_ratio_inputs(a: list[float], b: list[float], min_n: int) -> None:
+    """Raise ValueError when a side has fewer than min_n values or b holds a 0 (a ratio's denominator)."""
+    if len(a) < min_n or len(b) < min_n:
+        raise ValueError(f"n = {len(a)}/{len(b)} repetitions, below the minimum {min_n} per side")
+    if any(v == 0 for v in b):
+        raise ValueError("the reference side holds a 0 value (the ratio's denominator)")
+
+
+def bootstrap_ratio(a: list[float], b: list[float], resamples: int = 10000, seed: int = 0,
+                    level: float = 0.95, min_n: int = MIN_REPETITIONS) -> tuple[float, float]:
+    """Percentile bootstrap interval of median(a)/median(b), each side resampled with replacement on its own.
+
+    One random.Random(seed); per resample a's draw comes before b's. Raises ValueError when a side has
+    fewer than min_n values or b holds a 0."""
+    check_ratio_inputs(a, b, min_n)
+    rng = random.Random(seed)
+    med = statistics.median
+    ratios = sorted(med(rng.choices(a, k=len(a))) / med(rng.choices(b, k=len(b))) for _ in range(resamples))
+    tail = (1 - level) / 2
+    return percentile(ratios, tail), percentile(ratios, 1 - tail)
+
+
+def bootstrap_ratio_paired(a: dict, b: dict, resamples: int = 10000, seed: int = 0,
+                           level: float = 0.95, min_n: int = MIN_REPETITIONS) -> tuple[float, float] | None:
+    """Like bootstrap_ratio, but the repetition indices (the dict keys, which must be the same) are drawn jointly;
+    None when the indices differ."""
+    if not a or set(a) != set(b):
+        return None
+    check_ratio_inputs(list(a.values()), list(b.values()), min_n)
+    idx = sorted(a, key=str)
+    rng = random.Random(seed)
+    med = statistics.median
+    ratios = []
+    for _ in range(resamples):
+        pick = rng.choices(idx, k=len(idx))
+        ratios.append(med([a[i] for i in pick]) / med([b[i] for i in pick]))
+    ratios.sort()
+    tail = (1 - level) / 2
+    return percentile(ratios, tail), percentile(ratios, 1 - tail)
+
+
+def interval_verdict(lo: float, hi: float) -> str:
+    """Verdict of an interval of a ratio: 'higher' when it lies above 1, 'lower' when below 1, else 'no verdict'."""
+    return "higher" if lo > 1 else "lower" if hi < 1 else "no verdict"
+
+
+def combine_flags(verdict: str, flags: list[bool | None]) -> str:
+    """Run word of a verdict under flags: 'flagged' when any flag is raised, else 'incomplete' when any flag is
+    None (its input is missing), else the verdict."""
+    if any(f for f in flags):
+        return "flagged"
+    if any(f is None for f in flags):
+        return "incomplete"
+    return verdict
+
+
+def final_word(first: str, second: str | None) -> str:
+    """Final word of a point measured once and re-run when flagged: an unflagged first run word stands; a flagged
+    one needs the re-run (second, or None when there is none: 'flagged'), whose word stands unless it is flagged
+    too (then 'no verdict')."""
+    if first != "flagged":
+        return first
+    if second is None:
+        return "flagged"
+    return "no verdict" if second == "flagged" else second
+
+
+def load_reps(spec: str, key: list[str], rows_field: str | None, metric: str, rep_field: str,
+              where: list[tuple[str, str, str]]) -> tuple[str, dict[tuple, dict]]:
+    """LABEL=PATH of per-repetition rows -> {key: {repetition index: metric value}}; a repeated index is refused."""
+    label, sep, path = spec.partition("=")
+    if not sep or not label or not path:
+        raise ValueError(f"--table {spec!r}: expected LABEL=PATH")
+    out: dict[tuple, dict] = {}
+    for n, row in enumerate(read_rows(path, rows_field)):
+        if not keep(row, where):
+            continue
+        v = number(field(row, metric))
+        if v is None:
+            continue
+        rep = field(row, rep_field)
+        rep = n if rep is None else rep
+        reps = out.setdefault(key_of(row, key), {})
+        if rep in reps:
+            raise ValueError(f"{label}: repetition {rep!r} twice at {key_of(row, key)}; narrow with --where")
+        reps[rep] = v
+    return label, out
+
+
 
 
 def main(argv: list[str] | None = None) -> int:

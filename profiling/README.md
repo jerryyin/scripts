@@ -16,7 +16,11 @@ profiling/
 ├── graph_event_smoke.py  # does a timing event recorded in CUDA-graph capture become a timed node?
 ├── test_graph_event_smoke.py  # non-GPU unit tests for its second-replay verdict (pytest)
 ├── dist_timing.py        # per-call event timing of a call every torch.distributed rank makes together
-└── test_dist_timing.py   # non-GPU unit tests for its statistics and argument helpers (pytest)
+├── test_dist_timing.py   # non-GPU unit tests for its statistics and argument helpers (pytest)
+├── stack_sample.py       # py-spy stack samples of running processes (by process group) and runs of identical stacks
+├── test_stack_sample.py  # CPU tests: run summary, attach-failure report, a live dump of a child process (pytest)
+├── gpu_activity.py       # per-GPU activity of stated time windows from amd-tracking admission samples
+└── test_gpu_activity.py  # CPU tests: window activity, unobserved GPUs not called idle, cache writes per window (pytest)
 ```
 
 ## Files
@@ -47,6 +51,24 @@ profiling/
   `HIP_VISIBLE_DEVICES`, the matching amd-smi indices and the GPU processes there, through
   `board/gpu-wait.py`; `appeared` lists the PIDs (host PIDs) that showed up between two snapshots. Run alone it prints `gpu_context()`. Project wrappers supply the call and
   its correctness check, for example `tokenspeed/petit-layer/petit_layer.py`.
+- `gpu_activity.py --samples SAMPLES_JSONL --window LABEL=START_UTC,END_UTC [--margin S] [--cache-listing
+  LISTING] --out-json OUT` — what the GPUs did in a stated window, from amd-tracking `gpu_admission.py`
+  admission samples: per GPU device busy and, for the measured process's own KFD processes, `cu_occupancy`,
+  queues and SDMA time, each GPU busy, idle or unobserved; with `--cache-listing` (a Triton cache file
+  listing) the cache files written in each window grouped per kernel, to tell a JIT compile from a hang.
+- `stack_sample.py run --pgid PGID [--pid PID] [--comm-regex RE] --interval S (--duration S | --stop-file F)
+  [--native | --nonblocking] --out STACKS.jsonl` — where a running program's host side is: every interval
+  it runs `py-spy dump --json` on every process of the process groups (rescanned each sample, so ranks that
+  start later are included) in parallel and writes one JSONL record per process per sample (frames
+  innermost first, rc and py-spy's error; an attach refusal is named as ptrace and the run exits 2 when no
+  dump succeeded). `stack_sample.py summary STACKS.jsonl --frames N --min-run-s S [--thread-regex RE]
+  [--out-json]` groups each process's and thread's samples into runs of identical top N frames with start,
+  end and duration, so a long stall in one place is one long run. Blocking dumps pause the target for a few
+  ms each; use it beside diagnostic runs, not inside a measurement whose timing is reported. A server
+  started by amd-tracking `manage_server.py` records its process group as `process_group` in `server.json`
+  (the admission samples' `own` processes carry the same `pgid`). py-spy is `$PY_SPY`, else the one on
+  `PATH` (`--py-spy` overrides both); attaching needs CAP_SYS_PTRACE, or root with
+  `kernel.yama.ptrace_scope` at most 1.
 - `prof.sh trace <cmd>` — kernel trace, printed as per-kernel runtime, block size, register
   and scratch usage.
 - `prof.sh att <cmd>` — ATT capture. Resolves ROCm without requiring `/opt/rocm` to exist
@@ -107,5 +129,5 @@ grep -q -- "$FLAG" <<<"$out"
 ## Tests
 
 ```bash
-cd profiling && python3 -m pytest test_att_analyze.py test_dist_timing.py -q    # no GPU required
+cd profiling && python3 -m pytest test_att_analyze.py test_dist_timing.py test_stack_sample.py -q    # no GPU required
 ```

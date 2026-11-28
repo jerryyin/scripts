@@ -13,7 +13,8 @@ numerics/
 ├── genRandInput.py     # generate random binary inputs of a given shape/dtype, or a
 │                       #   buffer of special values; also dumps
 ├── range_compare.py    # repeated measurements: median [min,max] per group, and ratios
-│                       #   between configurations with a range-overlap verdict
+│                       #   between configurations with a range-overlap verdict;
+│                       #   bootstrap interval of a ratio of medians over repetitions
 ├── sensitivity_classify.py  # does a difference matter, and which of two arms is wrong
 └── ulp_magnitudes.py   # bfloat16 difference in ULPs, absolute and relative; no verdict
 ```
@@ -55,6 +56,19 @@ several configurations and the question is which is faster.
   present; a ratio whose table lacks the row's key is left out (JSON: `consensus.NAME` =
   `{verdict, n}`, `n` the ratios present). Use it to compare layouts by the pooled ratio and every
   start-pair ratio at once. Without it the output is unchanged. Tests: `test_range_compare.py`.
+
+  Over per-repetition tables (`load_reps`: one row per repetition, `{key: {repetition index:
+  value}}`, read with the same `--rows-field`/`--where` as above) the module gives an interval of
+  a ratio of medians for code to import: `bootstrap_ratio` (95 % percentile bootstrap, one
+  `random.Random(seed)`, each resample draws the first side's then the second side's values with
+  replacement, unpaired; percentiles by linear interpolation) and `bootstrap_ratio_paired`
+  (repetition indices drawn jointly). Both refuse fewer than `MIN_REPETITIONS` (5) values a side,
+  since with few values the interval is decided by the extremes (at n = 1 it is the point ratio,
+  at n = 3 its lower bound is min/max), and a 0 in the denominator. `interval_verdict` reads an
+  interval as `higher` (above 1), `lower` (below 1) or `no verdict`; `combine_flags` turns a
+  verdict and a list of flags into a run word (`flagged` when any flag is raised, `incomplete`
+  when one is missing, else the verdict) and `final_word` applies one re-run to a flagged run.
+  `tokenspeed/serving/decide.py` is a serving comparison built from them.
 
   ```bash
   python3 range_compare.py summarize benchmark.json --rows-field results --key c \

@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Tests for gpu-hold.py: which processes make the holder yield, and the hold/yield cycle.
 
-No GPU: the holder's children are `sleep` processes and the process table is a directory.
+No GPU: the holder's children are fakes and the process table is a directory. The ranks at the gate
+use memgate's own file protocol (memgate/sitecustomize.py), so the two sides cannot drift apart.
 """
 import importlib.util
 import os
-import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location('gpu_hold', Path(__file__).with_name('gpu-hold.py'))
-gh = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(gh)
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+gh = load('gpu_hold', Path(__file__).with_name('gpu-hold.py'))
+mg = load('memgate', Path(__file__).with_name('memgate') / 'sitecustomize.py')
 
 
 def fake_process(proc: Path, pid: int, kfd: bool, environ: dict[str, str]):
@@ -103,6 +112,189 @@ def test_busy_hold_keeps_free_memory_under_the_cap_and_gives_the_rest_to_our_ser
     assert gh.busy_hold(free=220 * GiB, held=46 * GiB, cap=cap) == 26 * GiB
     # its weights are in (153 GiB free, nothing held): hold nothing, the KV pool sees a clean GPU
     assert gh.busy_hold(free=153 * GiB, held=0, cap=cap) == 0
+
+
+def run_gated(tmp, script, ranks=2):
+    """Drive watch() with a gate: script entries are callables run before a pass (rank actions)."""
+    tmp = Path(tmp)
+    gate = gh.Gate(tmp / 'gate', ranks)
+    gate.clear()
+    caps, notes = [], []
+    holder = gh.Holder([0, 1], None, spawn=lambda gpu: FakeChild(), cap_file=tmp / 'cap',
+                       vram=lambda pid: 0)
+    real_set_cap = holder.set_cap
+    holder.set_cap = lambda cap: (caps.append(cap), real_set_cap(cap))
+    state, states, step = tmp / 'state', [], [-1]
+
+    def stop():
+        if state.exists() and (not states or states[-1] != state.read_text().strip()):
+            states.append(state.read_text().strip())
+        step[0] += 1
+        if step[0] < len(script):
+            script[step[0]](gate.root)
+        return step[0] >= len(script)
+
+    users = lambda _exclude: [] if step[0] == 0 else [99]
+    gh.watch(holder, users, lambda pids: 1 << 30, stop, 0, None, tmp / 'ready', state,
+             clock=lambda: step[0] * 1.0, cap=16 << 30, gate=gate)
+    return states, caps, gate
+
+
+def wait(pid, phase):
+    return lambda root: mg.announce(root, pid, phase)
+
+
+def enter(pid):
+    return lambda root: mg.enter(root, pid)
+
+
+def leave(pid):
+    return lambda root: mg.leave(root, pid)
+
+
+nothing = lambda root: None
+
+
+def test_gate_releases_for_all_ranks_then_caps_again_and_yields_at_the_kv_profile(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    gone = []
+    script = [nothing, nothing, wait(1, 'weights'), nothing,        # one rank waits: nothing released
+              wait(2, 'weights'), nothing,                          # both wait: release, then go
+              lambda r: gone.append(sorted(p.name for p in r.glob('*.go'))),
+              enter(1), enter(2), leave(1), leave(2), nothing,      # weights allocated: cap again
+              wait(1, 'kv'), wait(2, 'kv'), nothing,
+              lambda r: gone.append(sorted(p.name for p in r.glob('*.go'))), nothing]
+    states, caps, _ = run_gated(tmp, script)
+    GiB = 1 << 30
+    assert caps == [16 * GiB, gh.UNCAPPED, 16 * GiB, gh.UNCAPPED], caps
+    assert gone == [['1.go', '2.go'], ['1.go', '2.go']], gone
+    assert states == ['hold', 'busy', 'yielded'], states
+
+
+def test_gate_gives_late_ranks_their_go_while_open_and_after_yielding(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    seen = []
+    script = [nothing, nothing, wait(1, 'kv'), wait(2, 'kv'), nothing, nothing,
+              wait(3, 'kv'), nothing, lambda r: seen.append((r / '3.go').exists())]
+    states, _, _ = run_gated(tmp, script)
+    assert states[-1] == 'yielded' and seen == [True], (states, seen)
+
+
+def test_the_busy_cap_is_the_default_or_the_cap_file_and_a_small_cap_gives_our_server_the_rest():
+    assert gh.read_cap(None) == gh.BUSY_FREE_CAP == 240 << 30
+    tmp = Path(tempfile.mkdtemp())
+    gh.write_cap(tmp / 'cap', 16 << 30)
+    assert gh.read_cap(tmp / 'cap') == 16 << 30
+    # a small cap gives our server what it allocates beyond 16 GiB free, chunk by chunk
+    GiB = 1 << 30
+    assert gh.busy_hold(free=286 * GiB, held=0, cap=16 * GiB) == 270 * GiB
+    assert gh.busy_hold(free=11 * GiB, held=270 * GiB, cap=16 * GiB) == 265 * GiB
+
+
+def test_a_comm_phase_caps_again_like_weights(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    script = [nothing, nothing, wait(1, 'comm'), wait(2, 'comm'), nothing, nothing,
+              enter(1), enter(2), leave(1), leave(2), nothing, nothing]
+    states, caps, _ = run_gated(tmp, script)
+    assert caps == [16 << 30, gh.UNCAPPED, 16 << 30] and states == ['hold', 'busy'], (caps, states)
+
+
+def test_a_dist_phase_releases_for_the_read_then_caps_again_before_the_weights(tmp=None):
+    """memgate's `dist` read (the free memory the KV headroom is taken from) sees the device's free
+    memory, then the cap is back before the ranks construct the model."""
+    tmp = Path(tmp or tempfile.mkdtemp())
+    script = [nothing, nothing, wait(1, 'dist'), wait(2, 'dist'), nothing, nothing,
+              enter(1), enter(2), leave(1), leave(2), nothing,
+              wait(1, 'weights'), wait(2, 'weights'), nothing, nothing]
+    states, caps, _ = run_gated(tmp, script)
+    GiB = 1 << 30
+    assert caps == [16 * GiB, gh.UNCAPPED, 16 * GiB, gh.UNCAPPED], caps
+    assert states == ['hold', 'busy'], states
+
+
+def test_a_go_left_from_an_earlier_call_is_stale(tmp=None):
+    """A rank that timed out took no go; one the holder wrote just after must neither let the rank's
+    next call through nor keep the gate busy."""
+    gate = gh.Gate(Path(tmp or tempfile.mkdtemp()), 1)
+    gate.clear()
+    (gate.root / '7.go').write_text('an-earlier-call\n')
+    token = mg.announce(gate.root, 7, 'weights')
+    assert gate.waiting() == {7: 'weights'} and not gate.busy() and not mg.has_go(gate.root, 7, token)
+    gate.go([7])
+    assert gate.waiting() == {} and gate.busy() and mg.has_go(gate.root, 7, token)
+    gate.go([8])  # no wait file: nothing written
+    assert not (gate.root / '8.go').exists()
+
+
+def test_memgate_errors_reach_the_holder_log(tmp=None):
+    tmp = Path(tmp or tempfile.mkdtemp())
+    gate = gh.Gate(tmp / 'gate', 1)
+    gate.clear()
+    (gate.root / '7.error').write_text('memgate: ERROR: server.loader has no build\n')
+    log = tmp / 'log'
+    passes = []
+    gh.watch(gh.Holder([0], None, spawn=lambda gpu: FakeChild()), lambda _: [], lambda pids: 0,
+             lambda: passes.append(1) or len(passes) > 1, 0, log, gate=gate)
+    assert 'gpu-hold: pid 7: memgate: ERROR: server.loader has no build' in log.read_text()
+    assert not list(gate.root.glob('*.error'))
+
+
+def test_a_rank_at_kv_waits_while_another_is_still_in_comm_then_the_holder_yields(tmp=None):
+    """Real memgate calls in threads (one per rank) against watch(): rank 1 finishes `comm` and reaches
+    `kv` while rank 2 is still in `comm`. Rank 1's kv profile must not run until the gate releases
+    everything for kv, and the holder must yield after it."""
+    tmp = Path(tmp or tempfile.mkdtemp())
+    gate = gh.Gate(tmp / 'gate', 2)
+    gate.clear()
+    caps, seen, done = [], {}, threading.Event()
+    holder = gh.Holder([0, 1], None, spawn=lambda gpu: FakeChild(), cap_file=tmp / 'cap', vram=lambda pid: 0)
+    real_set_cap = holder.set_cap
+    holder.set_cap = lambda cap: (caps.append(cap), real_set_cap(cap))
+    state = tmp / 'state'
+    passes = []
+
+    def users(_exclude):
+        passes.append(1)
+        return [] if len(passes) == 1 else [99]
+
+    watcher = threading.Thread(target=gh.watch, args=(holder, users, lambda pids: 1 << 30, done.is_set, 0.01,
+                                                      None, tmp / 'ready', state),
+                               kwargs={'cap': 16 << 30, 'gate': gate})
+    watcher.start()
+    rank1_profiled = threading.Event()
+
+    def rank(r):
+        def comm():
+            if r == 2:  # still allocating while rank 1 moves on to kv
+                rank1_profiled.wait(1.0)
+
+        def kv():
+            seen[r] = holder.holding
+            if r == 1:
+                rank1_profiled.set()
+
+        call = lambda fn, phase: mg.gated(fn, phase, gate.root, timeout=30, pid=lambda: r)()
+        call(comm, 'comm')
+        call(kv, 'kv')
+
+    try:
+        while not (state.exists() and state.read_text().strip() == 'busy'):
+            time.sleep(0.01)
+        ranks = [threading.Thread(target=rank, args=(r,)) for r in (1, 2)]
+        for thread in ranks:
+            thread.start()
+        for thread in ranks:
+            thread.join(20)
+        end = time.monotonic() + 5
+        while state.read_text().strip() != 'yielded' and time.monotonic() < end:
+            time.sleep(0.01)
+        final = state.read_text().strip()
+    finally:
+        done.set()
+        watcher.join(5)
+    GiB = 1 << 30
+    assert seen == {1: False, 2: False}, f'the kv profile ran while the holder held memory: {seen}'
+    assert final == 'yielded' and caps == [16 * GiB, gh.UNCAPPED, 16 * GiB, gh.UNCAPPED], (final, caps)
 
 
 if __name__ == '__main__':

@@ -48,8 +48,20 @@ SEG = {  # start-marker name -> (category, bucket)
     "petit.s1": ("petit.stage1(dispatch_wait+gate_up)", "moe_dispatch+gate_up"),
     "petit.s2": ("petit.stage2(down)", "moe_down"),
     "petit.comb": ("petit.combine", "moe_combine"),
+    # With TOKENSPEED_PETIT_FUSE_POST=1 the combine adds the shared expert's rows itself
+    # (MegaMoECombineResidual) after waiting for them; petit.cwait opens the wait (the main stream's
+    # join on the aux-stream shared expert), petit.combr the residual combine. They replace
+    # petit.comb on that path; petit.post follows either combine.
+    "petit.cwait": ("petit.combine_wait_shared(c3)", "moe_combine"),
+    "petit.combr": ("petit.combine+shared_add(c3)", "moe_combine"),
     "petit.post": ("moe.shared_join_wait", "moe_experts"),
     "moe.join": ("ffn.add+post_comm(allreduce)", "collectives"),
+    # moe.split opens the tp4ep4-petit row split (this rank's slice of the replicated rows, before
+    # the router); moe.comm opens the MoE output all-reduce in _forward_ffn
+    # (TP4: routed + shared partials; tp4ep4-petit: the combine/gather of the split rows), which ends
+    # the moe.join segment there (TP4: routed finalize + shared add; tp4ep4-petit: row placement).
+    "moe.split": ("moe.row_split(tp4ep4-petit)", "moe_split"),
+    "moe.comm": ("ffn.post_comm(moe allreduce)", "collectives"),
     "ffn.end": ("layer_tail", "norm/mhc"),
     "final": ("final_norm", "other"),
     "model.end": ("lm_head+sampling+outputs", "head+sample"),
@@ -128,7 +140,7 @@ def matrix_window(benchmark_json, name):
     serving owner's phase_windows (tokenspeed/serving/e2e_decompose.py)."""
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "serving"))
     from e2e_decompose import phase_windows
-    windows = {n: (t0, t1) for n, _, t0, t1 in phase_windows(benchmark_json, per_concurrency=True)}
+    windows = {n: (t0, t1) for n, _, t0, t1 in phase_windows(benchmark_json)}
     if name not in windows:
         raise SystemExit(f"{benchmark_json}: no window {name!r}; windows: {sorted(windows)}")
     return windows[name]
@@ -139,7 +151,8 @@ def stage_window(path, selected=False):
 
     selected=True narrows it to the harness's selected decode forwards (the steps its
     decode_gpu_mean_ms is taken over): from the earliest first to the latest last selected forward's
-    wall_unix over ranks (stage.json selected_decode_indices_by_rank; forwards-rank<r>.jsonl in the
+    wall_unix over ranks (stage.json selected_decode_indices_by_rank, or selected_decode_indices as
+    rank 0 when attention DP is 1; forwards-rank<r>.jsonl in the
     attempt directory two levels above stages/<label>/), plus one mean step period at the end because
     a step's timing record is harvested after its submit. Without this the window also holds the
     stage's tail, where the last requests finish at a smaller batch and can outnumber the full-batch
@@ -150,7 +163,11 @@ def stage_window(path, selected=False):
         return lo, hi
     attempt = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path))))
     firsts, lasts, periods = [], [], []
-    for rank, idx in (st.get("selected_decode_indices_by_rank") or {}).items():
+    by_rank = st.get("selected_decode_indices_by_rank")
+    if not by_rank and st.get("selected_decode_indices"):
+        # attention DP 1 (TP4): the harness records one index list, taken from rank 0's forwards
+        by_rank = {"0": st["selected_decode_indices"]}
+    for rank, idx in (by_rank or {}).items():
         if not idx:
             continue
         want, walls = {min(idx), max(idx)}, {}
@@ -442,8 +459,8 @@ if __name__ == "__main__":
                     help="with --stage-json: keep only the harness's selected decode forwards (the steps of its "
                     "decode_gpu_mean_ms), not the whole request window with the stage's smaller-batch tail")
     ap.add_argument("--benchmark-json", help="amd-tracking EvalScope matrix benchmark.json: keep records in the window "
-                    "--window names (tokenspeed/serving/e2e_decompose.py phase_windows, e.g. measured-1/c1)")
-    ap.add_argument("--window", help="with --benchmark-json: PHASE or PHASE/cB window name")
+                    "--window names (tokenspeed/serving/e2e_decompose.py phase_windows, e.g. measured-1-c1)")
+    ap.add_argument("--window", help="with --benchmark-json: PHASE or PHASE-cC window name")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:

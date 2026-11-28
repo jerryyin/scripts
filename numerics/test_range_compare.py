@@ -319,6 +319,66 @@ def test_summarize_product_metric() -> None:
         raise AssertionError("a --product name given twice must be refused")
 
 
+# ---------------------------------------------------------------- intervals of a ratio of medians
+
+WON = [110.0, 111.0, 112.0, 113.0, 114.0]
+REF = [100.0, 101.0, 102.0, 103.0, 104.0]
+
+
+def test_percentile_and_bootstrap_are_fixed_by_seed() -> None:
+    assert rc.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.5 and rc.percentile([5.0], 0.975) == 5.0
+    assert rc.percentile([4.0, 1.0, 3.0, 2.0], 0.25) == 1.75 and rc.percentile([], 0.5) is None
+    assert rc.bootstrap_ratio(WON, REF) == rc.bootstrap_ratio(WON, REF)
+    assert rc.bootstrap_ratio_paired({1: 1.0}, {2: 1.0}) is None
+
+
+def test_bootstrap_bounds_at_small_n_and_the_minimum() -> None:
+    # n = 3: a resampled median is the side's smallest value with probability 7/27 (two or three of three
+    # draws), so min(X)/max(REF) holds 49/729 = 6.7 % of the ratios and is the 2.5th percentile exactly;
+    # symmetrically max(X)/min(REF) is the 97.5th
+    x, ref = [110.0, 111.0, 112.0], [100.0, 101.0, 102.0]
+    assert rc.bootstrap_ratio(x, ref, min_n=3) == (110 / 102, 112 / 100)
+    # n = 1: the interval is the point ratio, which is why the default minimum refuses it
+    assert rc.bootstrap_ratio([101.0], [100.0], min_n=1) == (1.01, 1.01)
+    for a, b in (([101.0], [100.0]), (x, ref), (WON[:4], REF)):
+        try:
+            rc.bootstrap_ratio(a, b)
+        except ValueError as exc:
+            assert "below the minimum 5" in str(exc)
+        else:
+            raise AssertionError(f"n = {len(a)}/{len(b)} must be refused")
+    try:
+        rc.bootstrap_ratio(WON, [0.0] + REF[1:])
+    except ValueError as exc:
+        assert "0 value" in str(exc)
+    else:
+        raise AssertionError("a 0 reference value must be refused")
+
+
+def test_interval_verdict_flags_and_rerun() -> None:
+    assert [rc.interval_verdict(*ci) for ci in ((1.01, 1.2), (0.8, 0.99), (0.9, 1.1), (1.0, 1.1))] == [
+        "higher", "lower", "no verdict", "no verdict"]
+    assert rc.combine_flags("higher", [False, False]) == "higher"
+    assert rc.combine_flags("higher", [False, None]) == "incomplete"
+    assert rc.combine_flags("higher", [None, True]) == "flagged"
+    assert rc.final_word("won", "lost") == "won" and rc.final_word("flagged", None) == "flagged"
+    assert rc.final_word("flagged", "lost") == "lost" and rc.final_word("flagged", "flagged") == "no verdict"
+
+
+def test_load_reps_keys_repetitions_and_refuses_a_repeated_index() -> None:
+    j = write("b.json", json.dumps({"results": [
+        {"phase": "warmup-1", "c": 1, "s": {"v": 9.0}}, {"phase": "measured-1", "c": 1, "s": {"v": 1.0}},
+        {"phase": "measured-2", "c": 1, "s": {"v": 3.0}}, {"phase": "measured-1", "c": 2, "s": {"v": 5.0}}]}))
+    label, reps = rc.load_reps(f"A={j}", ["c"], "results", "s.v", "phase", rc.parse_where(["phase~^measured-"]))
+    assert label == "A" and reps == {(1,): {"measured-1": 1.0, "measured-2": 3.0}, (2,): {"measured-1": 5.0}}
+    try:  # without the key, measured-1 of c=1 and of c=2 are one point
+        rc.load_reps(f"A={j}", [], "results", "s.v", "phase", rc.parse_where(["phase~^measured-1"]))
+    except ValueError as exc:
+        assert "twice" in str(exc)
+    else:
+        raise AssertionError("a repeated repetition index must be refused")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

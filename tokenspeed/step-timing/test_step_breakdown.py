@@ -114,7 +114,7 @@ def test_matrix_window_from_benchmark_json() -> None:
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "benchmark.json"
         path.write_text(json.dumps(bj))
-        t0, t1 = ast.matrix_window(str(path), "measured-1/c1")
+        t0, t1 = ast.matrix_window(str(path), "measured-1-c1")
         assert t1 - t0 == 8.5 and int(t0) % 60 == 10
 
 
@@ -124,12 +124,68 @@ def test_draft_markers_counted_apart() -> None:
     assert sb.marker_name("-1:draft.end") == "draft.end"
 
 
+def test_tp4ep4_petit_markers() -> None:
+    # One tp4ep4-petit MoE layer: ffn, moe.split, moe.router, moe.experts, the four
+    # Petit markers, shared.b/e (main stream), moe.join (row placement), moe.comm (combine all-reduce), ffn.end.
+    import analyze_step_timing as ast
+    names = ["0:ffn", "0:moe.split", "0:moe.router", "0:moe.experts", "0:petit.s1", "0:petit.s2", "0:petit.comb",
+             "0:petit.post", "0:shared.b", "0:shared.e", "0:moe.join", "0:moe.comm", "0:ffn.end"]
+    t = [0.0, 0.1, 0.11, 0.2, 0.3, 0.6, 0.8, 0.9, 0.95, 1.45, 1.5, 1.6, 2.4]
+    cats, _, aux, _ = ast.step_components({"names": names, "streams": ["main"] * len(names)}, t, 2.5)
+    assert abs(cats["moe.row_split(tp4ep4-petit)"] - 0.01) < 1e-9
+    assert abs(cats["ffn.add+post_comm(allreduce)"] - 0.1) < 1e-9  # moe.join -> moe.comm: row placement
+    assert abs(cats["ffn.post_comm(moe allreduce)"] - 0.8) < 1e-9  # moe.comm -> ffn.end: the all-reduce
+    assert abs(aux["aux.shared_expert"] - 0.5) < 1e-9
+    comps, _ = sb.load_map(str(Path(sb.HERE) / "components.json"))
+    owner = {c: comp["name"] for comp in comps for c in comp["categories"]}
+    assert sb.project_group(owner["moe.row_split(tp4ep4-petit)"]) == "row_split"
+    assert sb.project_group(owner["ffn.post_comm(moe allreduce)"]) == "moe_allreduce"
+    # groups of the components that existed before moe.split / moe.comm keep their meaning
+    assert sb.project_group(owner["ffn.add+post_comm(allreduce)"]) == "other"
+    assert sb.project_group(owner["other:shared.b"]) == "shared_expert"
+    assert sb.project_group(owner["moe.router_gate_topk"]) == "router"
+    assert sb.project_group("other: draft:ffn.post_comm(moe allreduce)") == "draft"
+
+
+def test_fused_post_markers() -> None:
+    # One DP4-Petit MoE layer with TOKENSPEED_PETIT_FUSE_POST=1: the shared expert is
+    # issued first on the aux stream, moe.experts follows it, and the combine is petit.cwait (wait for the
+    # shared rows) + petit.combr (combine with the shared add) instead of petit.comb.
+    import analyze_step_timing as ast
+    names = ["0:ffn", "0:moe.router", "0:shared.b", "0:shared.e", "0:moe.experts", "0:petit.s1", "0:petit.s2",
+             "0:petit.cwait", "0:petit.combr", "0:petit.post", "0:moe.join", "0:ffn.end"]
+    streams = ["main", "main", "s9", "s9", "main", "main", "main", "main", "main", "main", "main", "main"]
+    t = [0.0, 0.1, 0.12, 0.42, 0.15, 0.2, 0.5, 0.7, 0.75, 0.95, 0.96, 0.97]
+    cats, buckets, aux, _ = ast.step_components({"names": names, "streams": streams}, t, 1.0)
+    assert abs(cats["moe.router_gate_topk"] - 0.05) < 1e-9
+    assert abs(cats["moe.prep(quant/non-petit experts)"] - 0.05) < 1e-9
+    assert abs(cats["petit.stage2(down)"] - 0.2) < 1e-9
+    assert abs(cats["petit.combine_wait_shared(c3)"] - 0.05) < 1e-9
+    assert abs(cats["petit.combine+shared_add(c3)"] - 0.2) < 1e-9
+    assert "petit.combine" not in cats
+    assert abs(aux["aux.shared_expert"] - 0.3) < 1e-9
+    assert abs(buckets["moe_combine"] - 0.25) < 1e-9
+    # both fused-post segments are part of the Petit MoE of the layer (share) and of the petit group (project)
+    for cat in ("petit.combine_wait_shared(c3)", "petit.combine+shared_add(c3)"):
+        assert cat in sb.PETIT_CATEGORIES
+    assert {"petit.cwait", "petit.combr"} <= set(sb.PETIT_MARKERS)
+    comps, _ = sb.load_map(str(Path(sb.HERE) / "components.json"))
+    owner = {c: comp["name"] for comp in comps for c in comp["categories"]}
+    for cat in ("petit.combine_wait_shared(c3)", "petit.combine+shared_add(c3)"):
+        assert sb.project_group(owner[cat]) == "petit"
+        assert sb.project_group(owner["draft:" + cat]) == "draft"
+    markers = {m for comp in comps for m in comp["markers"]}
+    assert {"petit.cwait", "petit.combr", "draft:petit.cwait", "draft:petit.combr"} <= markers
+
+
 if __name__ == "__main__":
     test_table_correction_and_diff()
     test_without_clean_step_there_is_no_correction()
     test_overhead_row()
     test_share_on_self_test_dumps()
     test_draft_markers_counted_apart()
+    test_tp4ep4_petit_markers()
+    test_fused_post_markers()
     print("ok")
 
 
@@ -150,6 +206,11 @@ def test_stage_window_selected_forwards() -> None:
         # rank 0: 5..7 -> walls 120..122; rank 1: 8..10 -> 123.5, 124.5, 120.5 (wall order need not follow
         # index; first/last are the selected first and last forwards); period = max over ranks
         assert lo == 120.0 and abs(hi - (122.0 + 1.0)) < 1e-9, (lo, hi)
+        # attention DP 1: one index list (selected_decode_indices) read against rank 0's forwards
+        st.pop("selected_decode_indices_by_rank"); st["selected_decode_indices"] = [5, 6, 7]
+        (stage / "stage.json").write_text(json.dumps(st))
+        lo, hi = ast.stage_window(str(stage / "stage.json"), selected=True)
+        assert lo == 120.0 and abs(hi - 123.0) < 1e-9, (lo, hi)
 
 
 def test_project_whole_step() -> None:

@@ -19,6 +19,13 @@ board/
 ├── test_gpu_queue.py      # its tests (no GPU or docker needed)
 ├── gpu-hold.py            # gpu-queue's memory holder
 ├── test_gpu_hold.py       # its tests (no GPU needed)
+├── memgate/
+│   └── sitecustomize.py   # makes a server's ranks wait for gpu-hold before large allocations
+├── test_memgate.py        # its tests (no GPU needed)
+├── no-gpu/
+│   ├── no-gpu-run         # run a command with every /dev/kfd and /dev/dri open refused and logged
+│   └── nokfd.c            #   its LD_PRELOAD shim (built on first use)
+├── test_no_gpu.py         # its tests (no GPU needed)
 ├── lock-guard/            # make an UNLOCKED device launch fail by construction
 │   └── README.md          #   the two layers, and the /proc/locks trap
 └── bringup/
@@ -29,6 +36,15 @@ board/
 ## Files
 
 For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Running test groups on SPUR](SPUR.md). SPUR assigns resources around a whole command or test group; the idle-GPU selection and memory holder below are for machines without a scheduler.
+
+- `no-gpu/no-gpu-run [--log FILE] -- COMMAND` — runs CPU-only work (unit tests, offline compiles)
+  while other users hold the GPUs: an LD_PRELOAD shim (`nokfd.c`, built into `$NO_GPU_CACHE`,
+  default `~/.cache/no-gpu`, on first use) refuses every `open`, `openat`, `__open_2`, `__openat_2`
+  and `fopen` (and their `64` forms) of `/dev/kfd` and `/dev/dri/*` with EACCES and logs `BLOCKED
+  open PATH pid=PID` (default `$NO_GPU_CACHE/blocked.log`); GPU selection variables are unset and
+  core dumps off. A device open through those entry points cannot succeed; one made by a raw system
+  call or inside libc is not seen. TokenSpeed's test runner on top of it:
+  `tokenspeed/cpu-tests/`. Tests: `test_no_gpu.py`.
 
 - `gpu-wait.py N` — polls `amd-smi metric` until N GPUs show 0% graphics activity on
   `--confirm` consecutive polls, prints their indices and exits 0 (1 on `--timeout`). Memory
@@ -54,10 +70,14 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   root), logs each, and waits again. `gpu-queue add DIR [--name NAME] [--count N] -- COMMAND` (or
   `--file SCRIPT`) and `gpu-queue status DIR` run where DIR is local, normally inside the container.
   One serve runs per DIR (it holds `DIR/serve.lock`), and `add --count N` starts one for N GPUs
-  when none runs; it exits when the queue empties. Serves of different DIRs do not see each other's
-  claims, so share one DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
+  when none runs (with the `--idle-by`, `--confirm` and hold options given to `add`); it exits
+  when the queue empties. Serves of different DIRs do not see each other's claims, so share one
+  DIR per host. Jobs get `HIP_VISIBLE_DEVICES` and the serve's environment,
   not the caller's, so a job script sets up its own directory and environment; output and exit
-  status land in `DIR/done/` or `DIR/failed/`. Tests: `test_gpu_queue.py`.
+  status land in `DIR/done/` or `DIR/failed/`. A local serve stopped by SIGTERM, SIGINT or SIGHUP
+  (or failing with an error) stops its memory holder's process group and releases `DIR/serve.lock`;
+  on a signal it logs one line and exits 128+signal. It does not signal the running job: stop the
+  serve's process group to stop both. Tests: `test_gpu_queue.py`.
 
   `gpu-queue` is for hosts without per-GPU leases. Its claim (`gpu-wait.py`) checks only the
   single `--host-lock` file, so where other users lease GPUs through `gpu-lease` it would take GPUs
@@ -80,6 +100,25 @@ For scheduler-managed SPUR machines, use [spur-run.py](spur-run.py) and see [Run
   board/gpu-queue add /path/in/container/queue --name numerics -- 'cd /work && ./run-numerics.sh'
   board/gpu-queue status /path/in/container/queue
   ```
+
+  **Start guard (opt-in).** By default the holder leaves 240 GiB free per GPU while our process
+  starts, and another tenant's launch that fits in that takes it. `serve` (and `add --count`)
+  `--hold-busy-free-cap GIB --hold-gate-ranks N` keeps free memory at most GIB during the start:
+  below the smallest amount other tenants take at once, and above the largest single allocation our
+  server makes outside its gated calls (the holder's children re-check every 50 ms, so growth in
+  smaller steps is followed). It exports `GPU_HOLD_GATE=DIR/hold.gate`. The job must then put
+  `board/memgate` first on the server's `PYTHONPATH` and name the server's gate table in
+  `GPU_HOLD_GATE_TABLE` (TokenSpeed's: `tokenspeed/memgate-gates.json`, which says why each call is
+  gated): every rank (also multiprocessing spawn children) imports memgate as `sitecustomize` (and
+  runs the one it shadows) and waits at the gate before each call the table lists, under the
+  table's phase. When all N ranks wait at a phase the holder releases everything and lets them go;
+  a rank at another phase waits for the next round. After a phase the holder caps again, after
+  `kv` (the free-memory profile that sizes the KV cache) it yields, so the table must gate every
+  large allocation and every free-memory read that sizes something before `kv`. The server is not
+  changed. A rank waits at most `GPU_HOLD_GATE_TIMEOUT` seconds (900). A missing table, or a table
+  entry the server lacks, is an error memgate prints and the holder logs. Without the shim a gated
+  serve starves the server's weight allocation: use both or neither. Tests: `test_memgate.py`,
+  `test_gpu_hold.py`, `tokenspeed/test_memgate_gates.py`.
 
   To keep the GPUs across a sequence of experiments, queue the next job before the current one
   finishes; a job queued after the queue empties waits for a fresh claim.

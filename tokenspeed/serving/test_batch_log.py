@@ -11,7 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import batch_log  # noqa: E402
-from log_fixtures import batch, finish, ts  # noqa: E402
+from log_fixtures import batch, finish, finish_acc, ts  # noqa: E402
 
 T = 1_800_000_000.0  # 2027-01-15T08:00:00Z, a whole second
 
@@ -218,13 +218,47 @@ def test_prefill_cli_matrix_phases_repeated_across_concurrencies() -> None:
 
 
 def test_finish_line_with_accept_num_tokens_avg() -> None:
-    import batch_log
+    """Both finish-line forms are kind Finish; the acceptance-only form carries stats {"acc_len": X}."""
     ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: abc-01 Finish! "
                               "Accept_num_tokens_avg: 3.48\n")
     assert ev["kind"] == "Finish" and ev["rid"] == "abc-01" and ev["stats"] == {"acc_len": 3.48}
     ev = batch_log.parse_line("[ts] 2026-11-27T20:28:40.369866Z  INFO ts_control::output: Req: x Finish! "
                               "Accept_num_tokens_avg: 0\n")
     assert ev["stats"] == {"acc_len": 0}
+    e = batch_log.parse_line(finish_acc(T, "cmpl-ab-01", 5.544444444444444))
+    assert (e["kind"], e["rid"], round(e["stats"]["acc_len"], 4)) == ("Finish", "cmpl-ab-01", 5.5444)
+    assert batch_log.parse_line(finish(T, "x", 10, 0))["stats"]["prompt_tokens"] == 10
+
+
+def test_line_gaps_per_rank_with_log_timestamps() -> None:
+    lines = [batch(T, "Prefill", 0, new_token=4096), batch(T + 0.1, "Prefill", 1, new_token=4096),
+             batch(T + 0.2, "Prefill", 0, new_token=4096),  # rank 0: 0.2 s, below threshold
+             finish(T + 1.0, "a", 4096, 0), finish_acc(T + 1.1, "b", 3.5),  # not batch lines
+             batch(T + 1.6, "Decode", 1, running_req=1),  # rank 1: 1.5 s after its Prefill line
+             batch(T + 1.7, "Decode", 0, running_req=1)]  # rank 0: 1.5 s
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "measured-1-c2.log"
+        log.write_text("".join(lines))
+        gaps = batch_log.line_gaps([str(log)], 1.0)
+        assert batch_log.line_gaps([str(log)], 2.0) == []
+        cli = subprocess.run([sys.executable, str(HERE / "batch_log.py"), "line-gaps", "1.0", str(log)],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+    assert [(g["rank"], g["from_kind"], g["to_kind"]) for g in gaps] == [(1, "Prefill", "Decode"), (0, "Prefill", "Decode")]
+    assert gaps[0]["from_utc"] == ts(T + 0.1) and gaps[0]["to_utc"] == ts(T + 1.6)
+    assert abs(gaps[1]["gap_s"] - 1.5) < 1e-6
+    assert batch_log.line_gap_lines(gaps)[0] == f"measured-1-c2.log rank 1 Prefill -> Decode {ts(T + 0.1)} -> {ts(T + 1.6)} 1.50s"
+    assert cli == batch_log.line_gap_lines(gaps)
+
+
+def test_acceptance_by_rid_from_both_finish_line_forms() -> None:
+    """One reader for both forms: Accept_num_tokens_avg (0 included: no verify step) and RequestStats acc_len (None
+    without speculative decoding gives no value)."""
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.log"
+        log.write_text(finish_acc(T, "r1", 4.5) + finish(T + 1, "r2", 10, 0, acc=3.25) + finish(T + 2, "r3", 10, 0)
+                       + finish_acc(T + 3, "r4", 0))
+        assert batch_log.acceptance_by_rid([str(log)]) == {"r1": 4.5, "r2": 3.25, "r4": 0.0}
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
