@@ -24,12 +24,22 @@ The lines carry no request id, so requests per rank cannot be counted exactly fr
 
 usage: batch_log.py LOG   prints the count of each kind (a quick check that a log parses)
        batch_log.py dp-spread LOG --window NAME=START[,END] [--window ...] [--json]
+                    [--tokens [--requests NAME=N ...]]
            new-sequence rows per DP rank in each window; START/END are ISO 8601 times (UTC when no offset
            is given, e.g. 2026-11-12T23:05:00Z); a window without START counts nothing, one without END
            runs to the end of the log. Prints "NAME rank0=K rank1=K ... total=K" per window. K is the sum of
            "#new-seq" over Prefill lines, i.e. prefill rows, not requests: a chunked prompt counts once
            per chunk (over-counting), and a request whose chunks all ran in Mix rounds is not counted
            (under-counting). It shows how evenly placement spread prefill work, not request counts.
+           --tokens adds dp_tokens per window and rank (and "all") over its Prefill and Mix lines: new_seq
+           (as above) and mix_new_seq (#new-seq of Mix lines), prefilled (#new-token: prompt tokens
+           computed, plus the decode rows' tokens on Mix lines) and cached (#cached-token: prompt tokens
+           served from the prefix cache), cached_share = cached / (cached + prefilled) (a lower bound of
+           the prompt tokens' cache share, as prefilled includes those decode tokens), and the line counts
+           prefill_lines, mix_lines and hit_lines (lines with #cached-token > 0), i.e. whether later turns
+           of a session reach the rank that holds their prefix. --requests NAME=N (a window's request
+           count from the client, e.g. AIPerf's profiled requests) adds prefilled and cached tokens per
+           request on that window's "all" row. With --json the output is {"spread": ..., "tokens": ...}.
        batch_log.py prefill LOG [LOG ...] (--benchmark-json BJ | --window NAME=START,END ...
                     --prompt-tokens L --requests B) [--chunk-cost] [--tail] [--out-json PATH]
            prefill points (one wave of B simultaneous requests of L prompt tokens, one output token)
@@ -184,6 +194,51 @@ def dp_spread(events, windows):
     return counts
 
 
+TOKEN_KEYS = ("new_seq", "mix_new_seq", "new_token", "cached_token", "prefill_lines", "mix_lines", "hit_lines")
+
+
+def dp_tokens(events, windows):
+    """{window name: {dp_rank: {key: sum}}} over timestamped Prefill and Mix events in [start, end), keys
+    TOKEN_KEYS: new_seq / mix_new_seq the #new-seq of Prefill / Mix lines (extend rows: a chunked prompt
+    counts once per chunk), new_token and cached_token the sums of #new-token and #cached-token over both
+    (a chunked prompt continues on later lines; #cached-token is nonzero only on a request's first chunk;
+    #new-token of a Mix line includes its decode rows' tokens), and the Prefill, Mix and cache-hit line
+    counts. See the module docstring for what each field counts."""
+    out = {name: {} for name, _, _ in windows}
+    for e in events:
+        if e["kind"] not in ("Prefill", "Mix") or e["ts"] is None:
+            continue
+        for name, start, end in windows:
+            if start is None or e["ts"] < start or (end is not None and e["ts"] >= end):
+                continue
+            r = out[name].setdefault(e["dp_rank"], dict.fromkeys(TOKEN_KEYS, 0))
+            mix = e["kind"] == "Mix"
+            r["mix_new_seq" if mix else "new_seq"] += e.get("new_seq") or 0
+            r["mix_lines" if mix else "prefill_lines"] += 1
+            r["new_token"] += e.get("new_token") or 0
+            r["cached_token"] += e.get("cached_token") or 0
+            r["hit_lines"] += 1 if (e.get("cached_token") or 0) > 0 else 0
+    return out
+
+
+def render_dp_tokens(tokens, requests=None):
+    """One row per window and rank plus an "all" row; requests {window: N} adds per-request figures to "all"."""
+    rows = []
+    for name, ranks in tokens.items():
+        tot = {k: sum(r[k] for r in ranks.values()) for k in TOKEN_KEYS}
+        for label, r in [(f"rank{k}", ranks[k]) for k in sorted(ranks)] + [("all", tot)]:
+            seen = r["new_token"] + r["cached_token"]
+            row = (f"{name} {label} new_seq={r['new_seq']} mix_new_seq={r['mix_new_seq']} prefilled={r['new_token']} "
+                   f"cached={r['cached_token']} cached_share={r['cached_token'] / seen if seen else 0:.3f} "
+                   f"prefill_lines={r['prefill_lines']} mix_lines={r['mix_lines']} hit_lines={r['hit_lines']}")
+            n = (requests or {}).get(name)
+            if label == "all" and n:
+                row += (f" requests={n} prefilled_per_request={r['new_token'] / n:.0f}"
+                        f" cached_per_request={r['cached_token'] / n:.0f}")
+            rows.append(row)
+    return "\n".join(rows)
+
+
 def parse_window(text):
     """NAME=START[,END] -> (name, start_epoch_or_None, end_epoch_or_None); times are ISO 8601, UTC unless an
     offset is given."""
@@ -214,12 +269,35 @@ def dp_spread_main(argv):
     ap.add_argument("log")
     ap.add_argument("--window", action="append", required=True, metavar="NAME=START[,END]")
     ap.add_argument("--json", action="store_true", help="print {window: {rank: count}} as JSON instead")
+    ap.add_argument("--tokens", action="store_true",
+                    help="also prefilled and prefix-cached prompt tokens and line counts per rank over Prefill and "
+                         "Mix lines (dp_tokens); with --json the output is {\"spread\": ..., \"tokens\": ...}")
+    ap.add_argument("--requests", action="append", default=[], metavar="NAME=N",
+                    help="with --tokens: window NAME served N requests (from the client); adds per-request tokens")
     a = ap.parse_args(argv)
     windows = [parse_window(w) for w in a.window]
+    requests = {}
+    for text in a.requests:
+        name, _, n = text.partition("=")
+        if not _ or name not in {w[0] for w in windows} or not n.isdigit():
+            ap.error(f"--requests expects NAME=N for a --window NAME, got {text!r}")
+        requests[name] = int(n)
+    if requests and not a.tokens:
+        ap.error("--requests needs --tokens")
     with open(a.log, errors="replace") as fh:
-        counts = dp_spread(parse_lines(fh), windows)
-    print(json.dumps({n: {str(r): k for r, k in sorted(c.items())} for n, c in counts.items()}) if a.json
-          else render_dp_spread(counts))
+        events = parse_lines(fh)
+    counts = dp_spread(events, windows)
+    spread = {n: {str(r): k for r, k in sorted(c.items())} for n, c in counts.items()}
+    if not a.tokens:
+        print(json.dumps(spread) if a.json else render_dp_spread(counts))
+        return 0
+    tokens = dp_tokens(events, windows)
+    if a.json:
+        print(json.dumps({"spread": spread, "tokens": {n: {str(r): v for r, v in sorted(t.items())}
+                                                       for n, t in tokens.items()}, "requests": requests}))
+    else:
+        print(render_dp_spread(counts))
+        print(render_dp_tokens(tokens, requests))
     return 0
 
 

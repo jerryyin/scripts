@@ -68,6 +68,52 @@ def test_dp_spread_cli() -> None:
         assert out.splitlines() == ["smoke rank0=1 rank1=1 rank2=1 rank3=1 total=4", "rep1 rank0=3 rank1=5 rank3=2 total=10"]
 
 
+def tokens_log() -> list[str]:
+    return [batch(T + 1, "Prefill", 0, new_seq=2, new_token=1000, cached_token=0),
+            batch(T + 2, "Prefill", 1, new_seq=1, new_token=200, cached_token=9000),
+            batch(T + 2.5, "Mix", 1, new_seq=1, new_token=300, cached_token=0, running_req=4),
+            batch(T + 3, "Prefill", 0, new_seq=1, new_token=100, cached_token=5000),
+            batch(T + 4, "Decode", 0, running_req=3),
+            batch(T + 30, "Prefill", 1, new_seq=4, new_token=7)]  # outside the window
+
+
+def test_dp_tokens_sums_prefilled_and_cached_tokens_per_rank() -> None:
+    tok = batch_log.dp_tokens(batch_log.parse_lines(tokens_log()), [("w", T, T + 10), ("unset", None, T + 10)])
+    assert tok == {"w": {0: {"new_seq": 3, "mix_new_seq": 0, "new_token": 1100, "cached_token": 5000,
+                             "prefill_lines": 2, "mix_lines": 0, "hit_lines": 1},
+                         1: {"new_seq": 1, "mix_new_seq": 1, "new_token": 500, "cached_token": 9000,
+                             "prefill_lines": 1, "mix_lines": 1, "hit_lines": 1}},
+                   "unset": {}}
+    out = batch_log.render_dp_tokens({"w": tok["w"]}, {"w": 4}).splitlines()
+    assert out[0] == ("w rank0 new_seq=3 mix_new_seq=0 prefilled=1100 cached=5000 cached_share=0.820 "
+                      "prefill_lines=2 mix_lines=0 hit_lines=1")
+    assert out[-1] == ("w all new_seq=4 mix_new_seq=1 prefilled=1600 cached=14000 cached_share=0.897 "
+                       "prefill_lines=3 mix_lines=1 hit_lines=2 requests=4 prefilled_per_request=400 "
+                       "cached_per_request=3500")
+
+
+def test_dp_spread_tokens_cli() -> None:
+    import json
+
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "server.stderr.log"
+        log.write_text("".join(tokens_log()))
+        iso = lambda t: ts(t)[:19] + "Z"  # noqa: E731
+        cmd = [sys.executable, str(HERE / "batch_log.py"), "dp-spread", str(log), "--window", f"w={iso(T)},{iso(T + 10)}"]
+        out = subprocess.run(cmd + ["--tokens", "--requests", "w=4"], capture_output=True, text=True, check=True).stdout
+        lines = out.splitlines()
+        assert lines[0] == "w rank0=3 rank1=1 total=4" and len(lines) == 4
+        assert lines[-1].startswith("w all new_seq=4 mix_new_seq=1 prefilled=1600 cached=14000")
+        assert lines[-1].endswith("requests=4 prefilled_per_request=400 cached_per_request=3500")
+        js = json.loads(subprocess.run(cmd + ["--tokens", "--json"], capture_output=True, text=True, check=True).stdout)
+        assert js["spread"] == {"w": {"0": 3, "1": 1}} and js["tokens"]["w"]["1"]["mix_new_seq"] == 1
+        assert js["requests"] == {}
+        p = subprocess.run(cmd + ["--requests", "w=4"], capture_output=True, text=True)
+        assert p.returncode == 2 and "--requests needs --tokens" in p.stderr
+        p = subprocess.run(cmd + ["--tokens", "--requests", "x=4"], capture_output=True, text=True)
+        assert p.returncode == 2 and "NAME=N for a --window NAME" in p.stderr
+
+
 def prefill_log() -> list[str]:
     """Two prefill points: p1 = 2 requests of 1000 tokens on 2 DP ranks, chunk size 512 (valid);
     p2 = 1 request of 1000 tokens with a prefix-cache hit (cache_tokens=200, invalid)."""
