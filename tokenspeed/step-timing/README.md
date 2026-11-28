@@ -36,6 +36,19 @@ Run it from this directory (`$PWD/instrumentation.diff`). The `tokenspeed-kernel
 holds no build products; the compiled scheduler, engine and kernel extensions still come from the
 installed TokenSpeed, which must be the same commit (`1be88db0`), so the patched Python matches them.
 
+### Settings (`timed.sh` environment)
+
+| `timed.sh` | patched module reads | default | what it does |
+| --- | --- | --- | --- |
+| `STRIDE` | `TS_STEP_TIMING_LAYER_STRIDE` | 1 | **Which layers carry markers**, not which replays are sampled: `mark()` records the per-layer markers only in layers whose id % `STRIDE` == 0 (target layers and DSpark draft stages, each by its own id, a draft stage recorded as id + 1000), plus the five step-level markers (`model.begin`, `final`, `model.end`, `draft.begin`, `draft.end`). The choice is made when the decode graph is captured, so every replay of the graph, sampled or not, runs those markers and pays their cost |
+| `EVERY` | `TS_STEP_TIMING_EVERY` | 4 | **Which replays are sampled**: the hook counts every graph replay that passes through it (`before_replay`, instrumented or not) and every timed eager decode of the process, and samples the call whose count is a multiple of `EVERY` when it replays an instrumented decode graph: it records begin/end events around it, the next forward's begin, and writes one record. `EVERY=4` samples 1 replay in 4 |
+| `MAX_RECORDS` | `TS_STEP_TIMING_MAX_RECORDS` | 4000 | records per process (each TP rank); no replay is sampled after it |
+| `SYNC` | `TS_STEP_TIMING_SYNC` | 1 | 1: the forward after a sampled replay waits for it, so its marker times are its own (below); 0: never waits, only the graph-replay split is exact |
+| `EAGER` | `TS_STEP_TIMING_EAGER` | 0 | 1: also time eager decode forwards (each one sampled; pass `--enforce-eager` to `ts serve` yourself) |
+
+So `STRIDE=40 EVERY=4` times target layer 0 and draft stage 0 in every replay and writes every fourth
+replay; it is not "1 replay in 40".
+
 ### Graph-replay span against the serving step (host gap)
 
 From the 1be88db0 version on, each sampled decode-graph replay records, besides its markers:
@@ -99,8 +112,9 @@ TS_BIN=$(command -v ts) INSTR=$INSTR STRIDE=40 EVERY=4 MAX_RECORDS=200000 SYNC=1
   ./timed.sh "$OUT/step-timing" -- bash "$OUT/job.sh"
 ```
 
-`STRIDE=40` times target layer 0 and DSpark stage 0 (about 44 markers per step), the least perturbing
-setting; `MAX_RECORDS` is per process (each TP rank) and must cover every sampled replay up to the last
+`STRIDE=40` puts markers in target layer 0 and DSpark stage 0 only (36 markers per step on this TP4
+path, 32 of them on the main stream; see the marker count below), the least perturbing setting, and
+`EVERY=4` writes every fourth replay; `MAX_RECORDS` is per process (each TP rank) and must cover every sampled replay up to the last
 measured C=1 point, which comes after both warmup ladders (the default 4000 can stop recording before it;
 a C=1 request of 500 output tokens at 3.5 accepted tokens per step is about 140 replays). Then per
 measured repetition r:
@@ -200,8 +214,10 @@ graphs a DSpark drafter captures beside the decode graph (`capture_round_graphs`
 
 `STRIDE` times layers whose id % STRIDE == 0: DeepSeek V4.1 Flash has 40 target MoE layers (ids
 0..39, none dense or hash-routed) and 3 DSpark stages (ids 0..2), so `STRIDE=40` times target layer 0
-and draft stage 0 (2 of 43 MoE layers; about 44 markers per step: 20 per target layer, up to 19 per draft stage, 5 step-level), `STRIDE=20` times 2 + 1,
-`STRIDE=1` all 43. `share` projects the instrumented layers' Petit time to 40 + 3 layers. Then:
+and draft stage 0 (2 of 43 MoE layers; up to 44 markers per step: 20 per target layer, up to 19 per
+draft stage, 5 step-level; 36 under MoE TP, where the four `petit.*` markers do not fire, as measured
+at TokenSpeed 1be88db0 TP4: 36 markers, 32 on the main stream; `STRIDE=1` there: 692, 590 on the main
+stream), `STRIDE=20` times 2 + 1, `STRIDE=1` all 43. `share` projects the instrumented layers' Petit time to 40 + 3 layers. Then:
 
 ```bash
 python3 analyze_step_timing.py --dir "$OUT/step-timing" --out "$OUT/breakdown"
